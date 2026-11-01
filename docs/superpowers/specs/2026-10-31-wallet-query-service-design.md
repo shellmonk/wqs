@@ -251,28 +251,60 @@ It covers **every ingested item from all five sources**, which makes it serve tw
 
 ### 5.5 Rollups
 
+Every rollup carries three required metrics, precomputed at write time:
+
+| Metric | Session | Play |
+|---|---|---|
+| **total wins** — summed win amount | `"totalWins"` | `"totalWins"` |
+| **total plays** — summed wagered amount | `"totalPlays"` | `"totalPlays"` |
+| **number of plays** | `"playCount"` — plays in the session | `"txCount"` — transactions in the play |
+
+"Total plays" is a **monetary amount**, not a count. The count is a separate metric, and at the
+play level it counts the play's constituent transactions.
+
 ```sql
 create table "wqSession" (
-  "userId"                bigint      not null,
-  "batchId"               text        not null,
-  "startedAt"             timestamptz not null,
-  "endedAt"               timestamptz not null,
-  "productId"             int,
-  "currency"              char(3)     not null,
-  "txCount"               int         not null,
-  "txCountExclCancelled"  int         not null,
-  "playCount"             int         not null,
-  "totalStake"            numeric(20,4) not null,
-  "totalWin"              numeric(20,4) not null,
-  "net"                   numeric(20,4) not null,
-  "totalStakeExclCancelled" numeric(20,4) not null,
-  "totalWinExclCancelled"   numeric(20,4) not null,
-  "netExclCancelled"        numeric(20,4) not null,
+  "userId"                   bigint      not null,
+  "batchId"                  text        not null,
+  "startedAt"                timestamptz not null,
+  "endedAt"                  timestamptz not null,
+  "productId"                int,
+  "currency"                 char(3)     not null,
+  "txCount"                  int         not null,
+  "txCountExclCancelled"     int         not null,
+  "playCount"                int         not null,  -- number of plays
+  "playCountExclCancelled"   int         not null,
+  "totalPlays"               numeric(20,4) not null,  -- amount wagered
+  "totalWins"                numeric(20,4) not null,  -- amount won
+  "net"                      numeric(20,4) not null,  -- totalWins - totalPlays
+  "totalPlaysExclCancelled"  numeric(20,4) not null,
+  "totalWinsExclCancelled"   numeric(20,4) not null,
+  "netExclCancelled"         numeric(20,4) not null,
   primary key ("userId", "startedAt", "batchId")
+) partition by range ("startedAt");
+
+create table "wqPlay" (
+  "userId"                   bigint      not null,
+  "batchId"                  text        not null,
+  "subBatchId"               text        not null,
+  "startedAt"                timestamptz not null,
+  "endedAt"                  timestamptz not null,
+  "productId"                int,
+  "currency"                 char(3)     not null,
+  "txCount"                  int         not null,  -- number of plays, at play level
+  "txCountExclCancelled"     int         not null,
+  "totalPlays"               numeric(20,4) not null,
+  "totalWins"                numeric(20,4) not null,
+  "net"                      numeric(20,4) not null,
+  "totalPlaysExclCancelled"  numeric(20,4) not null,
+  "totalWinsExclCancelled"   numeric(20,4) not null,
+  "netExclCancelled"         numeric(20,4) not null,
+  primary key ("userId", "startedAt", "batchId", "subBatchId")
 ) partition by range ("startedAt");
 ```
 
-`"wqPlay"` follows the same pattern keyed by `("userId", "startedAt", "batchId", "subBatchId")`.
+`"net"` is derivable from the other two but is stored anyway, consistent with the rule that reads
+perform no arithmetic.
 
 Rollups carry a `"currency"` column with scalar sums. This is correct if a session never spans
 currencies and extensible if it does (open question O-4).
@@ -431,7 +463,11 @@ A cancel is a new event naming the `sourceId` it cancels. Applying it:
 
 - sets `"cancelled" = true` on the original item row;
 - decrements `"cntExclCancelled"` at the `ITEM` page unit for the original's day and month;
-- decrements the originating session's `"txCountExclCancelled"` and excl-cancelled money totals;
+- decrements the originating play's and session's `"txCountExclCancelled"` and excl-cancelled
+  money totals (`"totalPlaysExclCancelled"`, `"totalWinsExclCancelled"`, `"netExclCancelled"`);
+- decrements the session's `"playCountExclCancelled"` **only if** the affected play's surviving
+  transaction count just reached zero — the same shape of conditional as the high-level flag
+  below, one level further down;
 - recomputes `"visibleExclCancelled"` on the corresponding high-level row (§5.6) — for a session,
   true while at least one non-cancelled transaction remains; for an unsessioned item, simply
   `not cancelled`;
@@ -660,9 +696,19 @@ discriminated by `kind`; only the entry shape varies by aggregation level.
     { "kind": "SESSION",
       "batchId": "b-77",
       "occurredAt": "2026-09-14T10:02:11Z",
-      "totals": { /* precomputed */ },
+      "totals": {                      // precomputed; never computed on read
+        "totalPlays": 40.00,           //   amount wagered
+        "totalWins":  12.50,           //   amount won
+        "net":       -27.50,
+        "playCount":  8                //   number of plays
+      },
       "transactions": [ /* L1 */ ],
-      "plays": [ { "subBatchId": "...", "transactions": [ /* L2 */ ] } ] },
+      "plays": [
+        { "subBatchId": "...",
+          "totals": { "totalPlays": 5.00, "totalWins": 0.00,
+                      "net": -5.00, "txCount": 2 },   // txCount = plays, at play level
+          "transactions": [ /* L2 */ ] }
+      ] },
 
     // L1 / L2: an unsessioned item, a peer of sessions
     { "kind": "PAYMENT",
@@ -715,7 +761,7 @@ a burst of operator queries cannot starve ingestion.
 | P-1 | Any permutation or duplication of an event sequence converges to identical projection state | Locator idempotency gate; pending-cancel parking |
 | P-2 | Every stored counter equals an actual `COUNT` over the projection, for both count columns | Entire pagination contract; the session-counter-on-cancel rule (§6.3) |
 | P-3 | Concatenating all pages in order reproduces the full ordered result set — no gap, no duplicate | User-visible pagination correctness |
-| P-4 | Session total = Σ play totals = Σ transaction amounts; and L1 page count = L2 page count | Write-time aggregation |
+| P-4 | For `"totalPlays"`, `"totalWins"` and every count, session value = Σ play values = Σ transaction values, in both the all and excl-cancelled variants; `"net"` = `"totalWins"` − `"totalPlays"` everywhere; and L1 page count = L2 page count | Write-time aggregation (§5.5), including the `"playCountExclCancelled"` conditional |
 | P-5 | Counter-derived total equals a live `COUNT` for arbitrary `from`/`to` | Two-tier range decomposition (§7.5) |
 | P-6 | Counter-assisted offset returns exactly the rows naive `OFFSET` returns | The riskiest optimization in the service (§7.6) |
 | P-7 | Every item whose product is an eInstant product carries a non-null `"batchId"`, and the eInstant view's unsessioned set is always empty | The eInstant session invariant (§7.4), unenforceable as a check constraint |
@@ -959,6 +1005,7 @@ Tracing via OpenTelemetry, propagated from stream message headers where present.
 | O-5 | Which of the five sources can actually be cancelled? | No; the locator covers all sources regardless |
 | O-6 | The remaining "few other" query parameters | Required before the API contract is frozen |
 | O-7 | Exact response field contracts per view | Required before the API contract is frozen |
+| O-13 | Full field lists from the RabbitMQ stream and from each `/wallet/delta` source | **Not blocking phases 1–3.** Structural columns are known; unenumerated source fields land in `"detail" jsonb` (§5.3) and are promoted to real columns only if they need indexing or filtering |
 | O-8 | Aurora PostgreSQL major version | Assumed 16; affects Testcontainers pinning |
 | O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
 | O-10 | How does a client select the eInstant view — explicit product ids, or a category parameter? | Required before the API contract is frozen |
@@ -991,6 +1038,8 @@ Decisions made during design, with their rationale in brief.
 | Explicit datasource qualifiers | Implicit AOP routing fails silently |
 | ArchUnit, from phase 1 (§8.5) | Converts §2.2 and §10 prose rules into build failures, including the §9 security boundary |
 | Custom `AsInDatabaseStrategy` for codegen, fixed in phase 1 (§8.3) | The default strategy flattens camelCase identifiers; changing this later renames every identifier in every query |
+| Rollups carry total wins, total plays and a play count at both levels (§5.5) | Required metrics; "total plays" is a monetary amount, and at play level the count is of transactions |
+| Unenumerated source fields go to `"detail" jsonb`, promoted later if needed | Lets phases 1–3 proceed before O-13 is answered, without guessing at columns |
 | Properties introduced one per phase (§8.6) | jOOQ and property-based testing are two new mental models; ArchUnit is only a test API |
 | Unsessioned items are page units, interleaved with sessions (§7.4) | Bounds the response, gives one count and one page number, and eliminated risk R-1 |
 | The sessions/unsessioned merge happens at **write** time, into a per-view high-level page index (§5.6) | Keeps L1/L2 paging a single covering index scan, so §7.6 and §7.7 carry over unchanged; write path has ample headroom at under 100/sec |
