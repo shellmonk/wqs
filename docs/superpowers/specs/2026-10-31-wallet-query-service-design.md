@@ -36,6 +36,11 @@ WQS serves two consumers over two endpoints, with three logical views and three 
 | Integration testing | Testcontainers (Postgres + RabbitMQ) |
 | Database | AWS Aurora PostgreSQL |
 | Messaging | RabbitMQ Streams |
+| Scheduling | Quartz, clustered JDBC JobStore |
+| Mapping | MapStruct |
+| Boilerplate | Lombok |
+| Metrics | Micrometer → Prometheus / Amazon Managed Prometheus |
+| Tracing | OpenTelemetry → collector |
 
 **Virtual threads over WebFlux.** jOOQ is blocking JDBC. Virtual threads
 (`spring.threads.virtual.enabled=true`) deliver the concurrency benefit without WebFlux's
@@ -101,6 +106,47 @@ it was adopted to solve:
 Rules 2–4 concern layering rather than jOOQ specifically, and would apply to any data-access
 choice. All four are enforced by ArchUnit (§8.5) rather than by review alone.
 
+### 2.3 Mapping layer (MapStruct)
+
+Mappings exist at two boundaries: source payload → item on the write side, and jOOQ `Record` →
+domain → response DTO on the read side. Both use **MapStruct**, generating mappers at compile
+time.
+
+The reason it fits here is the same reason jOOQ does: **an unmapped field fails the build.** Adding
+a column breaks compilation twice — once at the query, once at the mapper — so schema knowledge
+stays checked rather than assumed.
+
+Rules:
+
+1. **Mappers live in the query layer** (`read/`, `projection/`), never in `api/`. A mapper
+   necessarily touches both jOOQ types and DTOs, so placing one in `api/` would violate §2.2 rule
+   2 and fail the ArchUnit check. The mapper *is* the boundary; it belongs on the inside of it.
+2. **Unmapped target properties are an error, not a warning**
+   (`unmappedTargetPolicy = ReportingPolicy.ERROR`). Downgrading this discards the entire benefit.
+3. **`"detail" jsonb` needs explicit hand-written mapping.** MapStruct cannot infer a mapping for
+   an open-ended JSON blob, so each source's `detail` projection is a named method.
+
+### 2.4 Lombok
+
+Lombok is used where it removes real boilerplate, with Java 21 records preferred where they fit:
+
+- **Prefer records** for immutable DTOs, domain value types and API response types. A record is
+  clearer than `@Value` and needs no annotation processing.
+- **Use Lombok** for `@Slf4j`, `@RequiredArgsConstructor` on Spring components with several
+  dependencies, and `@Builder` on objects with many optional fields.
+- **Avoid** `@Data` and mutable `@EqualsAndHashCode`. There are no JPA entities here, so the usual
+  justification does not arise, and mutable equality on a projection type invites subtle bugs.
+
+**Build interaction — Lombok and MapStruct collide unless ordered explicitly.** Both are annotation
+processors, and MapStruct must run *after* Lombok has generated accessors or it will not see them,
+producing mappers with silently missing fields. The `annotationProcessor` configuration must list,
+in order: `lombok`, `lombok-mapstruct-binding`, `mapstruct-processor`. Omitting the binding
+artifact is the classic failure, and its symptom is a compiling mapper that drops properties rather
+than a build error.
+
+The full clean-build chain is therefore: **Testcontainers → Flyway → jOOQ codegen → Lombok →
+MapStruct → compile.** A failure can surface several steps downstream of its cause.
+
 ---
 
 ## 3. Naming convention
@@ -108,6 +154,9 @@ choice. All four are enforced by ArchUnit (§8.5) rather than by review alone.
 Database identifiers — **both tables and columns** — are camelCase and therefore must be
 double-quoted in all DDL and hand-written SQL, because Postgres folds unquoted identifiers to
 lowercase.
+
+The one exception is Quartz, which owns its DDL and uses fixed `QRTZ_*` uppercase names. Those
+tables live in a separate `quartz` schema (§6.5) so the exception stays contained.
 
 ```sql
 create table "wqWebItem" ( "userId" bigint not null, "occurredAt" timestamptz not null, ... );
@@ -402,7 +451,7 @@ Partition management is designed so detach-and-archive can be added later withou
 
 ---
 
-## 6. Write path
+## 6. Write path and scheduled jobs
 
 ```
 RabbitMQ stream ──> StreamConsumer ──┐
@@ -491,6 +540,81 @@ whenever a matching item is ingested. This makes ingestion order-independent.
 - **Poison events** are written to `"wqDeadLetter"` with their error after N retries; the offset
   then advances and an alarm fires. Ingestion keeps flowing and the bad event is retained for
   manual replay.
+
+### 6.5 Scheduled jobs (Quartz)
+
+All recurring work runs under **Quartz with a clustered JDBC JobStore**, not Spring `@Scheduled`.
+
+**Why clustered, even though production starts as a single instance.** `@Scheduled` fires on every
+instance. The moment WQS scales out for read capacity, three instances would poll
+`/wallet/delta` concurrently and race each other's watermark updates — duplicating work and
+risking a skipped page. Quartz guarantees exactly one instance runs each trigger. Specifying the
+clustered JobStore now costs the `QRTZ_*` tables up front and behaves identically on one instance,
+but means scaling out never requires revisiting scheduling. Getting this wrong is silent: the
+pollers keep working, just incorrectly.
+
+**Operational requirement:** clustered Quartz relies on database-coordinated locks and comparable
+clocks across instances. Nodes must have synchronised time (NTP) and distinct instance ids; clock
+skew produces duplicate or missed fires.
+
+**Schema exception.** Quartz owns its DDL and uses fixed `QRTZ_*` uppercase names, which cannot
+follow §3. Those tables therefore live in a **separate `quartz` schema**, keeping them out of the
+`wq*` namespace and excluded from jOOQ code generation (§8.3). The DDL ships as a Flyway migration.
+
+**The jobs:**
+
+| Job | Purpose | Reference |
+|---|---|---|
+| `deltaPoll` (one per source) | Poll `/wallet/delta` with watermark and overlap | §4, §6 |
+| `partitionRollover` | Ensure N months of partitions exist ahead | §5.8 |
+| `counterReconciliation` | Sample counters against actual counts, emit drift | §8.7 |
+| `highLevelReconciliation` | Sample the high-level index against its sources | §8.7 |
+| `pendingCancelSweep` | Report pending cancels older than a threshold | §6.3 |
+| `deadLetterReport` | Surface dead-letter depth and age | §6.4 |
+
+Every job class carries `@DisallowConcurrentExecution`. For the delta pollers this is a
+correctness requirement, not tidiness: two overlapping polls of the same source would race the
+same watermark row.
+
+**Configuration from application properties.** Jobs are declared in config, not in code:
+
+```yaml
+wqs:
+  jobs:
+    delta-payments:
+      enabled: true
+      intervalSeconds: 5
+      misfirePolicy: do-nothing        # never queue catch-up fires
+      overlapWindowSeconds: 120
+      pageLimit: 1000
+    partition-rollover:
+      enabled: true
+      cron: "0 0 3 * * ?"
+      monthsAhead: 3
+    counter-reconciliation:
+      enabled: true
+      cron: "0 15 * * * ?"
+      sampleSize: 500
+```
+
+A job accepts either `cron` or `intervalSeconds`. Bound via `@ConfigurationProperties` to a map of
+job name → settings.
+
+**Startup reconciliation of triggers.** Because a clustered JobStore persists jobs and triggers in
+the database, changing a schedule in configuration does not by itself change the stored trigger. At
+startup WQS reconciles declared configuration against stored Quartz state: register missing jobs,
+reschedule changed triggers, pause disabled ones, and delete orphans whose configuration has been
+removed. Without this step a cron change appears to be ignored, which is a confusing failure to
+diagnose.
+
+**Misfire policy matters for the pollers.** The default Quartz behaviour would queue catch-up fires
+after downtime; for a poller that already catches up by advancing its own watermark, that produces
+a thundering herd of redundant polls. `do-nothing` is correct — skip the missed fires and let the
+next scheduled run read from the watermark.
+
+**Cost note.** Delta polling every few seconds through a clustered JobStore means a trigger
+acquisition round-trip to the writer per fire, per source. At this scale that is negligible, but it
+is load on the writer rather than a reader, and so is sized accordingly in the write pool (§7.10).
 
 ---
 
@@ -803,8 +927,8 @@ code. The codegen configuration must therefore exclude them by pattern:
 excludes = .*_\d{4}_\d{2}
 ```
 
-`flyway_schema_history` must also be excluded; it is Flyway's bookkeeping table and has no place
-in generated code.
+`flyway_schema_history` and the entire `quartz` schema (§6.5) must also be excluded; both are
+infrastructure bookkeeping with no place in generated code.
 
 Use the **official `jooq-codegen-gradle` plugin** (available since jOOQ 3.19), not the older
 third-party Gradle plugin.
@@ -820,8 +944,16 @@ public class AsInDatabaseStrategy extends DefaultGeneratorStrategy {
     public String getJavaIdentifier(Definition definition) {
         return definition.getOutputName();   // "occurredAt" stays occurredAt
     }
+    // Deliberately does NOT override getJavaGetterName / getJavaSetterName — see below.
 }
 ```
+
+**Override only `getJavaIdentifier`.** jOOQ's documented `AsInDatabaseStrategy` example also
+overrides `getJavaGetterName` and `getJavaSetterName` to return `"get" + outputName`, which for
+`"occurredAt"` yields `getoccurredAt()` — not a JavaBean accessor. MapStruct (§2.3) would fail to
+recognise it as a property. Overriding the identifier alone gives identifiers that read like the
+schema *and* conventional accessors: `WqWebItem.occurredAt` with `getOccurredAt()`. Copying the
+whole documented example is the trap here.
 
 jOOQ's declarative matcher strategy is an equivalent alternative if regex configuration is
 preferred over a Java class. Either way the choice is effectively a second naming convention
@@ -870,6 +1002,8 @@ them from prose into build failures.
 | Layering: `api` → `read`/`projection` → `domain`; `ingest` → `projection`; nothing depends on `api` | §10 |
 | Production code must not depend on the naive-`OFFSET` oracle | §8.1 — the oracle is test-only by design |
 | Only `projection/` may inject the writer-qualified `DSLContext` | §10 — explicit datasource routing |
+| MapStruct mappers must not reside in `api/` | §2.3 rule 1 |
+| `jobs/` classes must not be depended on by anything else | §10 — jobs are entry points, never collaborators |
 
 The third rule is the most valuable: §9 claims `/web` cannot leak operator data because it queries
 a table that structurally cannot contain it. This makes that claim checkable, so reusing a
@@ -906,10 +1040,22 @@ Properties are introduced one phase at a time per §15, rather than all six at o
 
 ### 8.7 Production invariant checking
 
-A periodic **counter reconciliation job** samples stored counters against actual counts and emits
-a drift metric. P-2 proves the invariant in CI; this proves it in production, where real cancels
-and real out-of-order arrivals live. Pagination drift surfaces as an alert rather than a support
-ticket.
+Two properties are proven in CI against generated data but can still drift in production, where
+real cancels and real out-of-order arrivals live. Both get a **reconciliation job** (§6.5) that
+samples and emits a drift metric:
+
+| Job | Samples | CI counterpart |
+|---|---|---|
+| `counterReconciliation` | stored counters against actual counts | P-2 |
+| `highLevelReconciliation` | high-level index rows against sessions and null-`batchId` items, including `"visibleExclCancelled"` | P-8 |
+
+The second exists because the high-level index is a **materialised merge** (§5.6). A read-time
+union could never disagree with its sources; a materialised one can. That is the cost accepted
+when the merge moved to write time, and this job is how the cost is managed.
+
+Both emit **drift as a gauge, alarmed at any non-zero value** (§11). Correctness is not a
+percentage target — pagination that silently lies about page counts is an incident, not a
+degradation.
 
 ---
 
@@ -947,13 +1093,24 @@ wqs/
     └── src/main/java/<pkg>/
         ├── api/web|cc/          # controllers, DTOs, OpenAPI, parameter validation
         ├── read/                # query builders per level, counter reader,
-        │                        #   offset resolver, assemblers
+        │                        #   offset resolver, assemblers, response mappers
         ├── ingest/stream|delta/ # consumer + offset store; pollers + watermarks
         ├── projection/          # ProjectionWriter, normalizers, rollup and
-        │                        #   counter updaters, pending-cancel drain
+        │                        #   counter updaters, pending-cancel drain,
+        │                        #   source-payload mappers
+        ├── jobs/                # Quartz job classes + config-driven registration
         ├── domain/              # ViewKind, PageUnit, AggregationLevel, Money
-        └── config/              # writer/reader datasources, pools, scheduling
+        └── config/              # writer/reader datasources, pools, Quartz,
+                                 #   job properties binding
 ```
+
+**MapStruct mappers live in `read/` and `projection/`, never in `api/`** (§2.3). A mapper touches
+both jOOQ types and DTOs by definition, so putting one in `api/` would violate §2.2 rule 2 and
+fail the ArchUnit check. The mapper is the boundary and belongs on the inside of it.
+
+**`jobs/` holds Quartz job classes only** — thin wrappers that delegate to `ingest/`,
+`projection/` or maintenance components. No business logic lives in a job class, so a job can be
+triggered manually or tested directly without the scheduler.
 
 Two modules rather than one or six. `db` isolates code generation because generated classes are a
 build artifact, so a migration change rebuilds exactly one jar. Splitting further would add Gradle
@@ -968,16 +1125,133 @@ would not surface until load.
 
 ## 11. Observability
 
-Micrometer metrics:
+Observability is a first-class requirement, not a closing phase. **Every phase ships its own
+instrumentation**, so the component built in that phase is observable the day it exists.
 
-- **ingest lag** — `now()` minus `"occurredAt"` of the last projected event, per source
-- batch size and batch duration
-- dead-letter rate
-- pending-cancel depth
-- counter drift (§8.7)
-- per-endpoint latency by aggregation level and page depth
+Stack: **Micrometer → Prometheus / Amazon Managed Prometheus** via a scrape endpoint,
+**OpenTelemetry** traces to a collector, and structured JSON logs.
 
-Tracing via OpenTelemetry, propagated from stream message headers where present.
+### 11.1 The four signals that matter
+
+Everything below serves one of four questions. If only four dashboards existed, these are they:
+
+| Signal | Question | Headline metric |
+|---|---|---|
+| **Freshness** | Is the projection current? | `wqs.ingest.lag.seconds` |
+| **Performance** | Are reads fast? | `wqs.read.duration` |
+| **Correctness** | Is the projection telling the truth? | `wqs.reconcile.*.drift` |
+| **Runway** | Will it break on a future date? | `wqs.partition.runway.months` |
+
+The fourth is unusual and easy to omit. A failed partition rollover is invisible until midnight on
+the first of the month, at which point every insert fails. It is the highest-severity *silent*
+failure in the design, so it gets a first-class signal.
+
+### 11.2 Metrics
+
+**Ingestion**
+
+| Metric | Type | Tags | Notes |
+|---|---|---|---|
+| `wqs.ingest.lag.seconds` | gauge | source | `now()` − `"occurredAt"` of last projected event |
+| `wqs.ingest.stream.offset.lag` | gauge | — | stream head offset − committed offset |
+| `wqs.ingest.batch.size` | histogram | — | |
+| `wqs.ingest.batch.duration` | timer | — | |
+| `wqs.ingest.events` | counter | source, outcome | `projected` \| `duplicate` \| `deadlettered` |
+| `wqs.pendingcancel.depth` | gauge | — | |
+| `wqs.pendingcancel.oldest.age.seconds` | gauge | — | an *aging* set means cancels never resolve |
+| `wqs.delta.rows.fetched` | histogram | source | |
+| `wqs.delta.page.saturated` | counter | source | polls returning exactly `pageLimit` — saturation |
+| `wqs.delta.watermark.age.seconds` | gauge | source | detects a stuck poller |
+| `wqs.delta.timestampcliff` | counter | source | the unhandleable condition in §4 |
+
+The `duplicate` outcome is a signal, not noise: a rising duplicate ratio means the delta overlap
+window is wider than it needs to be, or the stream is replaying.
+
+**Read path**
+
+| Metric | Type | Tags | Notes |
+|---|---|---|---|
+| `wqs.read.duration` | timer | endpoint, aggregationLevel, pageDepthBucket | |
+| `wqs.read.partitions.touched` | histogram | aggregationLevel | |
+| `wqs.read.residual.offset` | histogram | — | offset remaining after the counter walk |
+| `wqs.read.counter.rows` | histogram | — | counter rows summed per request |
+| `wqs.read.pagesize` | histogram | endpoint | monitors R-2 directly |
+| `wqs.read.totalitems` | histogram | endpoint | |
+
+`partitions.touched` and `residual.offset` together are the observable proxy for **"is
+counter-assisted offset still working?"** Both should stay small and flat. If either climbs, the
+optimisation in §7.6 is degrading — probably because counters are sparse where they were assumed
+dense — and reads will slow before any query is logically wrong.
+
+**Correctness**
+
+| Metric | Type | Notes |
+|---|---|---|
+| `wqs.reconcile.counter.drift` | gauge | §8.7; any non-zero value is an incident |
+| `wqs.reconcile.highlevel.drift` | gauge | §8.7 |
+| `wqs.deadletter.depth` | gauge | |
+
+**Infrastructure**
+
+| Metric | Type | Notes |
+|---|---|---|
+| HikariCP metrics | — | **tagged by pool: `writer` \| `reader`.** Writer starvation is a named failure mode (§7.10) |
+| `wqs.partition.runway.months` | gauge | months of partitions provisioned ahead |
+| `wqs.job.duration` | timer | tagged by job (§6.5) |
+| `wqs.job.outcome` | counter | job, result |
+| `wqs.job.misfires` | counter | job |
+| Aurora replica lag | gauge | from CloudWatch, or probed against a reader |
+
+### 11.3 Tracing
+
+OpenTelemetry, with **trace context propagated from RabbitMQ stream message headers**, so an
+ingest batch links back to the wallet operation that produced the event. That cross-service link is
+the main reason to prefer OTel here over a local-only approach.
+
+- **Ingest:** span per batch, child spans per projection step — locator gate, item insert, rollup
+  upsert, high-level upsert, counter deltas, offset commit. The step breakdown is what tells you
+  *which* part of a slow batch is slow.
+- **Read:** span per request, child spans for the counter walk, the slice query, and each assembly
+  query.
+
+### 11.4 Logging
+
+Structured JSON with trace and span ids. Because this is wallet data, logging is deliberately
+minimal: **`userId` appears as an identifier only, and amounts, balances and `"detail"` payloads are
+never logged at `INFO`.** Financial values appear in logs only at `DEBUG`, which is off in
+production.
+
+### 11.5 SLOs
+
+Proposed targets, expected to be tuned against real traffic:
+
+| SLO | Target |
+|---|---|
+| Projection freshness | p99 `ingest.lag` < 5s |
+| Read latency, level 0 | p99 < 150ms |
+| Read latency, levels 1–2 | p99 < 400ms |
+| Read availability | 99.9% |
+| Correctness | drift = 0, always |
+
+Correctness has no percentage. Any drift means page counts are wrong.
+
+### 11.6 Alarms
+
+| Alarm | Condition | Why it matters |
+|---|---|---|
+| Freshness breach | `ingest.lag` p99 > 5s for 5 min | SLO breach |
+| **Partition runway** | `partition.runway.months` < 2 | **inserts will fail at a month boundary** |
+| Counter drift | `reconcile.counter.drift` ≠ 0 | pagination is lying |
+| High-level drift | `reconcile.highlevel.drift` ≠ 0 | page counts and ordering wrong |
+| Poller stuck | `delta.watermark.age` > 10× poll interval | silent data gap |
+| Timestamp cliff | `delta.timestampcliff` > 0 | unhandleable until O-1 |
+| Dead-letter rate | sustained increase | systemic ingest break, not one bad row |
+| Pending cancels aging | `pendingcancel.oldest.age` > 24h | cancellations not being applied |
+| Writer pool saturation | active = max for 1 min | ingestion starving (§7.10) |
+| Page size abuse | `read.pagesize` p99 above threshold | R-2 materialising; the §7.9 ceiling can be enabled |
+
+The partition-runway alarm deserves its emphasis: it is the only alarm here that fires *before*
+anything is broken, and it is the only failure whose impact is total.
 
 ---
 
@@ -1040,6 +1314,14 @@ Decisions made during design, with their rationale in brief.
 | Custom `AsInDatabaseStrategy` for codegen, fixed in phase 1 (§8.3) | The default strategy flattens camelCase identifiers; changing this later renames every identifier in every query |
 | Rollups carry total wins, total plays and a play count at both levels (§5.5) | Required metrics; "total plays" is a monetary amount, and at play level the count is of transactions |
 | Unenumerated source fields go to `"detail" jsonb`, promoted later if needed | Lets phases 1–3 proceed before O-13 is answered, without guessing at columns |
+| Quartz with a clustered JDBC JobStore, not `@Scheduled` (§6.5) | `@Scheduled` fires on every instance; scaling out would race the delta watermarks. Silent when wrong |
+| Jobs declared in application properties, reconciled against stored triggers at startup (§6.5) | A persistent JobStore ignores config changes otherwise, which is a confusing failure to diagnose |
+| Quartz `QRTZ_*` tables in a separate `quartz` schema | Quartz owns its DDL and cannot follow §3; a separate schema contains the exception and keeps codegen clean |
+| MapStruct for all boundary mapping (§2.3) | Unmapped fields fail the build, extending the one-source-of-truth property into the mapping layer |
+| Override only `getJavaIdentifier` in the generator strategy (§8.3) | jOOQ's own documented example breaks JavaBean accessors and therefore MapStruct |
+| Lombok where it removes real boilerplate; records preferred (§2.4) | Records cover immutable types more clearly; `lombok-mapstruct-binding` is mandatory or mappers silently drop fields |
+| Observability instrumented per phase, not as a closing phase (§11) | Each component is observable the day it exists; alarms and SLOs defined rather than deferred |
+| Reconciliation jobs for both counters and the high-level index (§8.7) | A materialised merge can drift from its sources; this is the managed cost of moving the merge to write time |
 | Properties introduced one per phase (§8.6) | jOOQ and property-based testing are two new mental models; ArchUnit is only a test API |
 | Unsessioned items are page units, interleaved with sessions (§7.4) | Bounds the response, gives one count and one page number, and eliminated risk R-1 |
 | The sessions/unsessioned merge happens at **write** time, into a per-view high-level page index (§5.6) | Keeps L1/L2 paging a single covering index scan, so §7.6 and §7.7 carry over unchanged; write path has ample headroom at under 100/sec |
@@ -1057,13 +1339,18 @@ Each phase ends with its named properties passing — not with code merely compi
 
 | Phase | Scope | Ends green on |
 |---|---|---|
-| 1 | Gradle two-module skeleton; Flyway + Testcontainers-backed jOOQ codegen incl. **generator strategy and exclusions**; item tables, partitions, app-managed partition rollover; `"wqProduct"`, `"wqItemLocator"`; **ArchUnit rule set** | Partition rollover tests; codegen reproducibility; architecture tests |
+| 1 | Gradle two-module skeleton; Flyway + Testcontainers-backed jOOQ codegen incl. **generator strategy and exclusions**; Lombok + MapStruct processor chain; **Quartz schema and config-driven job registration**; item tables, partitions, partition rollover job; `"wqProduct"`, `"wqItemLocator"`; **ArchUnit rule set** | Partition rollover tests; trigger reconciliation tests; codegen reproducibility; architecture tests |
 | 2 | Stream consumer, `ProjectionWriter`, idempotency gate, offset store in Postgres | **P-1** |
 | 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
 | 4 | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (stubbed pending O-2) | **P-3**, **P-5**, **P-6**, security test (§9) |
 | 5 | Levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | P-3 extended to the high-level page unit; **P-7** |
 | 6 | Delta pollers for the four polled sources; watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
-| 7 | Observability, counter reconciliation job, benchmark harness and recorded baselines | Drift metric; baseline capture |
+| 7 | Reconciliation jobs, SLO dashboards and alarms, benchmark harness and recorded baselines | Drift metrics at zero; alarms firing on injected faults; baseline capture |
+
+**Observability is not phase 7.** Each phase ships the metrics for what it builds — ingest lag and
+batch metrics in phase 2, drift gauges in phase 3, read latency and offset-health metrics in
+phases 4–5. Phase 7 adds the reconciliation *jobs*, the dashboards, the alarms and the benchmark
+baselines, not the instrumentation itself.
 
 **Phase ordering rationale.** Ingestion precedes reads because the read path's properties need real
 projected data to assert against, and the Jqwik generators built in phase 2 are reused as the data
