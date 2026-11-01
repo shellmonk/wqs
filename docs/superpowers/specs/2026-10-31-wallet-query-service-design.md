@@ -1,0 +1,987 @@
+# Wallet Query Service (WQS) — Design
+
+**Date:** 2026-10-31
+**Status:** Approved design, pending implementation plan
+
+---
+
+## 1. Purpose
+
+WQS is the read side of a CQRS split. The wallet service owns transaction writes; WQS owns
+transaction-history queries. The wallet's main transaction table has grown past 150 million rows,
+and serving history from it competes with the write path. WQS maintains independent read
+projections so history queries never touch wallet's write tables.
+
+WQS serves two consumers over two endpoints, with three logical views and three aggregation levels.
+
+### Non-goals
+
+- WQS never writes to wallet-owned data. It is read-only with respect to the source system.
+- WQS is not a reporting or analytics warehouse. Every query is scoped to a single user.
+- WQS does not own authentication. It consumes an already-established principal.
+
+---
+
+## 2. Technology
+
+| Concern | Choice |
+|---|---|
+| Language | Java 21 (virtual threads enabled) |
+| Framework | Spring Boot 3.x, MVC (not WebFlux) |
+| Build | Gradle, two subprojects |
+| SQL | jOOQ |
+| Migrations | Flyway |
+| Property testing | Jqwik |
+| Architecture testing | ArchUnit |
+| Integration testing | Testcontainers (Postgres + RabbitMQ) |
+| Database | AWS Aurora PostgreSQL |
+| Messaging | RabbitMQ Streams |
+
+**Virtual threads over WebFlux.** jOOQ is blocking JDBC. Virtual threads
+(`spring.threads.virtual.enabled=true`) deliver the concurrency benefit without WebFlux's
+pervasive reactive types. R2DBC is explicitly rejected: it would force either a reactive jOOQ
+dialect or a split persistence stack, for no benefit at this read volume.
+
+### 2.1 Why jOOQ (decision reviewed 2026-11-01)
+
+The choice was challenged and reaffirmed. The reasons, strongest first:
+
+1. **Index-only scans stay enforceable.** §7.7 stakes read performance on a single covering index
+   with `INCLUDE` columns, which only works if queries select exactly the covered columns.
+   Selecting one extra column silently degrades to heap fetches — no error, no test failure. jOOQ
+   makes the projection list explicit at the call site, so the invariant is visible and reviewable.
+   An ORM hydrating entities selects whatever the entity declares, making a core performance
+   invariant invisible and breakable by an unrelated field addition.
+2. **One source of schema truth.** Generating from Flyway migrations (§8.3) means a schema change
+   that breaks a query fails the **build**, not a rarely-hit runtime branch. There are no entities
+   to drift and no query strings to drift.
+3. **Dynamic composition is the dominant query shape.** The read path is a filter matrix across
+   three aggregation levels and two view tables, and it will grow (O-6). Composing that with
+   strings is where both injection and malformed-SQL defects originate; composing it with a typed
+   DSL is checked.
+4. **camelCase quoting is handled structurally** (§3) rather than by per-query discipline.
+5. **No ORM semantics are needed.** WQS persists no mutable object graph — it projects immutable
+   events into denormalized tables and reads them back flat. Hibernate's dirty checking, L1 cache,
+   lazy loading and cascades are overhead with no corresponding benefit, and `@Entity` mapping
+   fights partitioned tables and composite keys for nothing.
+
+**Organizational context.** The team's existing codebase uses Spring Data JPA alongside largely
+raw SQL, which has produced two unchecked descriptions of the same schema. WQS is a deliberate
+pilot of a single-model alternative: self-contained, no legacy entities, a twelve-table schema, and
+performance-critical enough that the benefits are observable. jOOQ coexists with JPA, so no other
+service is forced to migrate.
+
+**Accepted risk (R-6).** An unfamiliar data-access library is being introduced on the service with
+the strictest performance requirements. Mitigated by build-time codegen catching schema drift and
+by properties P-2, P-5 and P-6 catching logic errors against oracles.
+
+**Serious alternative considered.** `JdbcClient` with handwritten SQL was the only real contender —
+simpler build, no Docker dependency, full control. Rejected because the query set is neither small
+nor static, and because it would reproduce the unchecked-string problem the pilot exists to solve.
+Spring Data JPA, MyBatis, QueryDSL and R2DBC were each rejected on the grounds above.
+
+### 2.2 jOOQ usage rules
+
+These exist because jOOQ codebases have their own failure modes, all of which recreate the problem
+it was adopted to solve:
+
+1. **`DSL.field(String)` and `.sql(...)` are prohibited** without an explicit, commented
+   justification. They reintroduce unchecked strings *inside* jOOQ while appearing safe. Always use
+   generated table and field constants. Enforced by review, and by an ArchUnit rule where
+   practical.
+2. **jOOQ types stay inside the query layer** (`read/`, `projection/`). Neither `DSLContext` nor
+   generated types may appear in `api/` or `domain/`.
+3. **Generated `Record` types are never returned upward.** Map to domain types or DTOs at the
+   query-layer boundary, or the API contract becomes coupled to table shape — forfeiting the
+   freedom to reshape tables that this design depends on.
+4. **One query class per (view, aggregation level)**, not a single builder parameterized by
+   booleans. The combinatorial filter space is the most likely thing to rot into unreadable
+   conditionals.
+
+Rules 2–4 concern layering rather than jOOQ specifically, and would apply to any data-access
+choice. All four are enforced by ArchUnit (§8.5) rather than by review alone.
+
+---
+
+## 3. Naming convention
+
+Database identifiers — **both tables and columns** — are camelCase and therefore must be
+double-quoted in all DDL and hand-written SQL, because Postgres folds unquoted identifiers to
+lowercase.
+
+```sql
+create table "wqWebItem" ( "userId" bigint not null, "occurredAt" timestamptz not null, ... );
+```
+
+jOOQ quotes identifiers by default, so generated classes and all jOOQ-built queries need no
+special handling. Flyway migrations are raw SQL and are the only surface where a missing quote
+pair can ship silently.
+
+**Mitigation:** a build-time check fails the build if any migration file contains an unquoted
+`wq[A-Z]` identifier.
+
+---
+
+## 4. Data sources
+
+Five sources feed WQS.
+
+| # | Source | Transport | Feeds |
+|---|---|---|---|
+| 1 | Transactions | RabbitMQ stream (push) | `/web` and `/cc` |
+| 2 | Manual adjustments | `/wallet/delta` (poll) | `/cc` only |
+| 3 | Claimable prizes | `/wallet/delta` (poll) | `/web` and `/cc` |
+| 4 | Payments | `/wallet/delta` (poll) | `/cc` only |
+| 5 | Limits | `/wallet/delta` (poll) | `/cc` only |
+
+All sources are append-only in the wallet. Cancellation arrives as a **new event referencing the
+original transaction**, which makes WQS projections mutable even though sources are immutable.
+
+### Delta endpoint contract
+
+`GET /wallet/delta` accepts a timestamp and returns up to **1000** changed rows.
+
+Two hazards follow from a timestamp-only cursor:
+
+1. **Late commits.** A row stamped `T` may commit after WQS has polled past `T`. Mitigated by
+   always polling from `lastTs − overlapWindow`, where the overlap safely exceeds the longest
+   wallet write transaction. Re-reads are absorbed at zero cost by the idempotency gate (§6.2).
+2. **Timestamp cliff.** If more than 1000 rows share one timestamp, advancing the watermark to
+   `max(ts)` re-fetches the same page indefinitely. WQS **detects this condition and alarms
+   loudly**; it must not silently stall or skip. A tiebreaker field on the delta response is
+   expected to resolve this (open question O-1).
+
+---
+
+## 5. Data model
+
+### 5.1 Tables
+
+| Table | Purpose | Partitioning |
+|---|---|---|
+| `"wqWebItem"` | Level-0 rows for user views (transactions + prizes) | monthly on `"occurredAt"` |
+| `"wqCcItem"` | Level-0 rows for the operator unified view (all 5 sources) | monthly on `"occurredAt"` |
+| `"wqSession"` | Session rollup with precomputed aggregates | monthly on `"startedAt"` |
+| `"wqPlay"` | Play rollup with precomputed aggregates | monthly on `"startedAt"` |
+| `"wqWebHighLevel"` | L1/L2 page index for user views — one row per session or unsessioned item | monthly on `"occurredAt"` |
+| `"wqCcHighLevel"` | L1/L2 page index for the operator view | monthly on `"occurredAt"` |
+| `"wqCountMonth"` | Tier-1 pagination totals | yearly |
+| `"wqCountDay"` | Tier-2 pagination totals for partial months | monthly |
+| `"wqItemLocator"` | Global `sourceId` → partition locator; idempotency gate | **not partitioned** |
+| `"wqPendingCancel"` | Cancels whose original has not yet arrived | not partitioned |
+| `"wqDeadLetter"` | Events that repeatedly failed to project | not partitioned |
+| `"wqIngestWatermark"` | Delta cursor per source | not partitioned |
+| `"wqStreamOffset"` | RabbitMQ stream offset | not partitioned |
+| `"wqProduct"` | Product dimension and category | not partitioned |
+
+Monthly partitions are named from the parent with a period suffix: `"wqWebItem_2026_10"`.
+Partition names are generated programmatically, so consistency matters more than aesthetics.
+
+### 5.2 Deliberate duplication across view tables
+
+Transactions and claimable prizes are stored in **both** `"wqWebItem"` and `"wqCcItem"`.
+
+This roughly doubles storage for those two sources. It is accepted deliberately: the user-facing
+path is the overwhelming majority of traffic, and giving it an index containing no payments,
+limits or manual adjustments keeps that index smaller, denser and more likely to stay resident in
+Aurora's buffer cache. A single shared table would make the hot path pay for operator-only rows on
+every index probe.
+
+A second benefit is security by schema (§9): `/web` structurally cannot return operator-only
+sources, because they are not in the table it queries.
+
+### 5.3 Item tables
+
+```sql
+create table "wqWebItem" (
+  "userId"        bigint      not null,
+  "itemId"        bigint      not null,
+  "source"        smallint    not null,   -- 1=TRANSACTION, 3=CLAIMABLE_PRIZE
+  "sourceId"      text        not null,
+  "occurredAt"    timestamptz not null,
+  "productId"     int,
+  "batchId"       text,                   -- session
+  "subBatchId"    text,                   -- individual play
+  "type"          smallint    not null,
+  "amount"        numeric(20,4) not null,
+  "currency"      char(3)     not null,
+  "balanceAfter"  numeric(20,4),
+  "cancelled"     boolean     not null default false,
+  "cancelledBy"   text,                   -- sourceId of the cancelling event
+  "cancels"       text,                   -- sourceId this event cancels
+  "detail"        jsonb,                  -- product-specific fields (e.g. eInstant game data)
+  "ingestedAt"    timestamptz not null default now(),
+  primary key ("userId", "occurredAt", "itemId")
+) partition by range ("occurredAt");
+```
+
+The primary key leads with `"userId"` and includes the partition key, which Postgres requires. That
+single index serves the mandatory access pattern — user-scoped, range-bounded, newest-first — as an
+index-only scan.
+
+`"wqCcItem"` has the same shape, with `"source"` spanning all five values.
+
+### 5.4 Why `"wqItemLocator"` is not partitioned
+
+A cancel event references the original transaction's `sourceId` but carries no timestamp for it.
+Since the item tables are partitioned by time, resolving that reference against a partitioned
+index means probing every monthly partition — over sixty probes after five years, none of which
+can be pruned.
+
+```sql
+create table "wqItemLocator" (
+  "source"     smallint    not null,
+  "sourceId"   text        not null,
+  "userId"     bigint      not null,
+  "occurredAt" timestamptz not null,
+  "itemId"     bigint      not null,
+  primary key ("source", "sourceId")
+);
+```
+
+It covers **every ingested item from all five sources**, which makes it serve two purposes:
+
+1. One index lookup resolves a cancel to its original's exact partition.
+2. It is the **idempotency gate**. An `insert … on conflict do nothing` that conflicts means the
+   event has already been applied, so it is dropped. This is what makes ingestion idempotent
+   without any source-specific dedupe logic.
+
+### 5.5 Rollups
+
+```sql
+create table "wqSession" (
+  "userId"                bigint      not null,
+  "batchId"               text        not null,
+  "startedAt"             timestamptz not null,
+  "endedAt"               timestamptz not null,
+  "productId"             int,
+  "currency"              char(3)     not null,
+  "txCount"               int         not null,
+  "txCountExclCancelled"  int         not null,
+  "playCount"             int         not null,
+  "totalStake"            numeric(20,4) not null,
+  "totalWin"              numeric(20,4) not null,
+  "net"                   numeric(20,4) not null,
+  "totalStakeExclCancelled" numeric(20,4) not null,
+  "totalWinExclCancelled"   numeric(20,4) not null,
+  "netExclCancelled"        numeric(20,4) not null,
+  primary key ("userId", "startedAt", "batchId")
+) partition by range ("startedAt");
+```
+
+`"wqPlay"` follows the same pattern keyed by `("userId", "startedAt", "batchId", "subBatchId")`.
+
+Rollups carry a `"currency"` column with scalar sums. This is correct if a session never spans
+currencies and extensible if it does (open question O-4).
+
+### 5.6 High-level page index
+
+At levels 1 and 2 a page unit is either a session or an unsessioned item (§7.4). Those live in
+differently-shaped tables, so the merge is performed **at write time** into a narrow page index —
+one per view, following the §5.2 reasoning:
+
+```sql
+create table "wqWebHighLevel" (
+  "userId"               bigint      not null,
+  "occurredAt"           timestamptz not null,  -- session "startedAt", or the item's "occurredAt"
+  "kind"                 smallint    not null,  -- 0 = SESSION, otherwise the source type
+  "refId"                text        not null,  -- "batchId" for a session, "sourceId" for an item
+  "productId"            int,
+  "currency"             char(3)     not null,
+  "visibleExclCancelled" boolean     not null default true,
+  primary key ("userId", "occurredAt", "kind", "refId")
+) partition by range ("occurredAt");
+```
+
+This is a **page index, not a payload store.** It carries only what ordering, filtering and
+counting require; payload is fetched by `"refId"` during assembly (§7.3). Keeping it narrow is the
+point — it is the structure every L1/L2 query scans.
+
+Consequences, all of them simplifications:
+
+- **Paging stays a single covering index scan.** Counter-assisted offset (§7.6) and the index-only
+  guarantee (§7.7) carry over to levels 1 and 2 completely unchanged, because the merge has
+  already happened.
+- **Counters count rows in this table**, so the high-level count needs no special arithmetic.
+- **`"visibleExclCancelled"` collapses the subtlest rule in the design.** For a session it is true
+  while at least one non-cancelled transaction remains; for an unsessioned item it is simply
+  `not cancelled`. The `excludeCancelledTransactions` filter becomes a predicate on one column,
+  and the counter rule becomes uniform: **decrement `"cntExclCancelled"` exactly when this flag
+  flips true → false.** The conditional described in §6.3 is now maintained in one place instead of
+  being recomputed per query.
+- Sessions sort by `"startedAt"`. A late transaction joining an old session does not move its
+  high-level row, and correctly does not increment any counter, because the row already exists.
+
+Covering index: `("userId", "occurredAt" desc) include ("kind", "refId", "productId",
+"visibleExclCancelled")`.
+
+### 5.7 Counters
+
+```sql
+create table "wqCountMonth" (
+  "userId"            bigint   not null,
+  "viewKind"          smallint not null,  -- 1=WEB, 2=CC
+  "pageUnit"          smallint not null,  -- 0=ITEM (L0), 1=HIGH_LEVEL (L1/L2)
+  "productId"         int      not null,  -- 0 = ALL-PRODUCTS sentinel
+  "period"            date     not null,  -- first day of month, UTC
+  "cntAll"            bigint   not null,
+  "cntExclCancelled"  bigint   not null,
+  primary key ("userId", "viewKind", "pageUnit", "productId", "period")
+);
+```
+
+`"wqCountDay"` is identical with `"period"` as a UTC date, partitioned monthly.
+
+Design notes:
+
+- **`"pageUnit"` has only two values.** `ITEM` counts rows in the view's item table, for level 0.
+  `HIGH_LEVEL` counts rows in the view's high-level page index (§5.6) — sessions *and* unsessioned
+  items — for levels 1 and 2. Levels 1 and 2 differ only in payload nesting, so they share
+  counters entirely and always report identical page counts.
+- **The `HIGH_LEVEL` increment rule follows from the page index.** Because the counter counts rows
+  in `"wq*HighLevel"`, it increments exactly when a row is inserted there: once when a session is
+  first created, and once per unsessioned item. An additional transaction joining an existing
+  session inserts no row and so increments nothing — which is the correct behaviour, and getting
+  it wrong would inflate page counts by the number of transactions per session.
+- **Two count columns, not two rows**, because `excludeCancelledTransactions` is boolean.
+- **`"productId" = 0` is an all-products sentinel**, so the common unfiltered case reads one row
+  rather than summing across products.
+- **Rows are sparse.** They exist only for periods where the user had activity. A user active
+  twenty days a year generates hundreds of counter rows, not thousands.
+- **Counters are mutable in place.** A cancel arriving today can decrement a counter for a
+  transaction from eight months ago, which rules out append-only counter storage and rules out
+  sealing old partitions as read-only.
+
+### 5.8 Partition lifecycle
+
+Partition creation is **application-managed**: a scheduled task ensures N months exist ahead of
+the current date.
+
+`pg_partman` is available on Aurora but is rejected, because the stock Testcontainers Postgres
+image does not include it. App-managed DDL means CI, local development and production run
+identical partition logic, and partition rollover — the one piece of time-dependent
+infrastructure in the system — becomes testable locally.
+
+Partition management is designed so detach-and-archive can be added later without schema change
+(open question O-3).
+
+---
+
+## 6. Write path
+
+```
+RabbitMQ stream ──> StreamConsumer ──┐
+  (sequential adaptive batches)      │
+                                     ├──> ProjectionWriter ──> Aurora WRITER
+/wallet/delta ──> DeltaPoller ───────┘      (one TX per batch)
+  (4 sources, watermark + overlap)
+```
+
+Everything that mutates a `wq*` table goes through `ProjectionWriter`. Nothing else holds a write
+connection. The stream consumer, the delta pollers and any future backfill loader are all merely
+drivers of that one component.
+
+### 6.1 Stream consumption
+
+The wallet publishes to a **single** RabbitMQ stream. WQS consumes it **sequentially in adaptive
+batches**: flush on either N events or a T-millisecond window, whichever comes first. A ~200ms
+window delivers sub-second freshness while still collapsing counter updates.
+
+Sequential consumption is chosen over a thread pool deliberately. With concurrent lanes over one
+stream, offsets complete out of order, so only the contiguous acknowledged prefix can safely be
+committed — requiring a hand-rolled watermark tracker, and a single stalled lane blocks offset
+advance regardless.
+
+**Scale-out path:** RabbitMQ super streams partitioned by `userId` give one sequential consumer
+per partition, each with an independent offset, using the same consumer logic. At the measured
+peak of under 100 transactions per second this is not needed; the consumer is kept
+topology-agnostic so adopting it requires no rewrite.
+
+### 6.2 The projection transaction
+
+Per batch, in one transaction, in this order:
+
+1. **Normalize** source events into items, resolving view routing (which view tables each source
+   feeds).
+2. **Idempotency gate** — insert into `"wqItemLocator"` with `on conflict do nothing`. A conflict
+   means the event is already applied; drop it.
+3. **Insert** into `"wqWebItem"` and/or `"wqCcItem"`.
+4. **Resolve cancels** — look up the original via the locator, set `"cancelled"`, adjust the
+   affected rollups and counters. An unresolvable reference is parked (§6.3).
+5. **Drain pending cancels** matching any item just inserted.
+6. **Upsert rollups** for touched `"batchId"` / `"subBatchId"`.
+7. **Upsert high-level page-index rows** (§5.6) — one per newly created session, one per
+   unsessioned item — and maintain `"visibleExclCancelled"`.
+8. **Apply counter deltas** to `"wqCountDay"` and `"wqCountMonth"`.
+9. **Commit the stream offset / delta watermark in the same transaction.**
+
+Step 9 is the correctness story. The stream offset lives in `"wqStreamOffset"`, not in the broker,
+so projection state and consumer position advance or roll back together. This yields
+effectively-once processing instead of at-least-once plus a reconciliation job.
+
+Grouping events by `userId` within a batch collapses counter contention to one update per user per
+batch rather than one per event.
+
+### 6.3 Cancellation semantics
+
+A cancel is a new event naming the `sourceId` it cancels. Applying it:
+
+- sets `"cancelled" = true` on the original item row;
+- decrements `"cntExclCancelled"` at the `ITEM` page unit for the original's day and month;
+- decrements the originating session's `"txCountExclCancelled"` and excl-cancelled money totals;
+- recomputes `"visibleExclCancelled"` on the corresponding high-level row (§5.6) — for a session,
+  true while at least one non-cancelled transaction remains; for an unsessioned item, simply
+  `not cancelled`;
+- decrements `"cntExclCancelled"` at the `HIGH_LEVEL` page unit **exactly when that flag flips
+  true → false.**
+
+The flag is what makes this tractable. A session belongs in the excl-cancelled total while it
+retains at least one non-cancelled transaction, and expressing that as a maintained boolean means
+the condition is evaluated in one place at write time rather than recomputed per query. Both the
+read filter and the counter rule then reduce to reading or watching one column. It is guarded by
+property P-2 (§8).
+
+**Early cancels.** A cancel can arrive before the item it cancels — different source, different
+transport, no global ordering. Unresolvable cancels are parked in `"wqPendingCancel"` and drained
+whenever a matching item is ingested. This makes ingestion order-independent.
+
+### 6.4 Failure handling
+
+- **Batch failure** rolls back the whole transaction, leaving the offset uncommitted, so the batch
+  is retried from the same position.
+- **Poison events** are written to `"wqDeadLetter"` with their error after N retries; the offset
+  then advances and an alarm fires. Ingestion keeps flowing and the bad event is retained for
+  manual replay.
+
+---
+
+## 7. Read path
+
+```
+GET /web/v1/projection  ──> userId from auth principal ──> "wqWebItem" / "wqSession"
+GET /cc/v1/projection   ──> userId from query parameter ──> "wqCcItem"  / "wqSession"
+                                      │
+                       ┌──────────────┴──────────────┐
+                       ▼                             ▼
+              exact total (counters)        page slice (counter-assisted offset)
+                       └──────────────┬──────────────┘
+                                      ▼
+                             assembler → nested DTO
+```
+
+Both endpoints share one query pipeline. They differ only in how `userId` is resolved and which
+item table they target.
+
+### 7.1 Parameters
+
+| Parameter | `/web` | `/cc` | Notes |
+|---|---|---|---|
+| `userId` | **from principal** | **required** | `/web` must never read this from the request (§9) |
+| `from` | required | required | arbitrary UTC timestamp |
+| `to` | required | required | arbitrary UTC timestamp |
+| `aggregationLevel` | required | required | 0, 1 or 2 |
+| `productId` | optional | optional | also selects the view (§7.2) |
+| `excludeCancelledTransactions` | optional | optional | boolean |
+| `page`, `pageSize` | required | required | see §7.6 |
+
+There is **no cap on the `from`/`to` span**. A request may cover the user's entire history, which
+is what makes precomputed counters load-bearing rather than merely an optimization.
+
+All timestamps are **UTC**. Counter periods are UTC days and months.
+
+**Interval and index conventions**, stated explicitly because both are silent sources of
+off-by-one defects:
+
+- The range is **half-open: `[from, to)`** — `from` inclusive, `to` exclusive. This avoids the
+  `23:59:59.999` boundary problem entirely and makes adjacent ranges tile without overlap or gap,
+  which the counter decomposition in §7.5 depends on.
+- `page` is **1-based**. Page 1 is the first page. `totalPages == ceil(totalItems / pageSize)`,
+  and `totalPages == 0` when `totalItems == 0`.
+
+Sort order is **fixed newest-first** (`"occurredAt" desc`). Not client-configurable.
+
+### 7.2 View selection
+
+The three logical views resolve as follows:
+
+- **Transactions history** and **eInstant games** are both served from `"wqWebItem"`; they are
+  distinguished by `productId`. `"wqProduct"."category"` identifies which products are eInstant, so
+  this stays data-driven rather than a hardcoded id list in Java.
+- **Unified data** is served from `"wqCcItem"`.
+
+**Counter implication of product-derived views.** Counters are keyed by a single `"productId"`,
+with `0` meaning all products. If the eInstant view spans **several** product ids, an eInstant
+total is the sum of one counter row per product rather than a single row read. That is acceptable
+(the product count is small and the rows are narrow), but it must be explicit, because the
+counter-assisted offset walk in §7.6 then accumulates a *summed* per-month counter rather than a
+single value. If eInstant product ids prove numerous or volatile, the remedy is a category-level
+sentinel in the `"productId"` column — reserving negative values for categories — which can be
+added without schema change. Resolution depends on O-10.
+
+### 7.3 Aggregation levels
+
+Because `aggregationLevel` is mandatory, routing happens at the controller boundary — no fallback
+branch, no `CASE` expressions in SQL.
+
+| Level | Paged table | Page unit | Assembly |
+|---|---|---|---|
+| 0 | `"wqWebItem"` / `"wqCcItem"` | item | none |
+| 1 | `"wqWebHighLevel"` / `"wqCcHighLevel"` | high-level item | split the page's `"refId"`s by `"kind"`; one query for session children, one for unsessioned item payloads |
+| 2 | `"wqWebHighLevel"` / `"wqCcHighLevel"` | high-level item | plus a `"wqPlay"` query between session and item |
+
+Levels 1 and 2 page the **high-level index** (§5.6) rather than `"wqSession"`, because a page unit
+may be either a session or an unsessioned item (§7.4). The merge happens at write time, so the
+slice is a single covering index scan at every level.
+
+Assembly then reassembles the page in the order the index returned, fetching payload by `"refId"`:
+two to four indexed queries per request regardless of level, each bounded by the page size.
+
+Children are **assembled at read time**, not materialized as nested JSONB at write time. The
+distinction that matters for "no computation on read" is *aggregate* computation — sums, group-bys,
+window functions over many rows — and all of that is precomputed into the rollups. Fetching ~50
+parent rows and their children by indexed id lookup is microseconds, and keeps filters like
+`excludeCancelledTransactions` expressible directly in SQL rather than requiring a separate
+materialized JSONB variant per filter combination.
+
+### 7.4 Unsessioned items at levels 1 and 2
+
+At levels 1 and 2 the page unit is the **high-level item**, which is either a **session** or an
+**item with no `"batchId"`**. Both are peers in one chronological sequence, and **both count toward
+pagination**. Unsessioned items are always included; there is no opt-out.
+
+This resolves what was previously risk R-1. When only sessions were page units, the unsessioned
+set had to be returned in full on every page and was therefore unbounded. Treating unsessioned
+items as page units means they are paged like anything else, so no part of the response can grow
+without limit and no truncation flag is needed.
+
+**eInstant transactions are always part of a session**, so `"batchId"` is never null for an
+eInstant product. Consequences:
+
+- The **eInstant view never produces unsessioned items at all.** At levels 1 and 2 every eInstant
+  transaction nests under a session with nothing left over.
+- The unsessioned set is therefore non-empty only for non-eInstant products on `/web`, and for the
+  operator-only sources on `/cc`.
+- This is a **data invariant, not merely an observation**: a non-null `"batchId"` on every
+  eInstant-product item is asserted at ingest and guarded by property P-7 (§8.1). It cannot be a
+  database check constraint, because classifying a product as eInstant requires a lookup into
+  `"wqProduct"`.
+
+Whether claimable prizes carry a `"batchId"` remains open (O-12); it determines how large `/web`'s
+unsessioned contribution is, but no longer whether the response is bounded.
+
+### 7.5 Exact totals by range decomposition
+
+```
+total = Σ "wqCountMonth"[whole months inside range]
+      + Σ "wqCountDay"  [whole days in the partial months at each end]
+      + live COUNT      [the two partial boundary days only]
+```
+
+The live portion is always bounded to one user × one day, whether the range spans a week or a
+decade. `excludeCancelledTransactions` selects `"cntExclCancelled"` instead of `"cntAll"`; the
+algorithm is otherwise unchanged.
+
+**Degenerate cases** the decomposition must handle, each covered by property P-5:
+
+- `from` and `to` fall within the **same day** → a single live count, no counter reads.
+- `from` and `to` fall within the **same month** → daily counters plus boundary days, no monthly
+  counter read.
+- `from` or `to` falls exactly on a **day or month boundary** → because the interval is half-open
+  (§7.1), that period is wholly included or wholly excluded with no partial-day count.
+
+A five-year arbitrary-timestamp range resolves to roughly 59 monthly rows, 58 daily rows and two
+live day counts — under 200 narrow index-only rows for an exact total over a span that may cover
+a million transactions.
+
+### 7.6 Counter-assisted offset
+
+Keyset pagination is excluded by requirement: the UI must show "page X of Y". Naive offset
+pagination would mean `OFFSET 75000` for page 1500, walking 75,000 index entries to discard them.
+
+Instead, the monthly counters are walked to locate which month contains the requested offset, and
+the real query runs against that partition with the small residual:
+
+```
+remaining = (page - 1) * pageSize
+for each month in range, newest first:
+    if remaining < counter[month]:
+        target = month; residualOffset = remaining; break
+    remaining -= counter[month]
+
+query target partition with OFFSET = residualOffset,
+continuing into the next older month if the page straddles a boundary
+```
+
+Deep pagination becomes a handful of narrow counter reads plus a partition-local scan of at most a
+few thousand index entries. This delivers roughly keyset-like cost while preserving exact page
+numbers, and is the payoff that makes the uncapped date range acceptable.
+
+Correctness is guarded by property P-6 (§8), which asserts equivalence against a naive `OFFSET`
+reference implementation.
+
+### 7.7 Indexing
+
+**One covering index per item table**, using `INCLUDE`:
+
+```sql
+-- conceptually, per partition
+("userId", "occurredAt" desc) include ("cancelled", "productId", "batchId", "subBatchId", ...)
+```
+
+Filter predicates are evaluated against index tuples in an index-only scan, never touching the
+heap. This trades a slightly wider scan for not maintaining three or four additional B-trees on
+every insert — the right direction given seconds-level freshness requirements. Because
+counter-assisted offset already confines every scan to a single month's partition, "slightly
+wider" is bounded to one user-month.
+
+Crucially, the index never has to serve a `COUNT`; counters do that. Totals and slicing being
+served by **different structures** is what lets each stay simple.
+
+Additional indexes are added only when the benchmark harness (§8) shows a measured need.
+
+### 7.8 Response shape
+
+A **uniform pagination envelope** wraps a single `items` array at every level. Entries are
+discriminated by `kind`; only the entry shape varies by aggregation level.
+
+```jsonc
+{
+  "page": 2,
+  "pageSize": 50,
+  "totalItems": 4870,     // high-level items: sessions + unsessioned items
+  "totalPages": 98,
+  "aggregationLevel": 1,
+
+  "items": [
+    // L1 / L2: a session, with its children nested
+    { "kind": "SESSION",
+      "batchId": "b-77",
+      "occurredAt": "2026-09-14T10:02:11Z",
+      "totals": { /* precomputed */ },
+      "transactions": [ /* L1 */ ],
+      "plays": [ { "subBatchId": "...", "transactions": [ /* L2 */ ] } ] },
+
+    // L1 / L2: an unsessioned item, a peer of sessions
+    { "kind": "PAYMENT",
+      "sourceId": "p-91",
+      "occurredAt": "2026-09-14T09:55:00Z",
+      "amount": 100.00 }
+  ]
+}
+```
+
+At **level 0** the same `items` array carries flat items only — `kind` is the source type and
+`SESSION` never appears, since nothing is aggregated.
+
+At **levels 1 and 2** entries are **high-level items**: either a `SESSION` (with children nested
+one level deep at L1, two at L2) or an unsessioned item. The array is a single chronological
+sequence, newest first, interleaving both kinds.
+
+There is no separate unsessioned array and no truncation flag. Because unsessioned items are page
+units (§7.4), nothing in the response is unbounded.
+
+### 7.9 Pagination policy
+
+- **Page size is client-chosen with no hard maximum.**
+- **Known risk (R-2).** A request such as `pageSize=500000` at level 2 can produce an enormous
+  response and hold an Aurora connection for a long time. A configurable ceiling is implemented
+  but **ships disabled**, so operations can clamp it without a release.
+- A page beyond the last page returns **200 with an empty body** and correct `totalPages`. This
+  avoids spurious errors when live ingestion changes the page count between requests.
+
+### 7.10 Aurora reader/writer split
+
+Ingestion uses the **writer** endpoint. All queries use **reader** endpoints, scaling
+horizontally without touching the write path.
+
+**Accepted property:** Aurora replica lag (typically tens of milliseconds) means a committed
+transaction may briefly not be visible to a query. For a retrospective history view this is
+acceptable, and it is recorded here so it is not later triaged as a bug.
+
+Connection pools are sized separately — a small writer pool (≈10–16) and a larger reader pool — so
+a burst of operator queries cannot starve ingestion.
+
+---
+
+## 8. Testing
+
+### 8.1 Properties (Jqwik)
+
+| # | Property | Guards |
+|---|---|---|
+| P-1 | Any permutation or duplication of an event sequence converges to identical projection state | Locator idempotency gate; pending-cancel parking |
+| P-2 | Every stored counter equals an actual `COUNT` over the projection, for both count columns | Entire pagination contract; the session-counter-on-cancel rule (§6.3) |
+| P-3 | Concatenating all pages in order reproduces the full ordered result set — no gap, no duplicate | User-visible pagination correctness |
+| P-4 | Session total = Σ play totals = Σ transaction amounts; and L1 page count = L2 page count | Write-time aggregation |
+| P-5 | Counter-derived total equals a live `COUNT` for arbitrary `from`/`to` | Two-tier range decomposition (§7.5) |
+| P-6 | Counter-assisted offset returns exactly the rows naive `OFFSET` returns | The riskiest optimization in the service (§7.6) |
+| P-7 | Every item whose product is an eInstant product carries a non-null `"batchId"`, and the eInstant view's unsessioned set is always empty | The eInstant session invariant (§7.4), unenforceable as a check constraint |
+| P-8 | The high-level index holds exactly one row per session plus one per unsessioned item — no duplicates, no omissions — and `"visibleExclCancelled"` agrees with the underlying items | The write-time merge (§5.6); its oracle is a direct query over sessions and null-`batchId` items |
+
+**Oracle-based testing is the core technique here.** P-2, P-5 and P-6 each compare a fast
+production path against a slow but obviously-correct equivalent. The naive `OFFSET` implementation
+is therefore **retained permanently as test-only code** — it is an asset, not dead code.
+
+**Generators must reflect real shapes**, not uniform randomness. Volumes are power-law: a small
+number of users hold a disproportionate share of 150M rows. Generators produce skewed activity,
+clustered sessions, cancels arriving both before and after their originals, and events landing in
+already-projected months.
+
+### 8.2 Integration testing
+
+Testcontainers runs Postgres (pinned to the Aurora major version) and RabbitMQ with the stream
+plugin. Every integration test executes real Flyway DDL and real jOOQ queries. Repositories are
+not mocked, because the component most likely to be wrong is the SQL.
+
+**Stated limitation.** Testcontainers Postgres is not Aurora. It does not reproduce Aurora's
+storage layer, reader-endpoint replica lag, or planner behaviour at scale. Correctness is proven
+locally; absolute performance is not.
+
+### 8.3 jOOQ code generation
+
+Gradle spins a throwaway Testcontainers Postgres, runs Flyway, generates jOOQ classes from the
+migrated schema, then compiles. Generated code therefore cannot drift from migrations, and the
+build requires no external database. Docker is consequently a **build** dependency, not merely a
+test dependency; confirmed available in CI and locally.
+
+**Partition children must be excluded from code generation.** jOOQ generates a class per table,
+and partitions are tables — left unconfigured, codegen emits `WqWebItem_2026_10`,
+`WqWebItem_2026_11` and so on, with the generated source growing every month in perpetuity.
+Queries target the parent table and let Postgres route, so the children are never referenced in
+code. The codegen configuration must therefore exclude them by pattern:
+
+```
+excludes = .*_\d{4}_\d{2}
+```
+
+Licensing note: the jOOQ **Open Source Edition** covers PostgreSQL in full and is the correct
+edition here. Commercial licensing applies only to commercial databases. Aurora PostgreSQL speaks
+PostgreSQL, so the `POSTGRES` dialect applies directly.
+
+### 8.4 Benchmark harness
+
+Since index additions are to be evidence-driven:
+
+- a volume generator with configurable user counts, power-law activity distribution, session and
+  play fan-out, and cancel rate;
+- a driver exercising both endpoints across page depths, range widths and aggregation levels;
+- captured `EXPLAIN (ANALYZE, BUFFERS)` output asserting scans remain index-only;
+- recorded baselines so index changes are justified by a measured delta.
+
+**Runs on Testcontainers Postgres only.** Results are therefore **relative regression signals, not
+validated Aurora performance**. A green benchmark must not be read as a production guarantee.
+
+### 8.5 Architecture tests (ArchUnit)
+
+The usage and layering rules in §2.2 and §10 are the kind that decay silently: violating them is
+easy, feels locally reasonable, and goes unnoticed until the structure is gone. ArchUnit converts
+them from prose into build failures.
+
+| Rule | Enforces |
+|---|---|
+| `api/` must not depend on `org.jooq..` or the generated package | §2.2 rules 2, 3 |
+| No call to `DSL.field(String)` or `.sql(..)` outside an explicitly annotated allowlist | §2.2 rule 1 |
+| `api/web` and web query classes must not depend on `WqCcItem` | §9 control 3 — security by schema |
+| Nothing depends on `org.springframework.data.jpa..` | Prevents regression to the superseded pattern |
+| Layering: `api` → `read`/`projection` → `domain`; `ingest` → `projection`; nothing depends on `api` | §10 |
+| Production code must not depend on the naive-`OFFSET` oracle | §8.1 — the oracle is test-only by design |
+| Only `projection/` may inject the writer-qualified `DSLContext` | §10 — explicit datasource routing |
+
+The third rule is the most valuable: §9 claims `/web` cannot leak operator data because it queries
+a table that structurally cannot contain it. This makes that claim checkable, so reusing a
+`"wqCcItem"` query in the web path fails the build rather than becoming an incident.
+
+**Governance.** Every rule must trace to a numbered decision in this document, and must carry a
+comment naming it. A rule that cannot be traced to a decision is a snapshot of incidental
+structure, not a rule, and must not be added. The failure mode to avoid is a large suite of
+incidental rules that obstruct legitimate refactoring and are then routinely suppressed.
+
+ArchUnit lands in **phase 1** (§15), before there is any structure to violate.
+
+### 8.6 Property-based testing as a team practice
+
+Jqwik is a mental shift, not merely a new API: the difficulty is finding properties, not writing
+them. The common adoption failures are properties that restate the implementation, and generators
+that produce only uninteresting data.
+
+WQS is a favourable first encounter because **P-2, P-5 and P-6 are oracle comparisons** — "the
+fast path must equal the slow path" — which require no invariant-finding intuition, since the
+correct answer already exists. Jqwik's shrinking then reports the *minimal* failing case, which
+for a pagination defect is worth a great deal of debugging time.
+
+Two standing rules:
+
+1. **Properties do not replace example-based tests.** Properties cover invariants; examples cover
+   specific known cases and every fixed bug. A regression test naming the actual incident
+   communicates more than a property that incidentally covers it.
+2. **Generator quality is the real work.** A property over weak generators passes vacuously.
+   Generators are reviewed with the same care as production code (see §8.1 for the required
+   distributions).
+
+Properties are introduced one phase at a time per §15, rather than all six at once.
+
+### 8.7 Production invariant checking
+
+A periodic **counter reconciliation job** samples stored counters against actual counts and emits
+a drift metric. P-2 proves the invariant in CI; this proves it in production, where real cancels
+and real out-of-order arrivals live. Pagination drift surfaces as an alert rather than a support
+ticket.
+
+---
+
+## 9. Security
+
+`/web` resolves `userId` from the authenticated principal; `/cc` accepts it as a parameter. The
+worst possible defect in this service is `/web` honouring a client-supplied `userId` and serving
+one user another user's financial history.
+
+Controls:
+
+1. The shared query pipeline accepts `userId` only as an **already-resolved value**. `/web`'s
+   request binding has no path to request parameters for it.
+2. An explicit test asserts that `/web/v1/projection?userId=<other>` ignores the parameter
+   entirely. This is obvious now and is exactly the kind of property that regresses quietly during
+   a later refactor.
+3. Operator-only sources are excluded from `/web` **by table choice**, not by a `WHERE` clause.
+   `"wqWebItem"` structurally cannot contain payments, limits or manual adjustments. Enforcement
+   by schema beats enforcement by predicate.
+
+Authentication mechanism is open (O-2). A `PrincipalResolver` abstraction isolates it so the
+mechanism can change without touching the query pipeline.
+
+---
+
+## 10. Module layout
+
+```
+wqs/
+├── settings.gradle.kts
+├── db/                          # Flyway migrations + generated jOOQ classes
+│   ├── src/main/resources/db/migration/V*__*.sql
+│   └── build.gradle.kts         # Testcontainers-backed codegen task
+└── app/
+    └── src/main/java/<pkg>/
+        ├── api/web|cc/          # controllers, DTOs, OpenAPI, parameter validation
+        ├── read/                # query builders per level, counter reader,
+        │                        #   offset resolver, assemblers
+        ├── ingest/stream|delta/ # consumer + offset store; pollers + watermarks
+        ├── projection/          # ProjectionWriter, normalizers, rollup and
+        │                        #   counter updaters, pending-cancel drain
+        ├── domain/              # ViewKind, PageUnit, AggregationLevel, Money
+        └── config/              # writer/reader datasources, pools, scheduling
+```
+
+Two modules rather than one or six. `db` isolates code generation because generated classes are a
+build artifact, so a migration change rebuilds exactly one jar. Splitting further would add Gradle
+ceremony without isolation that packages do not already provide at this size.
+
+**Datasource routing is explicit.** Read services receive a reader-bound `DSLContext`; the
+projection writer receives a writer-bound one. AOP routing on `@Transactional(readOnly = true)` is
+rejected as implicit and easy to get wrong silently — a read accidentally landing on the writer
+would not surface until load.
+
+---
+
+## 11. Observability
+
+Micrometer metrics:
+
+- **ingest lag** — `now()` minus `"occurredAt"` of the last projected event, per source
+- batch size and batch duration
+- dead-letter rate
+- pending-cancel depth
+- counter drift (§8.7)
+- per-endpoint latency by aggregation level and page depth
+
+Tracing via OpenTelemetry, propagated from stream message headers where present.
+
+---
+
+## 12. Known risks
+
+| # | Risk | Status |
+|---|---|---|
+| R-1 | ~~Unsessioned set at L1/L2 is unbounded and repeats on every page~~ | **Resolved 2026-11-01.** Unsessioned items became page units (§7.4), so nothing is unbounded. Row retained so R-2…R-6 keep their numbers. |
+| R-2 | No hard maximum on `pageSize` (§7.9) | Accepted; disabled-by-default configurable ceiling provided |
+| R-3 | Benchmarks run only on Testcontainers Postgres, not Aurora (§8.4) | Accepted; results documented as relative signals |
+| R-4 | Aurora replica lag makes very recent transactions briefly invisible (§7.10) | Accepted as a property of the design |
+| R-5 | Delta timestamp cliff is unhandleable until the tiebreaker field exists (§4) | Mitigated by loud alarm; resolution depends on O-1 |
+| R-6 | jOOQ is new to the team and is being introduced on the most performance-critical service (§2.1) | Accepted; mitigated by build-time codegen and oracle-based properties |
+
+---
+
+## 13. Open questions
+
+| # | Question | Blocking? |
+|---|---|---|
+| O-1 | What is the additional `/wallet/delta` field, and does it provide a within-timestamp tiebreaker? | Not for phase 1; required before the delta poller is production-safe |
+| O-2 | How is the `/web` principal established — JWT validated in WQS, gateway-injected header, or session lookup? | Required before `/web` ships |
+| O-3 | Retention policy: keep all partitions indefinitely, or detach and archive after N years? | No; design is archive-ready |
+| O-4 | Is the wallet multi-currency, and can a single session span currencies? | No; rollups carry a currency column with scalar sums |
+| O-5 | Which of the five sources can actually be cancelled? | No; the locator covers all sources regardless |
+| O-6 | The remaining "few other" query parameters | Required before the API contract is frozen |
+| O-7 | Exact response field contracts per view | Required before the API contract is frozen |
+| O-8 | Aurora PostgreSQL major version | Assumed 16; affects Testcontainers pinning |
+| O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
+| O-10 | How does a client select the eInstant view — explicit product ids, or a category parameter? | Required before the API contract is frozen |
+| O-11 | Gradle DSL: Kotlin or Groovy | Assumed Kotlin DSL |
+| O-12 | Do claimable prizes carry a `"batchId"`? Determines whether `/web` has a non-empty unsessioned set at all (§7.4) | Not for phase 1; required before level 1/2 on `/web` is correct |
+
+---
+
+## 14. Decision log
+
+Decisions made during design, with their rationale in brief.
+
+| Decision | Rationale |
+|---|---|
+| Virtual threads, not WebFlux | jOOQ is blocking; virtual threads give concurrency without reactive types |
+| jOOQ over JPA and over `JdbcClient` (§2.1) | Keeps index-only scans enforceable; one source of schema truth; no ORM semantics needed |
+| camelCase tables **and** columns | Explicit requirement; jOOQ quotes by default so only Flyway needs care |
+| Per-view tables with duplication | Keeps the hot user-facing index small and cache-resident; security by schema |
+| `"wqItemLocator"` unpartitioned, all sources | One-probe cancel resolution; doubles as the idempotency gate |
+| Children assembled on read | Aggregates are precomputed; nesting assembly is microseconds and keeps filters in SQL |
+| Two-tier counters, UTC periods | Exact totals over an uncapped range at bounded cost |
+| Counter-assisted offset | Preserves "page X of Y" at near-keyset cost |
+| Single covering index per table | Protects seconds-level freshness; counters remove the need to index for `COUNT` |
+| Sequential stream batches | Avoids out-of-order offset commits; <100/sec peak leaves ample headroom |
+| Offset stored in Postgres, same transaction | Effectively-once instead of at-least-once plus reconciliation |
+| Pending-cancel parking table | Makes ingestion order-independent for cancels |
+| Dead-letter and advance | One malformed event must not stop history for every user |
+| App-managed partitions, not `pg_partman` | Identical DDL across CI, local and production; rollover becomes testable |
+| Naive `OFFSET` kept as test oracle | The clever path's speed with the obvious path's confidence |
+| Explicit datasource qualifiers | Implicit AOP routing fails silently |
+| ArchUnit, from phase 1 (§8.5) | Converts §2.2 and §10 prose rules into build failures, including the §9 security boundary |
+| Properties introduced one per phase (§8.6) | jOOQ and property-based testing are two new mental models; ArchUnit is only a test API |
+| Unsessioned items are page units, interleaved with sessions (§7.4) | Bounds the response, gives one count and one page number, and eliminated risk R-1 |
+| The sessions/unsessioned merge happens at **write** time, into a per-view high-level page index (§5.6) | Keeps L1/L2 paging a single covering index scan, so §7.6 and §7.7 carry over unchanged; write path has ample headroom at under 100/sec |
+| `"visibleExclCancelled"` maintained on the high-level row (§6.3) | Collapses the session-counter-on-cancel conditional into one maintained boolean |
+
+---
+
+## 15. Suggested implementation phasing
+
+This design covers a whole service, which is more than one sitting of work. The phases below are a
+proposed decomposition so each lands as something verifiable rather than a half-wired system. The
+detailed implementation plan will be produced separately.
+
+Each phase ends with its named properties passing — not with code merely compiling.
+
+| Phase | Scope | Ends green on |
+|---|---|---|
+| 1 | Gradle two-module skeleton; Flyway + Testcontainers-backed jOOQ codegen; item tables, partitions, app-managed partition rollover; `"wqProduct"`, `"wqItemLocator"`; **ArchUnit rule set** | Partition rollover tests; codegen reproducibility; architecture tests |
+| 2 | Stream consumer, `ProjectionWriter`, idempotency gate, offset store in Postgres | **P-1** |
+| 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
+| 4 | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (stubbed pending O-2) | **P-3**, **P-5**, **P-6**, security test (§9) |
+| 5 | Levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | P-3 extended to the high-level page unit; **P-7** |
+| 6 | Delta pollers for the four polled sources; watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
+| 7 | Observability, counter reconciliation job, benchmark harness and recorded baselines | Drift metric; baseline capture |
+
+**Phase ordering rationale.** Ingestion precedes reads because the read path's properties need real
+projected data to assert against, and the Jqwik generators built in phase 2 are reused as the data
+source for phases 4 and 5. The delta pollers come late deliberately: they share `ProjectionWriter`
+with the stream consumer, so they add four source normalizers rather than new machinery, and O-1
+is still open.
+
+Phases 1 through 4 constitute a working, correct, user-facing level-0 service. That is the natural
+first milestone.
