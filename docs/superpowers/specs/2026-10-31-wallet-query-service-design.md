@@ -113,9 +113,12 @@ lowercase.
 create table "wqWebItem" ( "userId" bigint not null, "occurredAt" timestamptz not null, ... );
 ```
 
-jOOQ quotes identifiers by default, so generated classes and all jOOQ-built queries need no
-special handling. Flyway migrations are raw SQL and are the only surface where a missing quote
-pair can ship silently.
+jOOQ quotes identifiers by default, so **quoting** needs no special handling in generated classes
+or jOOQ-built queries. Flyway migrations are raw SQL and are the only surface where a missing
+quote pair can ship silently.
+
+Identifier **naming** in generated code does need configuration, however: the default generator
+strategy would flatten these camel humps. See §8.3.
 
 **Mitigation:** a build-time check fails the build if any migration file contains an unquoted
 `wq[A-Z]` identifier.
@@ -754,6 +757,41 @@ code. The codegen configuration must therefore exclude them by pattern:
 excludes = .*_\d{4}_\d{2}
 ```
 
+`flyway_schema_history` must also be excluded; it is Flyway's bookkeeping table and has no place
+in generated code.
+
+Use the **official `jooq-codegen-gradle` plugin** (available since jOOQ 3.19), not the older
+third-party Gradle plugin.
+
+**Generator strategy — decided in phase 1 and never revisited.** `DefaultGeneratorStrategy`
+uppercases identifiers, which flattens camelCase word boundaries: `"occurredAt"` would generate
+the identifier `OCCURREDAT`. A custom strategy preserving database names verbatim is therefore
+required, so generated identifiers read exactly like the schema:
+
+```java
+public class AsInDatabaseStrategy extends DefaultGeneratorStrategy {
+    @Override
+    public String getJavaIdentifier(Definition definition) {
+        return definition.getOutputName();   // "occurredAt" stays occurredAt
+    }
+}
+```
+
+jOOQ's declarative matcher strategy is an equivalent alternative if regex configuration is
+preferred over a Java class. Either way the choice is effectively a second naming convention
+layered on §3, and changing it later renames every identifier in every query — so it is fixed in
+phase 1.
+
+**Where the schema is visible.** The migrations are the authoritative, reviewable, diffable
+definition. The generated classes mirror them in Java: a `Tables` class, a `TableImpl` subclass per
+table with a typed `TableField` per column, a `Record` type per table, plus `Keys` and `Indexes`.
+Generated sources live under `db/build/` and are **not** committed, so they appear in the IDE but
+not in code review; schema changes are reviewed as migration diffs instead. This is acceptable
+precisely because codegen reconciles the two at build time — a renamed column breaks compilation
+at every usage, which is what reviewing generated code would otherwise be for. The practical
+friction is that a migration edit requires re-running codegen and a Gradle sync before the IDE
+sees new columns.
+
 Licensing note: the jOOQ **Open Source Edition** covers PostgreSQL in full and is the correct
 edition here. Commercial licensing applies only to commercial databases. Aurora PostgreSQL speaks
 PostgreSQL, so the `POSTGRES` dialect applies directly.
@@ -952,6 +990,7 @@ Decisions made during design, with their rationale in brief.
 | Naive `OFFSET` kept as test oracle | The clever path's speed with the obvious path's confidence |
 | Explicit datasource qualifiers | Implicit AOP routing fails silently |
 | ArchUnit, from phase 1 (§8.5) | Converts §2.2 and §10 prose rules into build failures, including the §9 security boundary |
+| Custom `AsInDatabaseStrategy` for codegen, fixed in phase 1 (§8.3) | The default strategy flattens camelCase identifiers; changing this later renames every identifier in every query |
 | Properties introduced one per phase (§8.6) | jOOQ and property-based testing are two new mental models; ArchUnit is only a test API |
 | Unsessioned items are page units, interleaved with sessions (§7.4) | Bounds the response, gives one count and one page number, and eliminated risk R-1 |
 | The sessions/unsessioned merge happens at **write** time, into a per-view high-level page index (§5.6) | Keeps L1/L2 paging a single covering index scan, so §7.6 and §7.7 carry over unchanged; write path has ample headroom at under 100/sec |
@@ -969,7 +1008,7 @@ Each phase ends with its named properties passing — not with code merely compi
 
 | Phase | Scope | Ends green on |
 |---|---|---|
-| 1 | Gradle two-module skeleton; Flyway + Testcontainers-backed jOOQ codegen; item tables, partitions, app-managed partition rollover; `"wqProduct"`, `"wqItemLocator"`; **ArchUnit rule set** | Partition rollover tests; codegen reproducibility; architecture tests |
+| 1 | Gradle two-module skeleton; Flyway + Testcontainers-backed jOOQ codegen incl. **generator strategy and exclusions**; item tables, partitions, app-managed partition rollover; `"wqProduct"`, `"wqItemLocator"`; **ArchUnit rule set** | Partition rollover tests; codegen reproducibility; architecture tests |
 | 2 | Stream consumer, `ProjectionWriter`, idempotency gate, offset store in Postgres | **P-1** |
 | 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
 | 4 | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (stubbed pending O-2) | **P-3**, **P-5**, **P-6**, security test (§9) |
