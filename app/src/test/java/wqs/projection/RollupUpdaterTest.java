@@ -15,6 +15,8 @@ import java.util.Map;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
 import wqs.db.generated.tables.records.WqPlayRecord;
@@ -137,7 +139,7 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         RollupResult result = apply(win("t3", "b1", "p2", "1.0000", T0.plusSeconds(30)));
 
-        assertThat(result).isEqualTo(new RollupResult(false, false, null));
+        assertThat(result).isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
         assertThat(play("b1", "p2").getStartedAt()).isEqualTo(utc(T0.plusSeconds(30)));
         assertThat(play("b1", "p2").getEndedAt()).isEqualTo(utc(T0.plusSeconds(50)));
         assertThat(session("b1").getStartedAt()).isEqualTo(utc(T0));
@@ -178,16 +180,98 @@ class RollupUpdaterTest extends PostgresTestBase {
 
     @Test
     void the_result_reports_new_groups_and_re_anchoring() {
-        assertThat(apply(wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100))))
-                .isEqualTo(new RollupResult(true, true, null));
+        Instant start = T0.plusSeconds(100);
+        assertThat(apply(wager("t1", "b1", "p1", "5.0000", start)))
+                .isEqualTo(new RollupResult(true, true, start, 11, null, null, false));
         assertThat(apply(win("t2", "b1", "p1", "1.0000", T0.plusSeconds(150))))
-                .isEqualTo(new RollupResult(false, false, null));
+                .isEqualTo(new RollupResult(false, false, start, 11, null, null, false));
         assertThat(apply(wager("t3", "b1", "p2", "1.0000", T0.plusSeconds(160))))
-                .isEqualTo(new RollupResult(false, true, null));
+                .isEqualTo(new RollupResult(false, true, start, 11, null, null, false));
         assertThat(apply(wager("t4", "b1", "p1", "1.0000", T0)))
-                .isEqualTo(new RollupResult(false, false, T0.plusSeconds(100)));
-        assertThat(apply(payment()))
-                .isEqualTo(new RollupResult(false, false, null));
+                .isEqualTo(new RollupResult(false, false, T0, 11, start, 11, true));
+        assertThat(apply(payment())).isEqualTo(RollupResult.NONE);
+    }
+
+    @Test
+    void the_session_key_reports_a_product_change_without_a_time_change() {
+        apply(wager("t1", "b1", "p1", "5.0000", T0, 12));
+
+        assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
+                .isEqualTo(new RollupResult(false, false, T0, 11, T0, 12, true));
+        // A higher productId does not displace the LEAST: no key change.
+        assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), 13)))
+                .isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
+    }
+
+    @Test
+    void the_session_key_reports_a_product_arriving_after_none() {
+        apply(wager("t1", "b1", "p1", "5.0000", T0, null));
+
+        assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
+                .isEqualTo(new RollupResult(false, false, T0, 11, T0, null, true));
+        // A null productId later does not displace the value.
+        assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), null)))
+                .isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
+    }
+
+    @Test
+    void the_session_key_reports_a_time_change_without_a_product_change() {
+        apply(wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100), 11));
+
+        assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0, 11)))
+                .isEqualTo(new RollupResult(false, false, T0, 11, T0.plusSeconds(100), 11, true));
+    }
+
+    @Test
+    void the_session_key_reports_a_time_and_product_change_together() {
+        apply(wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100), 12));
+
+        assertThat(apply(wager("t2", "b1", "p2", "1.0000", T0, 11)))
+                .isEqualTo(new RollupResult(false, true, T0, 11, T0.plusSeconds(100), 12, true));
+    }
+
+    @Test
+    void the_session_key_is_unchanged_when_neither_axis_moves() {
+        apply(wager("t1", "b1", "p1", "5.0000", T0, 11));
+
+        assertThat(apply(win("t2", "b1", "p1", "1.0000", T0.plusSeconds(10))))
+                .isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
+    }
+
+    @Test
+    void a_cancellation_touches_no_rollup() {
+        ProjectionItem cancel = new ProjectionItem(
+                1L, SourceKind.TRANSACTION, "tx-2", T0, 11, "b1", "p1",
+                (short) 2, new BigDecimal("-5.0000"), "EUR", null, "tx-1", null);
+
+        assertThat(apply(cancel)).isEqualTo(RollupResult.NONE);
+
+        assertThat(dsl().fetchCount(WQ_SESSION)).isZero();
+        assertThat(dsl().fetchCount(WQ_PLAY)).isZero();
+        assertThat(dsl().fetchCount(WQ_GROUP_LOCATOR)).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  "})
+    void a_blank_sub_batch_id_rolls_up_into_the_session_only(String blank) {
+        RollupResult first = apply(item("t1", "b1", blank, "5.0000", T0.plusSeconds(100), (short) 1, 11));
+        RollupResult earlier = apply(item("t2", "b1", blank, "1.0000", T0, (short) 1, 11));
+
+        assertThat(first).isEqualTo(new RollupResult(true, false, T0.plusSeconds(100), 11, null, null, false));
+        assertThat(earlier).isEqualTo(
+                new RollupResult(false, false, T0, 11, T0.plusSeconds(100), 11, true));
+        assertThat(dsl().fetchCount(WQ_SESSION)).isEqualTo(1);
+        assertThat(dsl().fetchCount(WQ_PLAY)).isZero();
+        WqSessionRecord session = session("b1");
+        assertThat(session.getStartedAt()).isEqualTo(utc(T0));
+        assertThat(session.getTxCount()).isEqualTo(2);
+        assertThat(session.getPlayCount()).isZero();
+        assertThat(dsl().selectFrom(WQ_GROUP_LOCATOR).fetch())
+                .singleElement()
+                .satisfies(locator -> {
+                    assertThat(locator.getSubBatchId()).isEmpty();
+                    assertThat(locator.getStartedAt().toInstant()).isEqualTo(T0);
+                });
     }
 
     @Test
@@ -231,7 +315,7 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     private static ProjectionItem wager(
-            String id, String batch, String play, String amount, Instant at, int productId) {
+            String id, String batch, String play, String amount, Instant at, Integer productId) {
         return item(id, batch, play, amount, at, (short) 1, productId);
     }
 
@@ -241,7 +325,7 @@ class RollupUpdaterTest extends PostgresTestBase {
 
     private static ProjectionItem item(
             String id, String batch, String play, String amount, Instant at, short type,
-            int productId) {
+            Integer productId) {
         return new ProjectionItem(
                 1L, SourceKind.TRANSACTION, id, at, productId, batch, play,
                 type, new BigDecimal(amount), "EUR", null, null, null);

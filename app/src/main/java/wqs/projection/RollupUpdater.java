@@ -7,6 +7,7 @@ import static wqs.db.generated.Tables.WQ_SESSION;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Objects;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.impl.DSL;
@@ -20,7 +21,8 @@ import wqs.domain.ProjectionItem;
 
 /**
  * Maintains session and play aggregates incrementally (spec 5.5). Only ever called for items the
- * locator gate accepted as new, so incrementing is safe -- a replayed event never reaches here.
+ * locator gate accepted as new and that are not cancellations, so incrementing is safe -- a
+ * replayed event never reaches here.
  *
  * "totalPlays" is a monetary amount (the sum wagered), not a count. The count metric is
  * "playCount" on a session and "txCount" on a play.
@@ -43,6 +45,10 @@ import wqs.domain.ProjectionItem;
 @Component
 public class RollupUpdater {
 
+    /**
+     * The "subBatchId" of a session's own locator row. Unreachable from input: ProjectionItem
+     * normalises a blank subBatchId to null, and an item without a play never claims a play row.
+     */
     private static final String SESSION_MARKER = "";
 
     private final DSLContext dsl;
@@ -52,12 +58,26 @@ public class RollupUpdater {
     }
 
     /**
+     * Folds one item into its play and session rollups.
+     *
+     * Only called for items the locator gate accepted as new (so incrementing is safe) and that
+     * are not cancellations. A cancellation returns {@link RollupResult#NONE} without touching any
+     * rollup: cancellation effects (the ExclCancelled columns) are applied elsewhere, and folding it in
+     * here would count a reversed win as a win.
+     *
      * A re-anchor is a delete plus an insert plus a locator update; committing only part of it
      * would lose or duplicate a group, so callers must supply the transaction.
+     *
+     * Lock order: within one call the play's locator row is locked before the session's. A
+     * transaction applying several items of the same session can still take those locks in a
+     * different order than a concurrent transaction over the same session (item A's play, then
+     * the session, then item B's play), which could deadlock. That is safe today because a single
+     * sequential consumer applies all items; any future parallel poller or replay path must
+     * partition work by session (or by user) before calling this.
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public RollupResult applyItem(ProjectionItem item) {
-        if (!item.isSessioned()) {
+        if (!item.isSessioned() || item.isCancellation()) {
             return RollupResult.NONE;
         }
 
@@ -68,7 +88,7 @@ public class RollupUpdater {
                 item, item.occurredAt().atOffset(ZoneOffset.UTC), plays, wins);
 
         boolean playIsNew = false;
-        if (item.subBatchId() != null) {
+        if (item.hasPlay()) {
             Anchor play = claim(item.userId(), item.batchId(), item.subBatchId(), contribution.at());
             if (play.previousStart() != null) {
                 movePlay(item, play.previousStart(), play.startedAt());
@@ -78,15 +98,34 @@ public class RollupUpdater {
         }
 
         Anchor session = claim(item.userId(), item.batchId(), SESSION_MARKER, contribution.at());
+        OffsetDateTime oldStart = session.previousStart() != null
+                ? session.previousStart()
+                : session.startedAt();
+        Integer oldProductId = session.isNew() ? null : sessionProductId(item, oldStart);
         if (session.previousStart() != null) {
             moveSession(item, session.previousStart(), session.startedAt());
         }
-        upsertSession(contribution, session.startedAt(), playIsNew);
+        Integer productId = upsertSession(contribution, session.startedAt(), playIsNew);
 
+        boolean keyChanged = !session.isNew()
+                && (session.previousStart() != null || !Objects.equals(oldProductId, productId));
         return new RollupResult(
                 session.isNew(),
                 playIsNew,
-                session.previousStart() == null ? null : session.previousStart().toInstant());
+                session.startedAt().toInstant(),
+                productId,
+                keyChanged ? oldStart.toInstant() : null,
+                keyChanged ? oldProductId : null,
+                keyChanged);
+    }
+
+    private Integer sessionProductId(ProjectionItem item, OffsetDateTime startedAt) {
+        return dsl.select(WQ_SESSION.productId)
+                .from(WQ_SESSION)
+                .where(WQ_SESSION.userId.eq(item.userId()),
+                       WQ_SESSION.startedAt.eq(startedAt),
+                       WQ_SESSION.batchId.eq(item.batchId()))
+                .fetchSingle(WQ_SESSION.productId);
     }
 
     /**
@@ -186,10 +225,11 @@ public class RollupUpdater {
                 .execute();
     }
 
-    private void upsertSession(Contribution c, OffsetDateTime startedAt, boolean playIsNew) {
+    /** @return the session's productId after the fold. */
+    private Integer upsertSession(Contribution c, OffsetDateTime startedAt, boolean playIsNew) {
         ProjectionItem item = c.item();
         int playDelta = playIsNew ? 1 : 0;
-        dsl.insertInto(WQ_SESSION)
+        return dsl.insertInto(WQ_SESSION)
                 .set(WQ_SESSION.userId, item.userId())
                 .set(WQ_SESSION.batchId, item.batchId())
                 .set(WQ_SESSION.startedAt, startedAt)
@@ -221,7 +261,9 @@ public class RollupUpdater {
                 .set(WQ_SESSION.totalPlaysExclCancelled, summed(WQ_SESSION.totalPlaysExclCancelled))
                 .set(WQ_SESSION.totalWinsExclCancelled, summed(WQ_SESSION.totalWinsExclCancelled))
                 .set(WQ_SESSION.netExclCancelled, summed(WQ_SESSION.netExclCancelled))
-                .execute();
+                .returning(WQ_SESSION.productId)
+                .fetchSingle()
+                .getProductId();
     }
 
     /** existing + incoming, for ON CONFLICT DO UPDATE. */

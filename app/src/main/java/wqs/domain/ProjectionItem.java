@@ -11,6 +11,10 @@ import java.time.Instant;
  * domain package carries no jOOQ dependency.
  *
  * {@code cancels} is the sourceId this item cancels, or null. Phase 3 acts on it.
+ *
+ * A blank {@code batchId} or {@code subBatchId} is normalised to null here, at the domain
+ * boundary: "no session" and "no play" have exactly one representation, and the empty string --
+ * which "wqGroupLocator" reserves as the session marker -- is unreachable from input.
  */
 public record ProjectionItem(
         long userId,
@@ -37,6 +41,8 @@ public record ProjectionItem(
         if (amount == null) {
             throw new IllegalArgumentException("amount is required");
         }
+        batchId = blankToNull(batchId);
+        subBatchId = blankToNull(subBatchId);
     }
 
     public boolean isCancellation() {
@@ -44,6 +50,15 @@ public record ProjectionItem(
     }
 
     public boolean isSessioned() {
-        return batchId != null && !batchId.isBlank();
+        return batchId != null;
+    }
+
+    /** True if the item belongs to a play (a sub-batch) within its session. */
+    public boolean hasPlay() {
+        return subBatchId != null;
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 }
