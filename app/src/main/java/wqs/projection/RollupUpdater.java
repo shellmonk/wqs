@@ -113,7 +113,8 @@ public class RollupUpdater {
         if (session.previousStart() != null) {
             moveSession(item, session.previousStart(), session.startedAt());
         }
-        Integer productId = upsertSession(contribution, session.startedAt(), playIsNew, playIsLive);
+        SessionLabel label = upsertSession(contribution, session.startedAt(), playIsNew, playIsLive);
+        Integer productId = label.productId();
 
         boolean keyChanged = !session.isNew()
                 && (session.previousStart() != null || !Objects.equals(oldProductId, productId));
@@ -122,6 +123,7 @@ public class RollupUpdater {
                 playIsNew,
                 session.startedAt().toInstant(),
                 productId,
+                label.currency(),
                 keyChanged ? oldStart.toInstant() : null,
                 keyChanged ? oldProductId : null,
                 keyChanged);
@@ -240,9 +242,9 @@ public class RollupUpdater {
      * @param playIsNew  the item created its play: +1 playCount
      * @param playIsLive the item is its play's only surviving transaction (new, or emptied by
      *                   cancels): +1 playCountExclCancelled
-     * @return the session's productId after the fold.
+     * @return the session's productId and currency after the fold.
      */
-    private Integer upsertSession(
+    private SessionLabel upsertSession(
             Contribution c, OffsetDateTime startedAt, boolean playIsNew, boolean playIsLive) {
         ProjectionItem item = c.item();
         int playDelta = playIsNew ? 1 : 0;
@@ -279,9 +281,14 @@ public class RollupUpdater {
                 .set(WQ_SESSION.totalPlaysExclCancelled, summed(WQ_SESSION.totalPlaysExclCancelled))
                 .set(WQ_SESSION.totalWinsExclCancelled, summed(WQ_SESSION.totalWinsExclCancelled))
                 .set(WQ_SESSION.netExclCancelled, summed(WQ_SESSION.netExclCancelled))
-                .returning(WQ_SESSION.productId)
+                .returning(WQ_SESSION.productId, WQ_SESSION.currency)
                 .fetchSingle()
-                .getProductId();
+                .map(r -> new SessionLabel(
+                        r.get(WQ_SESSION.productId), r.get(WQ_SESSION.currency)));
+    }
+
+    /** The session's non-key labels after a fold: both LEAST over its items. */
+    private record SessionLabel(Integer productId, String currency) {
     }
 
     /** existing + incoming, for ON CONFLICT DO UPDATE. */

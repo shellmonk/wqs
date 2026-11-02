@@ -175,6 +175,74 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         assertEveryCounterMatchesTheProjection();
     }
 
+    /**
+     * R98: a session's page rows carry the SESSION's currency -- LEAST over its items, as
+     * "wqSession" does -- in every view, whatever order its items arrive in. t1 (USD, both views)
+     * and a1 (AUD, /cc only) each open the session's row in a view first depending on order; t0
+     * (USD, a day earlier) re-anchors it, so the row is also moved. Every order must leave both
+     * views' rows at AUD, identical, and agreeing with the session.
+     */
+    @Test
+    void session_page_rows_carry_the_least_currency_in_every_view_in_any_arrival_order() {
+        Instant dayBefore = T0.minus(1, java.time.temporal.ChronoUnit.DAYS);
+        List<ProjectionItem> items = List.of(
+                txCurrency("t1", T0, "USD"),
+                new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a1", T0.plusSeconds(10), 11,
+                        "b9", null, (short) 9, new BigDecimal("5.0000"), "AUD", null, null, null),
+                txCurrency("t0", dayBefore, "USD"));
+
+        List<String> expected = null;
+        for (List<ProjectionItem> order : permutations(items)) {
+            clearProjection();
+            long offset = 0;
+            for (ProjectionItem item : order) {
+                writer.apply(new ProjectionBatch("s", List.of(item), ++offset));
+            }
+            List<String> rows = dsl().fetch("""
+                    select 'web' as v, "occurredAt", "productId", "currency", "visibleExclCancelled"
+                    from "wqWebHighLevel" where "kind" = 0
+                    union all
+                    select 'cc', "occurredAt", "productId", "currency", "visibleExclCancelled"
+                    from "wqCcHighLevel" where "kind" = 0
+                    order by 1""").map(r -> r.intoList().toString());
+            String described = order.stream().map(ProjectionItem::sourceId).toList().toString();
+            assertThat(rows).as(described).hasSize(2).allMatch(row -> row.contains("AUD"));
+            String sessionCurrency = dsl().fetchOne("select \"currency\" from \"wqSession\"")
+                    .get(0, String.class);
+            assertThat(sessionCurrency).as(described).isEqualTo("AUD");
+            assertThat(new ProjectionInvariants(dsl()).drift()).as(described).isEmpty();
+            if (expected == null) {
+                expected = rows;
+            } else {
+                assertThat(rows).as(described).isEqualTo(expected);
+            }
+        }
+    }
+
+    private ProjectionItem txCurrency(String id, Instant at, String currency) {
+        return new ProjectionItem(
+                1L, SourceKind.TRANSACTION, id, at, 11, "b9", "b9-p",
+                (short) 1, new BigDecimal("5.0000"), currency, null, null, null);
+    }
+
+    private static <T> List<List<T>> permutations(List<T> items) {
+        if (items.isEmpty()) {
+            return List.of(List.of());
+        }
+        List<List<T>> result = new java.util.ArrayList<>();
+        for (int i = 0; i < items.size(); i++) {
+            List<T> rest = new java.util.ArrayList<>(items);
+            T head = rest.remove(i);
+            for (List<T> tail : permutations(rest)) {
+                List<T> order = new java.util.ArrayList<>();
+                order.add(head);
+                order.addAll(tail);
+                result.add(order);
+            }
+        }
+        return result;
+    }
+
     /** P-2 over the whole projection, via the shared oracle. */
     private void assertEveryCounterMatchesTheProjection() {
         assertThat(new ProjectionInvariants(dsl()).counterDrift()).isEmpty();

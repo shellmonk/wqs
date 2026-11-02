@@ -36,6 +36,12 @@ import wqs.domain.ViewKind;
  * item joining a session whose row in a view its source feeds is hidden REVIVES it, since the
  * item is itself a surviving item in that view.
  *
+ * Currency: a session row carries the SESSION's currency (LEAST over its items, exactly as
+ * "wqSession" holds it, from {@link RollupResult#sessionCurrency}), never the triggering item's --
+ * otherwise a mixed-currency session's row would depend on which item opened it in each view.
+ * Currency is not part of the key, so when a later item lowers it the existing rows are updated in
+ * place, in every view. An unsessioned row carries its item's own currency.
+ *
  * A cancellation never creates a row; its effects are applied by {@link CancellationApplier}.
  */
 @Component
@@ -67,7 +73,7 @@ public class HighLevelUpdater {
         if (!item.isSessioned()) {
             return new HighLevelResult(
                     insertForSource(item, item.occurredAt(), (short) item.source().code(),
-                            item.sourceId(), item.productId()),
+                            item.sourceId(), item.productId(), item.currency()),
                     Set.of(), null, null, Map.of(), Set.of());
         }
         if (rollup.sessionStart() == null) {
@@ -92,7 +98,7 @@ public class HighLevelUpdater {
         // session's items arrived in (P-1). The item is live (cancellations return above), so
         // the session has a surviving item in that view and the row is visible.
         Set<ViewKind> inserted = insertForSource(item, rollup.sessionStart(), KIND_SESSION,
-                item.batchId(), rollup.sessionProductId());
+                item.batchId(), rollup.sessionProductId(), rollup.sessionCurrency());
         // Where the row already existed, it may have been hidden by cancels; this live item
         // makes the session visible again in the views its source feeds.
         Set<ViewKind> revived = HighLevelResult.newViewSet();
@@ -100,6 +106,11 @@ public class HighLevelUpdater {
             if (!inserted.contains(view) && revive(view(view), item, rollup)) {
                 revived.add(view);
             }
+        }
+        // This item may have lowered the session's currency; rows inserted or moved above
+        // already carry it, any other existing row is brought in line here (all views).
+        for (ViewKind view : ViewKind.values()) {
+            syncCurrency(view(view), item, rollup);
         }
         return new HighLevelResult(inserted, moved,
                 moved.isEmpty() ? null : rollup.previousSessionStart(),
@@ -119,12 +130,24 @@ public class HighLevelUpdater {
                 .execute() > 0;
     }
 
+    /** Sets the session row's currency to the session's, where a row exists and differs. */
+    private void syncCurrency(View v, ProjectionItem item, RollupResult rollup) {
+        dsl.update(v.table)
+                .set(v.currency, rollup.sessionCurrency())
+                .where(v.userId.eq(item.userId()),
+                       v.occurredAt.eq(utc(rollup.sessionStart())),
+                       v.kind.eq(KIND_SESSION),
+                       v.refId.eq(item.batchId()),
+                       v.currency.ne(rollup.sessionCurrency()))
+                .execute();
+    }
+
     private Set<ViewKind> insertForSource(ProjectionItem item, Instant at, short kind,
-                                          String refId, Integer productId) {
+                                          String refId, Integer productId, String currency) {
         Set<ViewKind> inserted = HighLevelResult.newViewSet();
         for (ViewKind view : item.source().views()) {
             if (insert(view(view), item.userId(), at, kind, refId, productId,
-                    item.currency(), true) > 0) {
+                    currency, true) > 0) {
                 inserted.add(view);
             }
         }
@@ -156,13 +179,13 @@ public class HighLevelUpdater {
                        v.occurredAt.eq(utc(rollup.previousSessionStart())),
                        v.kind.eq(KIND_SESSION),
                        v.refId.eq(item.batchId()))
-                .returning(v.visible, v.currency)
+                .returning(v.visible)
                 .fetchOne();
         if (old == null) {
             return null;
         }
         insert(v, item.userId(), rollup.sessionStart(), KIND_SESSION, item.batchId(),
-                rollup.sessionProductId(), old.get(v.currency), old.get(v.visible));
+                rollup.sessionProductId(), rollup.sessionCurrency(), old.get(v.visible));
         return old.get(v.visible);
     }
 

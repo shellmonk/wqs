@@ -14,6 +14,9 @@ import java.time.Instant;
  * @param playIsNew                this item created its play
  * @param sessionStart             the session's startedAt after this item (null only for NONE)
  * @param sessionProductId         the session's productId after this item (may be null)
+ * @param sessionCurrency          the session's currency after this item: LEAST over its items,
+ *                                 like productId, so it can go lower as items arrive (null only
+ *                                 for NONE). Not part of any key; session page rows carry it.
  * @param previousSessionStart     the session's startedAt before this item; set only when
  *                                 {@code sessionKeyChanged}
  * @param previousSessionProductId the session's productId before this item; meaningful only
@@ -26,11 +29,12 @@ public record RollupResult(
         boolean playIsNew,
         Instant sessionStart,
         Integer sessionProductId,
+        String sessionCurrency,
         Instant previousSessionStart,
         Integer previousSessionProductId,
         boolean sessionKeyChanged) {
 
     /** The result for an unsessioned item or a cancellation: no rollup was touched. */
     public static final RollupResult NONE =
-            new RollupResult(false, false, null, null, null, null, false);
+            new RollupResult(false, false, null, null, null, null, null, false);
 }

@@ -139,7 +139,7 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         RollupResult result = apply(win("t3", "b1", "p2", "1.0000", T0.plusSeconds(30)));
 
-        assertThat(result).isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
+        assertThat(result).isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
         assertThat(play("b1", "p2").getStartedAt()).isEqualTo(utc(T0.plusSeconds(30)));
         assertThat(play("b1", "p2").getEndedAt()).isEqualTo(utc(T0.plusSeconds(50)));
         assertThat(session("b1").getStartedAt()).isEqualTo(utc(T0));
@@ -182,13 +182,13 @@ class RollupUpdaterTest extends PostgresTestBase {
     void the_result_reports_new_groups_and_re_anchoring() {
         Instant start = T0.plusSeconds(100);
         assertThat(apply(wager("t1", "b1", "p1", "5.0000", start)))
-                .isEqualTo(new RollupResult(true, true, start, 11, null, null, false));
+                .isEqualTo(new RollupResult(true, true, start, 11, "EUR", null, null, false));
         assertThat(apply(win("t2", "b1", "p1", "1.0000", T0.plusSeconds(150))))
-                .isEqualTo(new RollupResult(false, false, start, 11, null, null, false));
+                .isEqualTo(new RollupResult(false, false, start, 11, "EUR", null, null, false));
         assertThat(apply(wager("t3", "b1", "p2", "1.0000", T0.plusSeconds(160))))
-                .isEqualTo(new RollupResult(false, true, start, 11, null, null, false));
+                .isEqualTo(new RollupResult(false, true, start, 11, "EUR", null, null, false));
         assertThat(apply(wager("t4", "b1", "p1", "1.0000", T0)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, start, 11, true));
+                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", start, 11, true));
         assertThat(apply(payment())).isEqualTo(RollupResult.NONE);
     }
 
@@ -197,10 +197,10 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0, 12));
 
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, T0, 12, true));
+                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", T0, 12, true));
         // A higher productId does not displace the LEAST: no key change.
         assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), 13)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
+                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
     }
 
     @Test
@@ -208,10 +208,10 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0, null));
 
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, T0, null, true));
+                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", T0, null, true));
         // A null productId later does not displace the value.
         assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), null)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
+                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
     }
 
     @Test
@@ -219,7 +219,8 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100), 11));
 
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0, 11)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, T0.plusSeconds(100), 11, true));
+                .isEqualTo(new RollupResult(
+                        false, false, T0, 11, "EUR", T0.plusSeconds(100), 11, true));
     }
 
     @Test
@@ -227,7 +228,8 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100), 12));
 
         assertThat(apply(wager("t2", "b1", "p2", "1.0000", T0, 11)))
-                .isEqualTo(new RollupResult(false, true, T0, 11, T0.plusSeconds(100), 12, true));
+                .isEqualTo(new RollupResult(
+                        false, true, T0, 11, "EUR", T0.plusSeconds(100), 12, true));
     }
 
     @Test
@@ -235,7 +237,7 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0, 11));
 
         assertThat(apply(win("t2", "b1", "p1", "1.0000", T0.plusSeconds(10))))
-                .isEqualTo(new RollupResult(false, false, T0, 11, null, null, false));
+                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
     }
 
     @Test
@@ -257,9 +259,10 @@ class RollupUpdaterTest extends PostgresTestBase {
         RollupResult first = apply(item("t1", "b1", blank, "5.0000", T0.plusSeconds(100), (short) 1, 11));
         RollupResult earlier = apply(item("t2", "b1", blank, "1.0000", T0, (short) 1, 11));
 
-        assertThat(first).isEqualTo(new RollupResult(true, false, T0.plusSeconds(100), 11, null, null, false));
+        assertThat(first).isEqualTo(
+                new RollupResult(true, false, T0.plusSeconds(100), 11, "EUR", null, null, false));
         assertThat(earlier).isEqualTo(
-                new RollupResult(false, false, T0, 11, T0.plusSeconds(100), 11, true));
+                new RollupResult(false, false, T0, 11, "EUR", T0.plusSeconds(100), 11, true));
         assertThat(dsl().fetchCount(WQ_SESSION)).isEqualTo(1);
         assertThat(dsl().fetchCount(WQ_PLAY)).isZero();
         WqSessionRecord session = session("b1");

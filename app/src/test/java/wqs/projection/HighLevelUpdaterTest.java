@@ -311,16 +311,17 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     private static RollupResult newSession(Instant start, Integer productId) {
-        return new RollupResult(true, true, start, productId, null, null, false);
+        return new RollupResult(true, true, start, productId, "EUR", null, null, false);
     }
 
     private static RollupResult joined(Instant start, Integer productId) {
-        return new RollupResult(false, false, start, productId, null, null, false);
+        return new RollupResult(false, false, start, productId, "EUR", null, null, false);
     }
 
     private static RollupResult moved(Instant start, Integer productId,
                                       Instant prevStart, Integer prevProductId) {
-        return new RollupResult(false, false, start, productId, prevStart, prevProductId, true);
+        return new RollupResult(
+                false, false, start, productId, "EUR", prevStart, prevProductId, true);
     }
 
     private ProjectionItem tx(String id, String batchId, Instant at) {
