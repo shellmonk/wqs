@@ -257,17 +257,17 @@ class StreamPayloadJsonTest {
     @Test
     void a_nul_in_any_text_field_is_rejected_naming_the_field() {
         for (String path : new String[] {
-                "id", "type", "productId", "productType", "amount.currency", "userContext.ownerId",
+                "id", "type", "productId", "productType", "amount.currency",
                 "batchContext.batchId", "batchContext.subBatchId", "references.transactionReference",
                 "description", "accountContext.accountType", "references.paymentId"}) {
-            assertThatThrownBy(() -> parse(with(path, "\"1-a\\u0000b\"")))
+            assertThatThrownBy(() -> parse(with(path, "\"ab\\u0000c\"")))
                     .as(path).isInstanceOf(IllegalArgumentException.class)
-                    .satisfiesAnyOf(
-                            e -> assertThat(e).hasMessageContaining("U+0000"),
-                            e -> assertThat(e).hasMessageContaining("ownerId"));
+                    .hasMessageContaining(path).hasMessageContaining("U+0000");
         }
-        assertThatThrownBy(() -> parse(with("id", "\"a\\u0000b\"")))
-                .hasMessageContaining("id").hasMessageContaining("U+0000");
+        // ownerId: the NUL is rejected as text before the format is even looked at.
+        assertThatThrownBy(() -> parse(with("userContext.ownerId", "\"1-7\\u0000\"")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("userContext.ownerId").hasMessageContaining("U+0000");
     }
 
     @Test

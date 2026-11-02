@@ -10,16 +10,16 @@ import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import java.util.List;
+import wqs.db.TxTypeRegistry;
 import wqs.domain.ProjectionItem;
 import wqs.ingest.DeadLetterStore;
 import wqs.metrics.CachedGaugeValue;
 import wqs.projection.ProjectionBatch;
 import wqs.projection.ProjectionWriter;
-import wqs.db.TxTypeRegistry;
 import wqs.projection.StreamPayloadMapper;
 import wqs.projection.WriteResult;
 
@@ -197,7 +197,10 @@ public class StreamConsumer {
             ProjectionItem item;
             try {
                 item = payloadMapper.toItem(payload, txTypes);
-            } catch (RuntimeException e) {
+            } catch (IllegalArgumentException e) {
+                // Only bad input is poison (the mapper and the domain reject it this way). Anything
+                // else -- notably a DataAccessException from the type registry -- is infrastructure:
+                // it falls to the outer catch and retries via recovery, never dead-lettering.
                 deadLetterUnmappable(payload, offset, e);
                 return;
             }
@@ -220,7 +223,7 @@ public class StreamConsumer {
      * when nothing earlier is still buffered; otherwise the next batch's higher offset covers it.
      * (If the process dies in between, the event is redelivered and recorded again: harmless.)
      */
-    private void deadLetterUnmappable(StreamPayload payload, long offset, RuntimeException cause) {
+    private void deadLetterUnmappable(StreamPayload payload, long offset, IllegalArgumentException cause) {
         log.error("Cannot map event {} at offset {}; dead-lettering it",
                 payload.id(), offset, cause);
         deadLetterStore.record(properties.name(), offset, payload, cause, 1);

@@ -8,9 +8,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.DeferredImportSelector;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.type.AnnotationMetadata;
+import wqs.db.TxTypeRegistry;
 import wqs.ingest.DeadLetterStore;
 import wqs.projection.ProjectionWriter;
-import wqs.db.TxTypeRegistry;
 import wqs.projection.StreamPayloadMapper;
 
 /**

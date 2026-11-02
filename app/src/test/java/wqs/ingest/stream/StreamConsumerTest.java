@@ -223,6 +223,41 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(source.subscribeCount()).isEqualTo(2);
     }
 
+    /**
+     * The registry reaches the database on a first-sighted type code. A transient failure there is
+     * infrastructure, not poison: no dead letter, no offset advance, and the message is applied
+     * after recovery.
+     */
+    @Test
+    void a_transient_registry_failure_recovers_instead_of_dead_lettering() {
+        wqs.db.TxTypeRegistry flaky = org.mockito.Mockito.spy(txTypes);
+        org.mockito.Mockito.doThrow(new org.springframework.dao.TransientDataAccessResourceException("blip"))
+                .doCallRealMethod().when(flaky).idOf("TT_BUY");
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamProperties properties =
+                new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null);
+        StreamConsumer consumer = new StreamConsumer(
+                source, properties, payloadMapper, flaky, writer, offsetStore, registry, clock, deadLetterStore);
+        dsl().execute("delete from \"wqDeadLetter\"");
+        consumer.start();
+
+        source.queue(payload("tx-flaky"), 5);
+        source.deliverAll(); // must not throw
+
+        assertThat(count("wqDeadLetter")).as("not dead-lettered").isZero();
+        assertThat(offsetStore.read("wallet-transactions")).as("offset not advanced").isEmpty();
+        assertThat(count("wqWebItem")).isZero();
+
+        clock.advance(Duration.ofSeconds(6));
+        consumer.poll(); // backoff elapsed: re-subscribes from the stored offset
+        source.redeliverFromSubscription();
+        consumer.poll();
+
+        assertThat(count("wqWebItem")).as("applied after recovery").isEqualTo(1);
+        assertThat(offsetStore.read("wallet-transactions")).contains(5L);
+        assertThat(count("wqDeadLetter")).isZero();
+    }
+
     private StreamConsumer consumerWith(Clock clock, int batchSize) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);
