@@ -51,3 +51,11 @@ val generateJooq by tasks.registering(JavaExec::class) {
     inputs.dir("src/codegen/java")
     outputs.dir(generatedSrc)
 }
+
+val checkMigrationQuoting by tasks.registering(MigrationQuotingCheck::class) {
+    group = "verification"
+    description = "Fail if any migration contains an unquoted camelCase identifier"
+    migrations.from(fileTree("src/main/resources/db/migration"))
+}
+
+tasks.named("check") { dependsOn(checkMigrationQuoting) }
