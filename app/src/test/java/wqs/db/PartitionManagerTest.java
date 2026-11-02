@@ -22,8 +22,8 @@ class PartitionManagerTest extends PostgresTestBase {
     void creates_partitions_for_the_requested_window() {
         int created = manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 2);
 
-        // 3 months (Jan, Feb, Mar) x 6 partitioned tables
-        assertThat(created).isEqualTo(18);
+        // 3 months (Jan, Feb, Mar) x 7 partitioned tables
+        assertThat(created).isEqualTo(21);
         assertThat(testPartitionNames())
                 .contains("wqWebItem_2031_01", "wqWebItem_2031_02", "wqWebItem_2031_03",
                           "wqCcItem_2031_01", "wqCcItem_2031_02", "wqCcItem_2031_03",
@@ -84,6 +84,26 @@ class PartitionManagerTest extends PostgresTestBase {
                 .get(0, Integer.class);
         assertThat(februaryCount).isEqualTo(1);
         assertThat(januaryCount).isZero();
+    }
+
+    @Test
+    void date_partitioned_count_table_routes_first_and_last_day_of_a_month_correctly() {
+        manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 1);
+
+        for (String day : List.of("2031-01-01", "2031-01-31", "2031-02-01", "2031-02-28")) {
+            dsl().execute("""
+                          insert into "wqCountDay"
+                            ("userId","viewKind","pageUnit","productId","period","cntAll","cntExclCancelled")
+                          values (1, 1, 0, 0, date '%s', 1, 1)
+                          """.formatted(day));
+        }
+
+        assertThat(rowsIn("wqCountDay_2031_01")).containsExactlyInAnyOrder("2031-01-01", "2031-01-31");
+        assertThat(rowsIn("wqCountDay_2031_02")).containsExactlyInAnyOrder("2031-02-01", "2031-02-28");
+    }
+
+    private List<String> rowsIn(String partition) {
+        return dsl().fetch("select \"period\"::text from \"" + partition + "\"").getValues(0, String.class);
     }
 
     private void dropTestPartitions() {

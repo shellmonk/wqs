@@ -2,7 +2,7 @@ package wqs.db;
 
 /**
  * Every monthly RANGE-partitioned table and the column it is partitioned on.
- * Phase 3 adds "wqCountDay".
+ * "wqCountDay" is partitioned on a date, the rest on timestamptz.
  */
 public enum PartitionedTable {
 
@@ -11,7 +11,8 @@ public enum PartitionedTable {
     WQ_SESSION("wqSession", "startedAt"),
     WQ_PLAY("wqPlay", "startedAt"),
     WQ_WEB_HIGH_LEVEL("wqWebHighLevel", "occurredAt"),
-    WQ_CC_HIGH_LEVEL("wqCcHighLevel", "occurredAt");
+    WQ_CC_HIGH_LEVEL("wqCcHighLevel", "occurredAt"),
+    WQ_COUNT_DAY("wqCountDay", "period");
 
     private final String tableName;
     private final String partitionKey;
