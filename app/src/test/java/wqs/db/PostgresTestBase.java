@@ -16,12 +16,7 @@ public abstract class PostgresTestBase {
     // (deliberately not settable from the project, so CI can't be forced into it). Requesting
     // it without that opt-in just logs a WARN on every run. A developer who wants reuse locally
     // can set that property for themselves and re-add the call here.
-    //
-    // max_connections is raised because Spring's test-context cache keeps one Hikari pool (10
-    // connections, kept idle) per distinct context configuration alive for the whole JVM, and the
-    // suite has more distinct contexts than the default 100 connections can hold.
-    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16")
-            .withCommand("postgres", "-c", "max_connections=400");
+    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16");
 
     private static DataSource dataSource;
 

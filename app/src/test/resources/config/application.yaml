@@ -1,8 +1,17 @@
 # Test-only overrides, layered over the main application.yaml (Spring Boot reads
 # classpath:/config/application.yaml after, and on top of, classpath:/application.yaml).
+spring:
+  datasource:
+    hikari:
+      # Spring's test-context cache keeps a pool open for every cached context (up to its cache
+      # limit), so the default 10 per pool exhausts Postgres' 100 connections across the suite.
+      # Must stay >= 2: the partition provisioner and the drained-cancel dead-letter path each take
+      # a second connection (REQUIRES_NEW) while the projection transaction holds the first.
+      maximum-pool-size: 4
 wqs:
   partition:
     # Test data is deliberately dated 2031-2035 so it never collides with the live months the
     # rollover service provisions. Production keeps the default sanity window of 12 months; the
-    # window itself is tested with explicit values (PartitionProvisionerTest, ProjectionWriterTest).
+    # window itself is tested with explicit values (PartitionProvisionerTest, and
+    # PartitionWindowDeadLetterTest, which runs a context with max-months-ahead=12).
     max-months-ahead: 240
