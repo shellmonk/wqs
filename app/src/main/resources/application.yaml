@@ -46,6 +46,12 @@ wqs:
       # requests -- WQS cannot tell a forged header from a real one. Exactly one value is accepted.
       mode: none
       # header: X-Authenticated-User-Id
+      # Leave header unset for the default. Set-but-blank, or not an HTTP token, fails startup.
+  cc:
+    # O-14: /cc has no authentication yet; open only on a trusted network.
+    # deny (the default): every /cc request is 403. open: /cc serves any userId to any caller
+    # (a WARN is logged at startup). Any other value fails startup.
+    access: deny
   stream:
     # Off by default so broker-less contexts (tests, tooling) start. Deployments enable it with
     # WQS_STREAM_ENABLED=true (Spring relaxed binding).

@@ -21,7 +21,11 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import wqs.config.ReaderDsl;
 import wqs.db.RawSqlJustified;
+import wqs.api.archfixture.ParameterReadingAdvice;
+import wqs.api.cc.archfixture.CcParameterReader;
 import wqs.api.web.archfixture.ParameterReadingWebController;
+import wqs.api.web.archfixture.UriBuilderWebController;
+import wqs.api.web.archfixture.WebRequestParameterReader;
 import wqs.read.archfixture.QualifiedReader;
 import wqs.read.archfixture.UnqualifiedCtorParamReader;
 import wqs.read.archfixture.UnqualifiedInjectedFieldReader;
@@ -93,26 +97,47 @@ class ArchitectureTest {
 
     /**
      * Spec 9 control 1: /web's request binding has no path to request parameters for the user.
-     * Nothing in {@code wqs.api.web} may read raw request parameters -- the only way a parameter
-     * reaches a /web handler is a declared, named {@code @RequestParam}, and
-     * {@code WebProjectionSecurityTest.web_controller_binds_no_userId_parameter} pins that none
-     * of those is userId. Matches calls on ServletRequest or any subtype (HttpServletRequest,
-     * wrappers); the query string is included since it carries the same parameters unparsed.
+     * Nothing in {@code wqs.api} except {@code wqs.api.cc} (which takes userId as a parameter by
+     * design, spec 7.1) may read raw request parameters, through the servlet API
+     * (ServletRequest and subtypes) or Spring's (WebRequest and subtypes); the query string is
+     * included since it carries the same parameters unparsed, and so is
+     * {@code ServletUriComponentsBuilder}, which re-reads the current request. The only way a
+     * parameter reaches a /web handler is a declared, named {@code @RequestParam}, and
+     * {@code WebProjectionSecurityTest.web_controller_binds_only_allowlisted_parameters} pins
+     * which ones.
      */
     @Test
     void web_layer_never_reads_raw_request_parameters() {
         webParameterRule().check(classes);
     }
 
-    /** Proves the rule above can fail, on both the parameter API and the query string. */
+    /** Proves the rule above can fail, branch by branch, each violation naming its member. */
     @Test
-    void web_parameter_rule_rejects_a_web_class_reading_parameters() {
-        JavaClasses fixture = new ClassFileImporter().importClasses(ParameterReadingWebController.class);
+    void web_parameter_rule_rejects_each_way_of_reading_parameters() {
+        assertParameterRuleRejects(ParameterReadingWebController.class, "getParameter(", "getQueryString(");
+        assertParameterRuleRejects(WebRequestParameterReader.class, "getParameter(");
+        assertParameterRuleRejects(UriBuilderWebController.class, "fromCurrentRequest(");
+        assertParameterRuleRejects(ParameterReadingAdvice.class, "getParameterMap(");
+    }
+
+    /** wqs.api.cc is out of scope: checked alongside a violator, only the violator is reported. */
+    @Test
+    void web_parameter_rule_accepts_cc_reading_its_userId_parameter() {
+        JavaClasses fixture = new ClassFileImporter()
+                .importClasses(CcParameterReader.class, ParameterReadingWebController.class);
         assertThatThrownBy(() -> webParameterRule().check(fixture))
-                .isInstanceOf(AssertionError.class)
                 .hasMessageContaining("ParameterReadingWebController")
-                .hasMessageContaining("getParameter(")
-                .hasMessageContaining("getQueryString(");
+                .hasMessageNotContaining("CcParameterReader");
+    }
+
+    private static void assertParameterRuleRejects(Class<?> fixtureClass, String... members) {
+        JavaClasses fixture = new ClassFileImporter().importClasses(fixtureClass);
+        var thrown = assertThatThrownBy(() -> webParameterRule().check(fixture))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining(fixtureClass.getSimpleName());
+        for (String member : members) {
+            thrown.hasMessageContaining(member);
+        }
     }
 
     private static final java.util.Set<String> RAW_PARAMETER_METHODS = java.util.Set.of(
@@ -120,15 +145,20 @@ class ArchitectureTest {
 
     private static ArchRule webParameterRule() {
         return noClasses()
-                .that().resideInAPackage("wqs.api.web..")
+                .that().resideInAPackage("wqs.api..")
+                .and().resideOutsideOfPackage("wqs.api.cc..")
                 .should().callMethodWhere(new DescribedPredicate<JavaMethodCall>(
-                        "the target is a ServletRequest parameter or query-string accessor") {
+                        "the target is a ServletRequest/WebRequest parameter or query-string accessor") {
                     @Override
                     public boolean test(JavaMethodCall call) {
                         return RAW_PARAMETER_METHODS.contains(call.getTarget().getName())
-                                && call.getTargetOwner().isAssignableTo(jakarta.servlet.ServletRequest.class);
+                                && (call.getTargetOwner().isAssignableTo(jakarta.servlet.ServletRequest.class)
+                                        || call.getTargetOwner().isAssignableTo(
+                                                org.springframework.web.context.request.WebRequest.class));
                     }
-                });
+                })
+                .orShould().dependOnClassesThat().areAssignableTo(
+                        org.springframework.web.servlet.support.ServletUriComponentsBuilder.class);
     }
 
     private static DescribedPredicate<JavaFieldAccess> operatorTableField() {

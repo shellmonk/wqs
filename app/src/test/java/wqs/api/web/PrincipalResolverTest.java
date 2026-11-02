@@ -1,6 +1,7 @@
 package wqs.api.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.OptionalLong;
 import org.junit.jupiter.api.Test;
@@ -32,7 +33,15 @@ class PrincipalResolverTest {
         WebPrincipalProperties p = new WebPrincipalProperties(null, null);
         assertThat(p.mode()).isEqualTo(WebPrincipalProperties.Mode.NONE);
         assertThat(p.header()).isEqualTo(HEADER);
-        assertThat(new WebPrincipalProperties(null, "  ").header()).isEqualTo(HEADER);
+    }
+
+    /** Only an UNSET header defaults; a set-but-unusable one fails (see ConfigBindingTest). */
+    @Test
+    void blank_or_non_token_header_is_rejected() {
+        for (String bad : new String[] {"", "  ", "X User", "X-User:", "X-\u00dcser", "X,Y", " X-User"}) {
+            assertThatThrownBy(() -> new WebPrincipalProperties(WebPrincipalProperties.Mode.TRUSTED_HEADER, bad))
+                    .as("'%s'", bad).isInstanceOf(IllegalArgumentException.class);
+        }
     }
 
     @Test

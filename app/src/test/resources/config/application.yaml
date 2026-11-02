@@ -27,3 +27,7 @@ wqs:
       # defaults to none (every /web request is 401, D2); WebProjectionSecurityTest pins that mode
       # with an explicit override.
       mode: trusted-header
+  cc:
+    # The API tests call /cc directly. Production defaults to deny (403, O-14); CcAccessDenyTest
+    # pins that mode with an explicit override.
+    access: open

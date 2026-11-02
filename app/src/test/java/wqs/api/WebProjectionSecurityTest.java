@@ -12,7 +12,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -21,7 +23,6 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import wqs.api.web.WebProjectionController;
@@ -125,11 +126,19 @@ class WebProjectionSecurityTest extends ApiTestBase {
     }
 
     /**
-     * Spec 9 control 1: the /web handler's binding has no path to a request parameter for the
-     * user -- no {@code @RequestParam} named or bound as userId, no parameter map, no model binding.
+     * Spec 9 control 1, as an ALLOWLIST: every parameter of every /web handler is either the raw
+     * {@code HttpServletRequest} (handed only to the PrincipalResolver; ArchitectureTest bans its
+     * parameter accessors) or an explicitly named {@code @RequestParam} of a simple type from the
+     * fixed set below. Anything else -- an unannotated POJO (implicit {@code @ModelAttribute}), a
+     * Map, a WebRequest, {@code @RequestHeader}, {@code @PathVariable}, {@code @MatrixVariable},
+     * or a {@code @RequestParam} named userId -- fails.
      */
     @Test
-    void web_controller_binds_no_userId_parameter() {
+    void web_controller_binds_only_allowlisted_parameters() {
+        Set<String> allowedNames = Set.of(
+                "from", "to", "aggregationLevel", "productId", "excludeCancelledTransactions", "page", "pageSize");
+        Set<Class<?>> simpleTypes = Set.of(
+                java.time.Instant.class, int.class, Integer.class, long.class, Long.class, boolean.class, Boolean.class);
         List<Method> handlers = new ArrayList<>();
         for (Method m : WebProjectionController.class.getDeclaredMethods()) {
             if (AnnotatedElementUtils.hasAnnotation(m, RequestMapping.class)) {
@@ -139,16 +148,34 @@ class WebProjectionSecurityTest extends ApiTestBase {
         assertThat(handlers).isNotEmpty();
         for (Method m : handlers) {
             for (Parameter p : m.getParameters()) {
-                assertThat(p.getName()).as("%s parameter name", m.getName()).isNotEqualToIgnoringCase("userId");
-                assertThat(p.isAnnotationPresent(ModelAttribute.class)).as("%s @ModelAttribute", m.getName()).isFalse();
-                RequestParam rp = p.getAnnotation(RequestParam.class);
-                if (rp != null) {
-                    assertThat(Map.class.isAssignableFrom(p.getType()))
-                            .as("%s binds a parameter map", m.getName()).isFalse();
-                    assertThat(rp.name()).isNotEqualToIgnoringCase("userId");
-                    assertThat(rp.value()).isNotEqualToIgnoringCase("userId");
+                String where = m.getName() + "(" + p.getType().getSimpleName() + " " + p.getName() + ")";
+                if (p.getType() == HttpServletRequest.class) {
+                    assertThat(p.getAnnotations()).as(where).isEmpty();
+                    continue;
                 }
+                RequestParam rp = p.getAnnotation(RequestParam.class);
+                assertThat(rp).as("%s must be an explicit @RequestParam", where).isNotNull();
+                assertThat(p.getAnnotations()).as("%s carries only @RequestParam/@DateTimeFormat", where)
+                        .allMatch(an -> an instanceof RequestParam || an instanceof DateTimeFormat);
+                assertThat(simpleTypes).as("%s is a simple type", where).contains(p.getType());
+                // Explicit name (no reliance on -parameters), and both aliases agree.
+                String name = rp.name().isEmpty() ? rp.value() : rp.name();
+                assertThat(name).as("%s @RequestParam name", where).isIn(allowedNames);
+                assertThat(rp.value().isEmpty() || rp.value().equals(name)).as(where).isTrue();
             }
+        }
+    }
+
+    /** A ;matrix segment or encoded markup in the path is never echoed into the problem body. */
+    @Test
+    void problem_instance_never_echoes_the_request_uri() throws Exception {
+        for (String path : List.of("/web/v1/projection;x=<script>", "/web/v1/projection;x=%3Cscript%3E")) {
+            String body = mvc.perform(get(path).param("from", FROM).param("to", TO).param("aggregationLevel", "0")
+                            .param("page", "1").param("pageSize", "1").param("userId", "1"))
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.instance").value("/web/v1/projection"))
+                    .andReturn().getResponse().getContentAsString();
+            assertThat(body.toLowerCase()).doesNotContain("<script").doesNotContain("%3cscript").doesNotContain("x=");
         }
     }
 

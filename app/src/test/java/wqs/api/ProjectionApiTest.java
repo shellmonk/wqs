@@ -216,6 +216,38 @@ class ProjectionApiTest extends ApiTestBase {
                 .andExpect(jsonPath("$.items[*].sourceId", not(hasItem("t1"))));
     }
 
+    /** RFC 9457 instance is the endpoint's path template, never the raw request URI. */
+    @Test
+    void problem_instance_is_the_endpoint_template() throws Exception {
+        expectProblem(cc("page", "0"), 400).andExpect(jsonPath("$.instance").value("/cc/v1/projection"));
+        expectProblem(web("page", "0"), 400).andExpect(jsonPath("$.instance").value("/web/v1/projection"));
+        expectProblem(cc("aggregationLevel", "1"), 501).andExpect(jsonPath("$.instance").value("/cc/v1/projection"));
+        String body = mvc.perform(get("/cc/v1/projection;x=<script>").param("page", "0"))
+                .andExpect(status().isBadRequest()).andReturn().getResponse().getContentAsString();
+        assertThat(body.toLowerCase()).doesNotContain("<script").doesNotContain("%3cscript").contains("\"/cc/v1/projection\"");
+    }
+
+    @Test
+    void wrong_method_is_405_with_fixed_text() throws Exception {
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/cc/v1/projection;x=<script>"))
+                .andExpect(status().isMethodNotAllowed())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(405))
+                .andExpect(jsonPath("$.detail").value("Method not allowed"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Allow", containsString("GET")))
+                .andExpect(content().string(not(containsString("script"))))
+                .andExpect(content().string(not(containsString("POST"))));
+    }
+
+    /** The catch-all must not turn Spring's own client errors into 500s. */
+    @Test
+    void unknown_path_stays_404() throws Exception {
+        mvc.perform(get("/nope/<script>"))
+                .andExpect(status().isNotFound())
+                .andExpect(content().string(not(containsString("script"))));
+    }
+
     /** Spec 11.2. The context's registry is shared by cached contexts' tests, so count the delta. */
     @Test
     void read_duration_is_tagged() throws Exception {
