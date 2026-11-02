@@ -81,13 +81,48 @@ class ProjectionApiTest extends ApiTestBase {
                 .andExpect(jsonPath("$.data[0].ingestedAt").doesNotExist());
     }
 
-    /** D4: valid but not implemented until Phase 5. */
+    /** Phase 5 Task 8: levels 1 and 2 are served (no longer D4's 501), sessions nested per level. */
     @Test
-    void levels_1_and_2_are_501() throws Exception {
-        expectProblem(cc("aggregationLevel", "1"), 501);
-        expectProblem(cc("aggregationLevel", "2"), 501);
-        expectProblem(web("aggregationLevel", "1"), 501);
-        expectProblem(web("aggregationLevel", "2"), 501);
+    void levels_1_and_2_no_longer_501() throws Exception {
+        project(session("s1-a", "2034-02-13T10:00:00Z", "s1-p1"), session("s1-b", "2034-02-13T10:05:00Z", null));
+        for (String level : new String[] {"1", "2"}) {
+            mvc.perform(cc("aggregationLevel", level, "pageSize", "10"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.pageNumber").value(1))
+                    .andExpect(jsonPath("$.pageSize").value(10))
+                    .andExpect(jsonPath("$.totalRowCount").value(4))
+                    .andExpect(jsonPath("$.pagesAvailable").value(1))
+                    .andExpect(jsonPath("$.data.length()").value(4))
+                    .andExpect(jsonPath("$.data[0].kind").value("SESSION"))
+                    .andExpect(jsonPath("$.data[0].batchId").value("s1"))
+                    .andExpect(jsonPath("$.data[0].created").value("2034-02-13T10:00:00Z"))
+                    .andExpect(jsonPath("$.data[0].totalPlay").value(25.0))
+                    .andExpect(jsonPath("$.data[0].totalWin").value(0.0))
+                    .andExpect(jsonPath("$.data[0].amount").value(-25.0))
+                    .andExpect(jsonPath("$.data[0].status").doesNotExist())
+                    .andExpect(jsonPath("$.data[1].kind").value("LIMIT"))
+                    .andExpect(jsonPath("$.data[1].txId").value("l1"));
+            mvc.perform(web("aggregationLevel", level, "pageSize", "10"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.totalRowCount").value(2))
+                    .andExpect(jsonPath("$.data[0].kind").value("SESSION"))
+                    .andExpect(jsonPath("$.data[1].txId").value("t1"));
+        }
+        mvc.perform(cc("aggregationLevel", "1", "pageSize", "10"))
+                .andExpect(jsonPath("$.data[0].txs[*].txId", org.hamcrest.Matchers.contains("s1-b", "s1-a")))
+                .andExpect(jsonPath("$.data[0].subitems").doesNotExist());
+        mvc.perform(cc("aggregationLevel", "2", "pageSize", "10"))
+                .andExpect(jsonPath("$.data[0].subitems[0].subBatchId").value("s1-p1"))
+                .andExpect(jsonPath("$.data[0].subitems[0].playTimestamp").value("2034-02-13T10:00:00Z"))
+                .andExpect(jsonPath("$.data[0].subitems[0].playAmount").value(12.5))
+                .andExpect(jsonPath("$.data[0].subitems[0].txs[*].txId", org.hamcrest.Matchers.contains("s1-a")))
+                // the play-less item stays on the session at level 2
+                .andExpect(jsonPath("$.data[0].txs[*].txId", org.hamcrest.Matchers.contains("s1-b")));
+    }
+
+    private static wqs.domain.ProjectionItem session(String sourceId, String at, String subBatchId) {
+        return new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, sourceId, java.time.Instant.parse(at), "P10",
+                "keno", "s1", subBatchId, TxTypes.PLAY, new java.math.BigDecimal("12.5000"), "EUR", null, null, null);
     }
 
     @Test
@@ -384,7 +419,7 @@ class ProjectionApiTest extends ApiTestBase {
     void problem_instance_is_the_endpoint_template() throws Exception {
         expectProblem(cc("pageNumber", "0"), 400).andExpect(jsonPath("$.instance").value("/cc/wallet-data/rest/v1/projection/%7BplayerId%7D"));
         expectProblem(web("pageNumber", "0"), 400).andExpect(jsonPath("$.instance").value("/web/wallet-data/rest/v1/projection"));
-        expectProblem(cc("aggregationLevel", "1"), 501).andExpect(jsonPath("$.instance").value("/cc/wallet-data/rest/v1/projection/%7BplayerId%7D"));
+        expectProblem(cc("aggregationLevel", "1", "pageNumber", "0"), 400).andExpect(jsonPath("$.instance").value("/cc/wallet-data/rest/v1/projection/%7BplayerId%7D"));
         String body = mvc.perform(get("/cc/wallet-data/rest/v1/projection/1;x=<script>").param("pageNumber", "0"))
                 .andExpect(status().isBadRequest()).andReturn().getResponse().getContentAsString();
         assertThat(body.toLowerCase()).doesNotContain("<script").doesNotContain("%3cscript").contains("\"/cc/wallet-data/rest/v1/projection/%7bplayerid%7d\"");
@@ -420,10 +455,13 @@ class ProjectionApiTest extends ApiTestBase {
         long deep = durationCount("cc", "0", "2-10");
         mvc.perform(cc("pageNumber", "5")).andExpect(status().isOk());
         assertThat(durationCount("cc", "0", "2-10")).isEqualTo(deep + 1);
-        // 501s are not timed: they would seed the level 1/2 latency series with non-reads.
+        // Levels 1 and 2 are timed under their own level tag.
         long l1 = durationCount("cc", "1", "1");
-        mvc.perform(cc("aggregationLevel", "1")).andExpect(status().isNotImplemented());
-        assertThat(durationCount("cc", "1", "1")).isEqualTo(l1);
+        mvc.perform(cc("aggregationLevel", "1")).andExpect(status().isOk());
+        assertThat(durationCount("cc", "1", "1")).isEqualTo(l1 + 1);
+        long w2 = durationCount("web", "2", "1");
+        mvc.perform(web("aggregationLevel", "2")).andExpect(status().isOk());
+        assertThat(durationCount("web", "2", "1")).isEqualTo(w2 + 1);
     }
 
     private long durationCount(String endpoint, String level, String bucket) {

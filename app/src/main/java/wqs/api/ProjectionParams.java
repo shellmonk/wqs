@@ -19,9 +19,6 @@ import wqs.domain.DataDomain;
  *
  * <p>The list filters ({@code productTypes}, {@code transactionTypes}) are cleaned here (D10).
  * {@code page} is the contract's 1-based {@code pageNumber}.
- *
- * <p>Every 400 rule is checked before {@link #requireLevel0}'s 501, so a malformed request is
- * reported as malformed whatever level it asks for.
  */
 public record ProjectionParams(
         Instant from,
@@ -116,13 +113,5 @@ public record ProjectionParams(
             // falls through to the single rejection below
         }
         throw new InvalidParameterException("playerId", "must be a positive integer");
-    }
-
-    /** @throws LevelNotImplementedException for levels 1 and 2 until Phase 5 (D4) */
-    public ProjectionParams requireLevel0() {
-        if (level != AggregationLevel.L0) {
-            throw new LevelNotImplementedException(level);
-        }
-        return this;
     }
 }

@@ -52,15 +52,6 @@ public class ApiErrors {
         return badRequest(request, e.parameter(), "Parameter '" + e.parameter() + "' " + e.reason());
     }
 
-    /** D4. */
-    @ExceptionHandler(LevelNotImplementedException.class)
-    ProblemDetail notImplemented(LevelNotImplementedException e, HttpServletRequest request) {
-        ProblemDetail p = problem(request, HttpStatus.NOT_IMPLEMENTED,
-                "aggregationLevel " + e.level().value() + " is not implemented yet");
-        p.setProperty("parameter", "aggregationLevel");
-        return p;
-    }
-
     /** Spec 9 / D2. Says nothing about why: absent, malformed and disabled look the same. */
     @ExceptionHandler(UnauthenticatedException.class)
     ProblemDetail unauthenticated(UnauthenticatedException e, HttpServletRequest request) {

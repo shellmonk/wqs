@@ -9,10 +9,10 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import wqs.api.ProjectionParams;
+import wqs.domain.AggregationLevel;
 import wqs.domain.ViewKind;
 import wqs.read.ProjectionResponse;
 import wqs.read.ReadMetrics;
-import wqs.read.TxView;
 import wqs.read.cc.CcProjectionService;
 
 /**
@@ -34,7 +34,7 @@ public class CcProjectionController {
     }
 
     @GetMapping("/cc/wallet-data/rest/v1/projection/{playerId}")
-    public ProjectionResponse<TxView> projection(
+    public ProjectionResponse<?> projection(
             @PathVariable("playerId") String playerId,
             @RequestParam("from") @DateTimeFormat(iso = ISO.DATE_TIME) Instant from,
             @RequestParam("to") @DateTimeFormat(iso = ISO.DATE_TIME) Instant to,
@@ -46,9 +46,12 @@ public class CcProjectionController {
             @RequestParam("pageSize") int pageSize) {
         long user = ProjectionParams.parsePlayerId(playerId);
         ProjectionParams p = ProjectionParams.validate(
-                from, to, aggregationLevel, excludeCancelled, productTypes, transactionTypes, pageNumber, pageSize).requireLevel0();
-        return metrics.timeRequest(ENDPOINT, p.level().value(), p.page(), () -> service.level0(
-                user, p.from(), p.to(), p.excludeCancelled(), p.productTypes(), p.transactionTypes(),
-                p.page(), p.pageSize()));
+                from, to, aggregationLevel, excludeCancelled, productTypes, transactionTypes, pageNumber, pageSize);
+        // aggregationLevel is mandatory, so routing happens here with no fallback (spec 7.3).
+        return metrics.timeRequest(ENDPOINT, p.level().value(), p.page(), () -> p.level() == AggregationLevel.L0
+                ? service.level0(user, p.from(), p.to(), p.excludeCancelled(), p.productTypes(),
+                        p.transactionTypes(), p.page(), p.pageSize())
+                : service.highLevel(user, p.level(), p.from(), p.to(), p.excludeCancelled(), p.productTypes(),
+                        p.transactionTypes(), p.page(), p.pageSize()));
     }
 }

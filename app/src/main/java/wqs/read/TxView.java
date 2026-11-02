@@ -24,7 +24,7 @@ public record TxView(
         boolean cancelled,
         String batchId,
         String subBatchId,
-        @JsonRawValue String detail) {
+        @JsonRawValue String detail) implements HighLevelEntry {
 
     static TxView of(ItemEntry e) {
         return new TxView(e.sourceId(), e.kind(), e.occurredAt(), e.productId(), e.productType(),
