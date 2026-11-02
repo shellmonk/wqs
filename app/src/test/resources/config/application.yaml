@@ -9,12 +9,17 @@ spring:
       # a second connection (REQUIRES_NEW) while the projection transaction holds the first.
       maximum-pool-size: 4
       minimum-idle: 0
+      # With minimum-idle 0, idle connections of cached-but-unused contexts close after 10 s
+      # (Hikari's minimum), returning them to Postgres instead of holding them for the default
+      # 10 min. Postgres' max_connections stays at its default (R104).
+      idle-timeout: 10000
 wqs:
   datasource:
     reader:
       hikari:
         maximum-pool-size: 2
         minimum-idle: 0
+        idle-timeout: 10000
   partition:
     # Test data is deliberately dated 2031-2035 so it never collides with the live months the
     # rollover service provisions. Production keeps the default sanity window of 12 months; the
