@@ -217,9 +217,10 @@ Two hazards follow from a timestamp-only cursor:
 | `"wqPlay"` | Play rollup with precomputed aggregates | monthly on `"startedAt"` |
 | `"wqWebHighLevel"` | L1/L2 page index for user views — one row per session or unsessioned item | monthly on `"occurredAt"` |
 | `"wqCcHighLevel"` | L1/L2 page index for the operator view | monthly on `"occurredAt"` |
-| `"wqCountMonth"` | Tier-1 pagination totals | yearly |
+| `"wqCountMonth"` | Tier-1 pagination totals | **not partitioned** (yearly partitioning deferred; see below) |
 | `"wqCountDay"` | Tier-2 pagination totals for partial months | monthly |
 | `"wqItemLocator"` | Global `sourceId` → partition locator; idempotency gate | **not partitioned** |
+| `"wqGroupLocator"` | `(userId, batchId, subBatchId)` → `"startedAt"` of the session / play row (§5.5) | not partitioned |
 | `"wqPendingCancel"` | Cancels whose original has not yet arrived | not partitioned |
 | `"wqDeadLetter"` | Events that repeatedly failed to project | not partitioned |
 | `"wqIngestWatermark"` | Delta cursor per source | not partitioned |
@@ -228,6 +229,10 @@ Two hazards follow from a timestamp-only cursor:
 
 Monthly partitions are named from the parent with a period suffix: `"wqWebItem_2026_10"`.
 Partition names are generated programmatically, so consistency matters more than aesthetics.
+
+`"wqCountMonth"` is currently **unpartitioned**: at one row per user, view, page unit, product and
+active month it stays small for years, and yearly partitioning would add a second rollover cadence
+for no measured benefit yet. Whether to partition it yearly is deferred (plan, Deferred table).
 
 ### 5.2 Deliberate duplication across view tables
 
@@ -355,8 +360,31 @@ create table "wqPlay" (
 `"net"` is derivable from the other two but is stored anyway, consistent with the rule that reads
 perform no arithmetic.
 
+**Group key and labels, folded over every item.** `"startedAt"` = MIN(`"occurredAt"`) and
+`"endedAt"` = MAX(`"occurredAt"`) over the group's items, cancelled or not; `"productId"` and
+`"currency"` = LEAST over the items' non-null values. Every fold is order-independent, so any
+arrival order converges to the same row (P-1). An item **earlier** than the current start
+**re-anchors** the row: because `"startedAt"` is in the primary key and is the partition key, the
+row is deleted and re-inserted at the new start (possibly in another monthly partition). A
+cancellation item never rolls up, so a cancel never moves a row.
+
+**`"wqGroupLocator"`.** A later transaction joining an existing session or play knows only its
+`batchId` / `subBatchId`, not the `"startedAt"` in the row's primary key — the same problem
+`"wqItemLocator"` solves for items (§5.4), solved the same way: an unpartitioned table keyed
+`("userId", "batchId", "subBatchId")` holding the row's current `"startedAt"`, rewritten on
+re-anchor. The session itself is keyed with `"subBatchId"` = `''`; that empty string is reserved,
+because blank `batchId` / `subBatchId` values are normalised to null at the domain boundary
+(`ProjectionItem`) — "no session" and "no play" have exactly one representation, and `''` is
+unreachable from input.
+
 Rollups carry a `"currency"` column with scalar sums. This is correct if a session never spans
 currencies and extensible if it does (open question O-4).
+
+> **OPEN DECISION — mixed-currency sessions.** Current behaviour: a session (and play) whose items
+> carry different currencies stores LEAST of them — deterministic and arrival-order independent —
+> while its money columns sum amounts across currencies regardless. Its page-index rows carry the
+> same (session) currency in every view. Whether such a session should instead be rejected,
+> split, or carry per-currency sums is for the product owner (tied to O-4).
 
 ### 5.6 High-level page index
 
@@ -393,8 +421,20 @@ Consequences, all of them simplifications:
   and the counter rule becomes uniform: **decrement `"cntExclCancelled"` exactly when this flag
   flips true → false.** The conditional described in §6.3 is now maintained in one place instead of
   being recomputed per query.
-- Sessions sort by `"startedAt"`. A late transaction joining an old session does not move its
-  high-level row, and correctly does not increment any counter, because the row already exists.
+- Sessions sort by `"startedAt"`. A transaction joining an existing session inserts no high-level
+  row and correctly increments no `HIGH_LEVEL` counter, because the row already exists. If it is
+  **earlier** than the session's start, the session re-anchors (§5.5) and its page-index row
+  **moves** to the new key in each view — and its `HIGH_LEVEL` counters move with it (§5.7).
+  A session's page row carries the session's `"productId"` and `"currency"` (LEAST, §5.5) in every
+  view, not the individual item's.
+- **Visibility is per view.** A session row in view V has `"visibleExclCancelled"` true while the
+  session has at least one surviving (non-cancelled, non-cancellation) item whose source feeds V;
+  so a session can be visible in `/cc` and hidden in `/web`. A hidden row is **revived** when a
+  live item feeding that view joins later. An unsessioned item's row is visible iff the item is
+  not cancelled.
+- **Cancellation items are item rows, not page units.** A cancel event is stored in the item
+  tables and counted at the `ITEM` page unit like any row, but it never rolls up, never gets a
+  page-index row and never counts at `HIGH_LEVEL`.
 
 Covering index: `("userId", "occurredAt" desc) include ("kind", "refId", "productId",
 "visibleExclCancelled")`.
@@ -435,6 +475,13 @@ Design notes:
 - **Counters are mutable in place.** A cancel arriving today can decrement a counter for a
   transaction from eight months ago, which rules out append-only counter storage and rules out
   sealing old partitions as read-only.
+- **Sparse means deleted, not zeroed.** A decrement that brings `"cntAll"` to 0 deletes the row.
+  Decrements are **strict**: they target a row the original's arrival created, so a missing row
+  fails the transaction rather than being clamped, and a CHECK
+  (`"cntAll" >= 0 and 0 <= "cntExclCancelled" <= "cntAll"`) backs this in the schema.
+- **`HIGH_LEVEL` counters follow the row's current key.** They count page-index rows at the row's
+  own (`"occurredAt"`, `"productId"`) — a session's start and LEAST product — so when a session
+  re-anchors or its product changes, its counters move from the old key to the new one.
 
 ### 5.8 Partition lifecycle
 
@@ -497,6 +544,18 @@ stream, offsets complete out of order, so only the contiguous acknowledged prefi
 committed — requiring a hand-rolled watermark tracker, and a single stalled lane blocks offset
 advance regardless.
 
+**Resume and position.** The committed offset lives in `"wqStreamOffset"` (§6.2). On start the
+consumer subscribes at **stored offset + 1** — subscribing at the stored offset would replay the
+last committed event — and, with nothing stored, at **offset 0**: a first deployment replays the
+whole stream (O-9 backfill; partitions are provisioned on demand, §5.8).
+
+**Enablement and the single-consumer constraint.** The consumer is off unless
+`wqs.stream.enabled=true` (env `WQS_STREAM_ENABLED=true`); the default is `false` so broker-less
+contexts start. **Exactly one replica may enable it.** Nothing enforces this yet: two consumers
+would project the same events and race on the stored offset. Single-active-consumer or a Postgres
+advisory lock is deferred to before any multi-replica deployment; until then the constraint is
+documented in configuration and every replica with the consumer off logs a WARN at startup.
+
 **Scale-out path:** RabbitMQ super streams partitioned by `userId` give one sequential consumer
 per partition, each with an independent offset, using the same consumer logic. At the measured
 peak of under 100 transactions per second this is not needed; the consumer is kept
@@ -519,6 +578,14 @@ Per batch, in one transaction, in this order:
    unsessioned item — and maintain `"visibleExclCancelled"`.
 8. **Apply counter deltas** to `"wqCountDay"` and `"wqCountMonth"`.
 9. **Commit the stream offset / delta watermark in the same transaction.**
+
+**As implemented**, the order is per item, then per batch: provision partitions for the batch's
+months in a separate transaction (§5.8); then for each item in turn — idempotency gate and insert
+(steps 2–3), resolve or park it if it is a cancel (step 4), then its rollups, page-index rows and
+counter deltas (steps 6–8); after all items, drain the pending cancels matching items this batch
+inserted, each in its own savepoint (step 5, §6.3); finally the offset (step 9). Applying each
+item's derived state before the next item keeps every fold order-independent; the numbered list
+above is the logical decomposition, not a strict sequence of whole-batch passes.
 
 Step 9 is the correctness story. The stream offset lives in `"wqStreamOffset"`, not in the broker,
 so projection state and consumer position advance or roll back together. This yields
@@ -554,6 +621,29 @@ property P-2 (§8).
 transport, no global ordering. Unresolvable cancels are parked in `"wqPendingCancel"` and drained
 whenever a matching item is ingested. This makes ingestion order-independent.
 
+**Resolution key (as implemented).** A cancel resolves against an original with the **same
+source and the same user**: `"wqItemLocator"` is looked up by (cancel's source, `cancels`), and
+the original's `userId` must equal the cancel's. A cancel naming another user's item, or an item
+of another source, is treated as not seen and **parks** — it never fails the batch. Parked cancels
+currently have **no expiry**; they surface through `wqs.pendingcancel.depth` and
+`wqs.pendingcancel.oldest.age.seconds`. Expiry and alerting policy are TBD (deferred).
+
+> **OPEN DECISION — cancel resolution scope.** The paragraph above says a cancel may arrive via a
+> "different source", but the implementation (ruling R86) resolves a cancel only against an item
+> of its **own** source, because different sources may share `sourceId` values and the locator is
+> keyed by (source, sourceId). Which is right depends on how producers actually reference
+> cancelled items (O-5, O-13); until decided, a cross-source cancel parks indefinitely.
+
+**Multiple cancels.** A second, distinct cancel of an already-cancelled item changes no tally; it
+only lowers `"cancelledBy"` to the least cancel `sourceId`, so the stored state does not depend on
+which cancel arrived first. Cancellation items themselves count at `ITEM` only and never roll up
+(§5.6).
+
+**A drained cancel that fails** (an unexpected error, not a mismatch — mismatches park) is
+applied in a savepoint: it is rolled back alone, removed from `"wqPendingCancel"` and
+dead-lettered **itself**; the original whose arrival drained it stays projected and the batch
+commits.
+
 ### 6.4 Failure handling
 
 - **Batch failure** rolls back the whole transaction, leaving the offset uncommitted, so the batch
@@ -561,6 +651,24 @@ whenever a matching item is ingested. This makes ingestion order-independent.
 - **Poison events** are written to `"wqDeadLetter"` with their error after N retries; the offset
   then advances and an alarm fires. Ingestion keeps flowing and the bad event is retained for
   manual replay.
+
+As implemented:
+
+- A batch is tried **N times whole, then each item N times alone**; an item still failing is
+  dead-lettered with `attempts` = 2N and its **own** stream offset. Its neighbours project.
+- A message that cannot be mapped to an item, or whose body cannot be parsed at all, is
+  dead-lettered at once (`attempts` = 1); an unparseable body is stored as
+  `{"rawBase64": "…"}` — the exact bytes.
+- **Offset rules.** The stored offset advances only past events that were projected or
+  dead-lettered. A dead-letter written while earlier events are still buffered does not move the
+  offset; the next batch's higher offset covers it. If a dead-letter write itself fails (the
+  database is down), nothing moves: the consumer drops its buffer and, after a backoff,
+  re-subscribes from the stored offset.
+- **NUL fallback.** U+0000 is legal JSON but storable in neither Postgres `text` nor `jsonb`. It
+  is rejected in known text fields at parse time (→ `rawBase64` row). If a normal dead-letter row
+  still cannot be stored, a fallback row is written in its own transaction with null `sourceId`,
+  `{"rawBase64": …}` of the serialised item and NUL-free error text — a dead-letter write cannot
+  be defeated by the data it quarantines.
 
 ### 6.5 Scheduled jobs (Quartz)
 
@@ -1074,6 +1182,12 @@ The second exists because the high-level index is a **materialised merge** (§5.
 union could never disagree with its sources; a materialised one can. That is the cost accepted
 when the merge moved to write time, and this job is how the cost is managed.
 
+**`ProjectionInvariants` is the shared oracle.** The slow-but-obvious SQL that recomputes counters,
+rollups and group locators, the page index and cancellation state from the item rows is one
+class, used by the CI properties (P-2, P-4, P-8) and, in phase 7, by both reconciliation jobs —
+so CI and production check the same thing. It lives in test code today; phase 7 moves it to main
+code (its string SQL then needs a `@RawSqlJustified`).
+
 Both emit **drift as a gauge, alarmed at any non-zero value** (§11). Correctness is not a
 percentage target — pagination that silently lies about page counts is an incident, not a
 degradation.
@@ -1169,21 +1283,30 @@ failure in the design, so it gets a first-class signal.
 
 ### 11.2 Metrics
 
+**Implementation status after phases 1–3.** Implemented: every ingestion metric below except the
+`wqs.delta.*` family (phase 6, with the pollers); `wqs.deadletter.depth`;
+`wqs.partition.runway.months`; `wqs.job.duration` / `wqs.job.outcome` / `wqs.job.misfires`.
+Deferred, each marked in its table: the read-path metrics (phases 4–5, with the endpoints), the
+`wqs.reconcile.*` drift gauges (phase 7, with the reconciliation jobs), HikariCP pool tagging by
+`writer` | `reader` (phase 4, with the reader/writer datasource split) and Aurora replica lag
+(phase 7). Query-backed gauges are computed on scrape and cached (~60s, ~15s for offset lag), so
+none can freeze when the code that would have "set" it stops running.
+
 **Ingestion**
 
 | Metric | Type | Tags | Notes |
 |---|---|---|---|
-| `wqs.ingest.lag.seconds` | gauge | source | `now()` − `"occurredAt"` of last projected event |
-| `wqs.ingest.stream.offset.lag` | gauge | — | stream head offset − committed offset |
+| `wqs.ingest.lag.seconds` | gauge | source | `now()` − `"occurredAt"` of last projected event; until the first projection, seconds since consumer start (never a reassuring 0) |
+| `wqs.ingest.stream.offset.lag` | gauge | — | stream head offset − committed offset; head = broker `committedChunkId` (a lower bound, short by at most one chunk); NaN when no head is known |
 | `wqs.ingest.batch.size` | histogram | — | |
 | `wqs.ingest.batch.duration` | timer | — | |
 | `wqs.ingest.events` | counter | source, outcome | `projected` \| `duplicate` \| `deadlettered` |
 | `wqs.pendingcancel.depth` | gauge | — | |
 | `wqs.pendingcancel.oldest.age.seconds` | gauge | — | an *aging* set means cancels never resolve |
-| `wqs.delta.rows.fetched` | histogram | source | |
-| `wqs.delta.page.saturated` | counter | source | polls returning exactly `pageLimit` — saturation |
-| `wqs.delta.watermark.age.seconds` | gauge | source | detects a stuck poller |
-| `wqs.delta.timestampcliff` | counter | source | the unhandleable condition in §4 |
+| `wqs.delta.rows.fetched` | histogram | source | *phase 6* |
+| `wqs.delta.page.saturated` | counter | source | polls returning exactly `pageLimit` — saturation; *phase 6* |
+| `wqs.delta.watermark.age.seconds` | gauge | source | detects a stuck poller; *phase 6* |
+| `wqs.delta.timestampcliff` | counter | source | the unhandleable condition in §4; *phase 6* |
 
 The `duplicate` outcome is a signal, not noise: a rising duplicate ratio means the delta overlap
 window is wider than it needs to be, or the stream is replaying.
@@ -1192,12 +1315,12 @@ window is wider than it needs to be, or the stream is replaying.
 
 | Metric | Type | Tags | Notes |
 |---|---|---|---|
-| `wqs.read.duration` | timer | endpoint, aggregationLevel, pageDepthBucket | |
-| `wqs.read.partitions.touched` | histogram | aggregationLevel | |
-| `wqs.read.residual.offset` | histogram | — | offset remaining after the counter walk |
-| `wqs.read.counter.rows` | histogram | — | counter rows summed per request |
-| `wqs.read.pagesize` | histogram | endpoint | monitors R-2 directly |
-| `wqs.read.totalitems` | histogram | endpoint | |
+| `wqs.read.duration` | timer | endpoint, aggregationLevel, pageDepthBucket | *phase 4–5* |
+| `wqs.read.partitions.touched` | histogram | aggregationLevel | *phase 4–5* |
+| `wqs.read.residual.offset` | histogram | — | offset remaining after the counter walk; *phase 4* |
+| `wqs.read.counter.rows` | histogram | — | counter rows summed per request; *phase 4* |
+| `wqs.read.pagesize` | histogram | endpoint | monitors R-2 directly; *phase 4* |
+| `wqs.read.totalitems` | histogram | endpoint | *phase 4* |
 
 `partitions.touched` and `residual.offset` together are the observable proxy for **"is
 counter-assisted offset still working?"** Both should stay small and flat. If either climbs, the
@@ -1208,20 +1331,20 @@ dense — and reads will slow before any query is logically wrong.
 
 | Metric | Type | Notes |
 |---|---|---|
-| `wqs.reconcile.counter.drift` | gauge | §8.7; any non-zero value is an incident |
-| `wqs.reconcile.highlevel.drift` | gauge | §8.7 |
-| `wqs.deadletter.depth` | gauge | |
+| `wqs.reconcile.counter.drift` | gauge | §8.7; any non-zero value is an incident; *phase 7* |
+| `wqs.reconcile.highlevel.drift` | gauge | §8.7; *phase 7* |
+| `wqs.deadletter.depth` | gauge | rows in `"wqDeadLetter"`, cached ~60s |
 
 **Infrastructure**
 
 | Metric | Type | Notes |
 |---|---|---|
-| HikariCP metrics | — | **tagged by pool: `writer` \| `reader`.** Writer starvation is a named failure mode (§7.10) |
+| HikariCP metrics | — | **tagged by pool: `writer` \| `reader`.** Writer starvation is a named failure mode (§7.10); pool tagging *phase 4* |
 | `wqs.partition.runway.months` | gauge | months of partitions provisioned ahead |
 | `wqs.job.duration` | timer | tagged by job (§6.5) |
 | `wqs.job.outcome` | counter | job, result |
 | `wqs.job.misfires` | counter | job |
-| Aurora replica lag | gauge | from CloudWatch, or probed against a reader |
+| Aurora replica lag | gauge | from CloudWatch, or probed against a reader; *phase 7* |
 
 ### 11.3 Tracing
 
