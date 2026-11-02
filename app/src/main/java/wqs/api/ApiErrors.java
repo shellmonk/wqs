@@ -120,8 +120,10 @@ public class ApiErrors {
         if (pattern == null) {
             return NO_ENDPOINT;
         }
-        String template = pattern.toString();
-        return template.startsWith("/") && template.chars().allMatch(c -> c > ' ' && c < 127 && c != '{')
+        // Braces mark a path variable in the template ("{playerId}"); they are not legal URI
+        // characters, so they are percent-encoded. The template is server-defined, never the request's.
+        String template = pattern.toString().replace("{", "%7B").replace("}", "%7D");
+        return template.startsWith("/") && template.chars().allMatch(c -> c > ' ' && c < 127)
                 ? URI.create(template) : NO_ENDPOINT;
     }
 }

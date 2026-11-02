@@ -57,9 +57,9 @@ class StreamUnreachableBootTest extends PostgresTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("UP"));
 
-        mvc.perform(get("/cc/v1/projection").param("userId", "1")
+        mvc.perform(get("/cc/wallet-data/rest/v1/projection/1")
                         .param("from", "2034-02-01T00:00:00Z").param("to", "2034-03-01T00:00:00Z")
-                        .param("aggregationLevel", "0").param("page", "1").param("pageSize", "10"))
+                        .param("aggregationLevel", "0").param("pageNumber", "1").param("pageSize", "10"))
                 .andExpect(status().isOk());
     }
 

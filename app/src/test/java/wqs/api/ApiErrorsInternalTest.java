@@ -25,13 +25,13 @@ class ApiErrorsInternalTest extends ApiTestBase {
     void unexpected_exception_is_a_fixed_text_500() throws Exception {
         when(failing.level0(anyLong(), any(), any(), anyBoolean(), any(), any(), anyLong(), anyLong()))
                 .thenThrow(new IllegalStateException("SECRET amount=12.50 userId=1 detail={}"));
-        mvc.perform(get("/cc/v1/projection").param("userId", "1").param("from", FROM).param("to", TO)
-                        .param("aggregationLevel", "0").param("page", "1").param("pageSize", "10"))
+        mvc.perform(get("/cc/wallet-data/rest/v1/projection/1").param("from", FROM).param("to", TO)
+                        .param("aggregationLevel", "0").param("pageNumber", "1").param("pageSize", "10"))
                 .andExpect(status().isInternalServerError())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$.status").value(500))
                 .andExpect(jsonPath("$.detail").value("Internal error"))
-                .andExpect(jsonPath("$.instance").value("/cc/v1/projection"))
+                .andExpect(jsonPath("$.instance").value("/cc/wallet-data/rest/v1/projection/%7BplayerId%7D"))
                 .andExpect(content().string(not(containsString("SECRET"))))
                 .andExpect(content().string(not(containsString("IllegalState"))));
     }

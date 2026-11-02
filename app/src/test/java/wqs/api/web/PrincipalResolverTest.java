@@ -21,7 +21,7 @@ class PrincipalResolverTest {
     }
 
     private static MockHttpServletRequest request(String header, String... values) {
-        MockHttpServletRequest r = new MockHttpServletRequest("GET", "/web/v1/projection");
+        MockHttpServletRequest r = new MockHttpServletRequest("GET", "/web/wallet-data/rest/v1/projection");
         for (String v : values) {
             r.addHeader(header, v);
         }

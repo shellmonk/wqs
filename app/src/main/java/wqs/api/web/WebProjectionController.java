@@ -11,12 +11,13 @@ import org.springframework.web.bind.annotation.RestController;
 import wqs.api.ProjectionParams;
 import wqs.api.UnauthenticatedException;
 import wqs.domain.ViewKind;
-import wqs.read.ProjectionPage;
+import wqs.read.ProjectionResponse;
 import wqs.read.ReadMetrics;
+import wqs.read.TxView;
 import wqs.read.web.WebProjectionService;
 
 /**
- * {@code GET /web/v1/projection} (spec 7.1). The user is the authenticated principal and nothing
+ * {@code GET /web/wallet-data/rest/v1/projection} (api-contract). The user is the authenticated principal and nothing
  * else (spec 9): there is deliberately NO userId parameter, and nothing in this package reads raw
  * request parameters (ArchitectureTest.web_layer_never_reads_raw_request_parameters). The request
  * object is passed only to the {@link PrincipalResolver}.
@@ -36,8 +37,8 @@ public class WebProjectionController {
         this.metrics = metrics;
     }
 
-    @GetMapping("/web/v1/projection")
-    public ProjectionPage projection(
+    @GetMapping("/web/wallet-data/rest/v1/projection")
+    public ProjectionResponse<TxView> projection(
             HttpServletRequest request,
             @RequestParam("from") @DateTimeFormat(iso = ISO.DATE_TIME) Instant from,
             @RequestParam("to") @DateTimeFormat(iso = ISO.DATE_TIME) Instant to,
@@ -45,11 +46,11 @@ public class WebProjectionController {
             @RequestParam(name = "excludeCancelledTransactions", defaultValue = "false") boolean excludeCancelled,
             @RequestParam(name = "productTypes", required = false) List<String> productTypes,
             @RequestParam(name = "transactionTypes", required = false) List<String> transactionTypes,
-            @RequestParam("page") long page,
-            @RequestParam("pageSize") long pageSize) {
+            @RequestParam("pageNumber") int pageNumber,
+            @RequestParam("pageSize") int pageSize) {
         long userId = principals.resolveUserId(request).orElseThrow(UnauthenticatedException::new);
         ProjectionParams p = ProjectionParams.validate(
-                from, to, aggregationLevel, excludeCancelled, productTypes, transactionTypes, page, pageSize).requireLevel0();
+                from, to, aggregationLevel, excludeCancelled, productTypes, transactionTypes, pageNumber, pageSize).requireLevel0();
         return metrics.timeRequest(ENDPOINT, p.level().value(), p.page(), () -> service.level0(
                 userId, p.from(), p.to(), p.excludeCancelled(), p.productTypes(), p.transactionTypes(),
                 p.page(), p.pageSize()));

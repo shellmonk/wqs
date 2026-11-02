@@ -10,15 +10,15 @@ import wqs.domain.DataDomain;
 /**
  * The validated parameters shared by /web and /cc (spec 7.1). Construction through
  * {@link #validate} is the only way to get one, so a downstream read never sees an invalid
- * request: the reader assumes {@code page >= 1}, {@code pageSize >= 1} and {@code from <= to}.
+ * request: the reader assumes {@code pageNumber >= 1}, {@code pageSize >= 1} and {@code from <= to}.
  *
  * <p>{@code from} and {@code to} are normalised after parsing and before any read: truncated to
  * microseconds (Postgres' timestamptz precision, so Java's range decomposition and the SQL bounds
  * agree), then clamped into {@link DataDomain} (ruling C1: an expanded ISO year such as +1000000
  * would otherwise decompose into millions of month segments and reach Postgres out of range).
  *
- * <p>The phase-4 {@code productId} filter is gone (ruling R2): products are strings since V10
- * and the counters key on product type. The list filters ({@code productTypes}, {@code transactionTypes}) are bound here for now; Task 7 reshapes the API.
+ * <p>The list filters ({@code productTypes}, {@code transactionTypes}) are cleaned here (D10).
+ * {@code page} is the contract's 1-based {@code pageNumber}.
  *
  * <p>Every 400 rule is checked before {@link #requireLevel0}'s 501, so a malformed request is
  * reported as malformed whatever level it asks for.
@@ -38,7 +38,7 @@ public record ProjectionParams(
 
     /**
      * @throws InvalidParameterException {@code aggregationLevel} outside 0..2; {@code from > to}
-     *         (D6; {@code from == to} is a valid empty range); {@code page < 1};
+     *         (D6; {@code from == to} is a valid empty range); {@code pageNumber < 1};
      *         {@code pageSize < 1}. The {@code from > to}
      *         check sees the original values; bounds beyond the same domain edge clamp to an
      *         empty range ({@code from == to}).
@@ -66,7 +66,7 @@ public record ProjectionParams(
             throw new InvalidParameterException("from", "must not be after to");
         }
         if (page < 1) {
-            throw new InvalidParameterException("page", "must be >= 1");
+            throw new InvalidParameterException("pageNumber", "must be >= 1");
         }
         if (pageSize < 1) {
             throw new InvalidParameterException("pageSize", "must be >= 1");
@@ -96,12 +96,26 @@ public record ProjectionParams(
         return micros.isAfter(DataDomain.END) ? DataDomain.END : micros;
     }
 
-    /** /cc's operator-supplied user. @throws InvalidParameterException when {@code userId < 1} */
-    public static long requireUserId(long userId) {
-        if (userId < 1) {
-            throw new InvalidParameterException("userId", "must be >= 1");
+    /**
+     * /cc's player id from the path: ASCII digits only (no sign, hex, whitespace or non-ASCII
+     * digits), a long, and at least 1. Leading zeros are accepted, as the phase-4 {@code userId}
+     * parameter did.
+     *
+     * @throws InvalidParameterException for anything else
+     */
+    public static long parsePlayerId(String raw) {
+        if (raw == null || raw.isEmpty() || raw.length() > 40 || !raw.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            throw new InvalidParameterException("playerId", "must be a positive integer");
         }
-        return userId;
+        try {
+            long id = Long.parseLong(raw);
+            if (id >= 1) {
+                return id;
+            }
+        } catch (NumberFormatException overflow) {
+            // falls through to the single rejection below
+        }
+        throw new InvalidParameterException("playerId", "must be a positive integer");
     }
 
     /** @throws LevelNotImplementedException for levels 1 and 2 until Phase 5 (D4) */

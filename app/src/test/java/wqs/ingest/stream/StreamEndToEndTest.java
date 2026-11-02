@@ -177,12 +177,12 @@ class StreamEndToEndTest extends PostgresTestBase {
         assertThat(prize.get("batchId", String.class)).isEqualTo("e2e-s1");
         assertThat(prize.get("amount", java.math.BigDecimal.class)).isEqualByComparingTo("8");
 
-        mvc.perform(get("/cc/v1/projection").param("userId", String.valueOf(USER))
+        mvc.perform(get("/cc/wallet-data/rest/v1/projection/{p}", USER)
                         .param("from", "2033-01-01T00:00:00Z").param("to", "2034-01-01T00:00:00Z")
-                        .param("aggregationLevel", "0").param("page", "1").param("pageSize", "10"))
+                        .param("aggregationLevel", "0").param("pageNumber", "1").param("pageSize", "10"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.totalItems").value(3))
-                .andExpect(jsonPath("$.items.length()").value(3));
+                .andExpect(jsonPath("$.totalRowCount").value(3))
+                .andExpect(jsonPath("$.data.length()").value(3));
     }
 
     @Test

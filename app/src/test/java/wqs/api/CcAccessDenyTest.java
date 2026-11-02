@@ -18,29 +18,38 @@ class CcAccessDenyTest extends ApiTestBase {
 
     @Test
     void deny_mode_is_403_even_with_valid_params() throws Exception {
-        mvc.perform(get("/cc/v1/projection").param("userId", "1").param("from", FROM).param("to", TO)
-                        .param("aggregationLevel", "0").param("page", "1").param("pageSize", "10"))
+        mvc.perform(get("/cc/wallet-data/rest/v1/projection/1").param("from", FROM).param("to", TO)
+                        .param("aggregationLevel", "0").param("pageNumber", "1").param("pageSize", "10"))
                 .andExpect(status().isForbidden())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$.status").value(403))
                 .andExpect(jsonPath("$.detail").value("The /cc endpoint is disabled on this deployment"))
-                .andExpect(jsonPath("$.instance").value("/cc/v1/projection"))
-                .andExpect(jsonPath("$.items").doesNotExist());
+                .andExpect(jsonPath("$.instance").value("/cc/wallet-data/rest/v1/projection/%7BplayerId%7D"))
+                .andExpect(jsonPath("$.data").doesNotExist());
     }
 
     /** 403 comes before parameter binding and validation: a malformed request learns nothing. */
     @Test
     void deny_mode_is_403_before_validation() throws Exception {
-        mvc.perform(get("/cc/v1/projection")).andExpect(status().isForbidden());
-        mvc.perform(get("/cc/v1/projection;x=1").param("page", "0").param("from", "garbage"))
+        mvc.perform(get("/cc/wallet-data/rest/v1/projection/1")).andExpect(status().isForbidden());
+        mvc.perform(get("/cc/wallet-data/rest/v1/projection/1;x=1").param("pageNumber", "0").param("from", "garbage"))
                 .andExpect(status().isForbidden());
+    }
+
+    /** The path-variable form is covered too: a malformed player id learns nothing but 403. */
+    @Test
+    void cc_deny_by_default_covers_new_path() throws Exception {
+        for (String id : new String[] {"1", "abc", "0", "-1", "9223372036854775808", "1;x=1"}) {
+            mvc.perform(get("/cc/wallet-data/rest/v1/projection/" + id).param("pageNumber", "0"))
+                    .andExpect(status().isForbidden());
+        }
     }
 
     /** /web is governed by its principal mode, not by wqs.cc.access. */
     @Test
     void deny_mode_leaves_web_alone() throws Exception {
-        mvc.perform(get("/web/v1/projection").header(PRINCIPAL_HEADER, "1").param("from", FROM).param("to", TO)
-                        .param("aggregationLevel", "0").param("page", "1").param("pageSize", "10"))
+        mvc.perform(get("/web/wallet-data/rest/v1/projection").header(PRINCIPAL_HEADER, "1").param("from", FROM).param("to", TO)
+                        .param("aggregationLevel", "0").param("pageNumber", "1").param("pageSize", "10"))
                 .andExpect(status().isOk());
     }
 }
