@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Service;
 
 /**
@@ -54,8 +56,17 @@ public class PartitionRolloverService {
     /**
      * Inserting into a partitioned table with no matching partition fails outright, so the
      * current month must exist before ingestion starts rather than at the first cron fire.
+     *
+     * {@code @Order(HIGHEST_PRECEDENCE)}: without an explicit order, same-event {@code
+     * ApplicationReadyEvent} listeners run in bean-registration order, which Spring does not
+     * document as a guarantee. Any listener that can write partitioned rows -- the stream
+     * consumer in particular -- MUST be ordered to run after this one, or startup becomes a race
+     * that can silently reopen the exact insert-fails-on-the-first-of-the-month failure this
+     * class exists to prevent. If a future listener also needs HIGHEST_PRECEDENCE, give it an
+     * explicit value lower than this one rather than relying on tie-breaking.
      */
     @EventListener(ApplicationReadyEvent.class)
+    @Order(Ordered.HIGHEST_PRECEDENCE)
     public void ensureCurrentMonthOnStartup() {
         rollOver(STARTUP_MONTHS_AHEAD);
     }

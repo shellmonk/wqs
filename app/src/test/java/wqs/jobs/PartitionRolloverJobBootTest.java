@@ -2,6 +2,9 @@ package wqs.jobs;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Clock;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -18,6 +21,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import wqs.db.PartitionedTable;
 import wqs.db.PostgresTestBase;
 
 /**
@@ -29,10 +33,17 @@ import wqs.db.PostgresTestBase;
  * NoSuchMethodException there, invisibly to a test that never forces a fire. scheduler.triggerJob
  * forces exactly that fire on demand, so this test fails loudly if constructor injection is ever
  * broken, instead of relying on inspecting QuartzAutoConfiguration by hand.
+ *
+ * The listener latch alone only proves execute() returned without throwing -- a gutted execute()
+ * that stopped delegating to {@code PartitionRolloverService} would pass that just as well. The
+ * test therefore also asserts the one observable effect only a real delegated rollOver() call
+ * produces: the current month's partition existing afterward.
  */
 @SpringBootTest
 @DirtiesContext
 class PartitionRolloverJobBootTest extends PostgresTestBase {
+
+    private static final DateTimeFormatter MONTH_SUFFIX = DateTimeFormatter.ofPattern("yyyy_MM");
 
     @DynamicPropertySource
     static void datasourceProperties(DynamicPropertyRegistry registry) {
@@ -79,5 +90,20 @@ class PartitionRolloverJobBootTest extends PostgresTestBase {
         boolean fired = completed.await(10, TimeUnit.SECONDS);
         assertThat(fired).as("job neither completed nor errored within the timeout").isTrue();
         assertThat(thrown.get()).isNull();
+
+        // Observable effect of a real rollOver() call, not just "execute() didn't throw": the
+        // current month's partition now exists. A gutted execute() that dropped the delegation
+        // to PartitionRolloverService would still satisfy the listener latch above but fail this.
+        YearMonth currentMonth = YearMonth.now(Clock.systemUTC());
+        String partitionName =
+                PartitionedTable.WQ_WEB_ITEM.tableName() + "_" + currentMonth.format(MONTH_SUFFIX);
+        boolean partitionExists = dsl().fetchExists(dsl().selectOne()
+                .from("pg_inherits")
+                .where("inhrelid = to_regclass(?)::oid", "\"" + partitionName + "\"")
+                .and("inhparent = to_regclass(?)::oid",
+                        "\"" + PartitionedTable.WQ_WEB_ITEM.tableName() + "\""));
+        assertThat(partitionExists)
+                .as("partition %s should exist after the rollover job completed", partitionName)
+                .isTrue();
     }
 }
