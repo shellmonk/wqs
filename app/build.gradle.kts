@@ -1,3 +1,5 @@
+import java.time.Duration
+
 plugins {
     java
     alias(libs.plugins.springBoot)
@@ -42,6 +44,12 @@ dependencies {
     testImplementation(libs.assertj)
     testImplementation("org.awaitility:awaitility")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.withType<Test>().configureEach {
+    // Global FULL jqwik shrinking has no time bound of its own; a runaway shrink fails the build
+    // instead of hanging it. Generous: the whole suite takes a few minutes.
+    timeout.set(Duration.ofMinutes(60))
 }
 
 tasks.withType<JavaCompile>().configureEach {
