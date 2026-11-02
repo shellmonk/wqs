@@ -212,6 +212,57 @@ version**, not an insert. Consequences:
 **Grouping.** Sessions are keyed by `batchId` and plays by `subBatchId` (§5.5). The source column
 `aggregationId` is **obsolete** and is not used.
 
+### 4.1 Source contract decisions (2026-11-02)
+
+References: `docs/reference/api-contract.md` (API as provided), `docs/reference/source-schema.sql`
+(wallet tables), `docs/reference/stream-message-samples.md` (real stream messages — golden
+fixtures for the decoder). These supersede the O-13 wire-format assumption phases 2–4 were built on.
+
+**Stream message → item** (`walAccountTransactions`):
+
+| Item field | Wire source | Rule |
+|---|---|---|
+| `sourceId` | `id` | string |
+| `userId` | `userContext.ownerId` = `"{userType}-{userId}"` | only `userType` 1 (players) is projected; other owners are skipped and counted |
+| `occurredAt` | `createdContext.created` | ISO-8601 UTC (`Z`); `issued` goes to detail |
+| type | `type` (string, e.g. `TT_BUY`) | mapped to the stored `smallint` via a data-driven code table |
+| `productId` / `productType` | `productId`, `productType` | strings; `""` or absent → null |
+| `amount`, `currency` | `amount.amount`, `amount.currency` | |
+| `balanceAfter` | `totalPostBalance` | |
+| `batchId` / `subBatchId` | `batchContext.*` | `""` → null; `batchEnded` kept |
+| `cancels` | `references.transactionReference` | **only** when `type` ∈ {`TT_CANCEL`, `CANCEL`, `TT_TOMBSTONE`} and the reference ≠ `id` — the producer self-references when there is no link. `*_UNDO` / `*_ROLLBACK` are ordinary items |
+
+Every empty string is normalised to null. All accounts (`AT_MAIN`, bonus, …) and non-monetary
+rows are projected. Remaining fields go to `"detail"` through an **allowlist**, never "the rest of
+the row" — `walPayments` carries encrypted card and bank data.
+
+**Zero-amount items are not shown.** A transaction with `amount` = 0 (e.g. a losing `PRIZE` play
+step) is recorded in the locator — so it stays idempotent and a cancel referencing it resolves —
+but is written to no view, counter or rollup.
+
+**API** (replaces the phase-4 shapes):
+
+- Paths `GET /web/wallet-data/rest/v1/projection` and
+  `GET /cc/wallet-data/rest/v1/projection/{playerId}`.
+- Parameters `from`, `to`, `productTypes` (list), `transactionTypes` (list),
+  `excludeCancelledTransactions` (default false), `aggregationLevel` 0–2, `pageNumber`
+  (**1-based**), `pageSize` (top-level items).
+- Envelope `{pageNumber, pagesAvailable, pageSize, totalRowCount, data}`. Level 1 nests a
+  session's transactions under `txs` (the `subitems` object in the example is a typo); level 2
+  nests plays under `subitems`, each with `txs`. Amounts are JSON numbers. Session `amount` =
+  `totalWin` − `totalPlay`. Unsessioned items appear in `data` as plain transaction objects,
+  interleaved by time.
+- `productTypes` matches the stored string exactly. `transactionTypes` at level 0 filters items;
+  at levels 1–2 it **filters only the nested transactions** — every session in range still
+  appears and page counts do not depend on it. For polled sources it matches their own type field
+  (payments `paymentType`, adjustments `transactionType`, limits `limitType`; prizes never).
+- `status` is deferred. The `/web` access token (O-2) and `/cc` auth (O-14) are deferred; the
+  phase-4 stubs stay.
+
+**Polled sources:** only status changes between versions (O-15 default); a CANCELLED, REJECTED or
+EXPIRED payment stays visible and is not "cancelled". **Currency:** a session is single-currency;
+an item whose currency differs from its session's is dead-lettered (O-4).
+
 ### Delta endpoint contract
 
 `GET /wallet/delta` accepts a timestamp and returns up to **1000** changed rows.
@@ -1493,19 +1544,19 @@ anything is broken, and it is the only failure whose impact is total.
 | O-1 | What is the additional `/wallet/delta` field, and does it provide a within-timestamp tiebreaker? | Not for phase 1; required before the delta poller is production-safe |
 | O-2 | How is the `/web` principal established — JWT validated in WQS, gateway-injected header, or session lookup? | Required before `/web` ships |
 | O-3 | Retention policy: keep all partitions indefinitely, or detach and archive after N years? | No; design is archive-ready |
-| O-4 | Is the wallet multi-currency, and can a single session span currencies? | No; rollups carry a currency column with scalar sums |
+| O-4 | ~~Is the wallet multi-currency, and can a single session span currencies?~~ **Answered (§4.1): a session is single-currency; a mismatching item is dead-lettered** | —
 | O-5 | Which of the five sources can actually be cancelled? | No; the locator covers all sources regardless |
-| O-6 | The remaining "few other" query parameters | Required before the API contract is frozen |
-| O-7 | Exact response field contracts per view | Required before the API contract is frozen |
-| O-13 | Full field lists from the RabbitMQ stream and from each `/wallet/delta` source | **Not blocking phases 1–3.** Structural columns are known; unenumerated source fields land in `"detail" jsonb` (§5.3) and are promoted to real columns only if they need indexing or filtering |
+| O-6 | ~~The remaining "few other" query parameters~~ **Answered: `docs/reference/api-contract.md`, interpreted in §4.1** | —
+| O-7 | ~~Exact response field contracts per view~~ **Answered: `docs/reference/api-contract.md`, interpreted in §4.1 (`status` deferred)** | —
+| O-13 | Full field lists from the RabbitMQ stream and from each `/wallet/delta` source | **Stream: answered (§4.1).** Delta sources still open. Structural columns are known; unenumerated source fields land in `"detail" jsonb` (§5.3) and are promoted to real columns only if they need indexing or filtering |
 | O-8 | Aurora PostgreSQL major version | Assumed 16; affects Testcontainers pinning |
 | O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
-| O-10 | How does a client select the eInstant view — explicit product ids, or a category parameter? | Required before the API contract is frozen |
+| O-10 | ~~How does a client select the eInstant view — explicit product ids, or a category parameter?~~ **Answered: a `productTypes` list matching the item's product type string** | —
 | O-11 | Gradle DSL: Kotlin or Groovy | Assumed Kotlin DSL |
 | O-12 | ~~Do claimable prizes carry a `"batchId"`?~~ **Answered:** `walClaimablePrizes` has nullable `batchId` / `subBatchId`, so prizes may be sessioned or not (§7.4) | — |
-| O-15 | Which fields of each polled source can change between versions — status only, or also amount, product, type? And is a `walPayments` row with status CANCELLED / REJECTED / EXPIRED "cancelled" for `excludeCancelledTransactions`? | Required before phase 6 |
-| O-16 | Source user ids are `varchar(64)`; WQS uses `bigint`. Are player ids always numeric? Should rows with `userType` ≠ 1 (non-players) be projected? | Required before phase 5 |
-| O-17 | Source `created` is `timestamp` without zone — which zone does the wallet write? (assumed UTC) | Required before phase 5 |
+| O-15 | ~~Which fields of each polled source can change between versions — status only, or also amount, product, type? And is a `walPayments` row with status CANCELLED / REJECTED / EXPIRED "cancelled" for `excludeCancelledTransactions`?~~ **Default adopted (§4.1): only status changes; cancelled/rejected/expired payments stay visible** | —
+| O-16 | ~~Source user ids are `varchar(64)`; WQS uses `bigint`. Are player ids always numeric? Should rows with `userType` ≠ 1 (non-players) be projected?~~ **Answered: `ownerId` = `"{userType}-{userId}"`, numeric; only userType 1 is projected** | —
+| O-17 | ~~Source `created` is `timestamp` without zone — which zone does the wallet write? (assumed UTC)~~ **Answered for the stream: ISO-8601 UTC. Delta sources assumed the same** | —
 | O-14 | How is `/cc` authenticated/authorized? Today it is deny-by-default (`wqs.cc.access`, §9) | **Blocking before `/cc` is opened beyond a trusted network** |
 
 ---
