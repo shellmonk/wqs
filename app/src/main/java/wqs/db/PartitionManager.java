@@ -17,6 +17,12 @@ import org.springframework.stereotype.Component;
  * Every input here is program-generated -- an enum constant and a LocalDate -- and all
  * identifiers pass through quoteIdent.
  */
+@RawSqlJustified(
+        "jOOQ has no DSL for CREATE TABLE ... PARTITION OF, and Postgres does not accept bind "
+        + "parameters in FOR VALUES, so DSLContext.execute(String) is required. The pg_inherits "
+        + "existence check uses from(String)/where(String, Object...) because the catalog table "
+        + "is not in the generated schema and to_regclass(?) takes a quoted regclass name. All "
+        + "inputs are program-generated and identifiers pass through quoteIdent.")
 @Component
 public class PartitionManager {
 
