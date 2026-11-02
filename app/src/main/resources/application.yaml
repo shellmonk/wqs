@@ -25,6 +25,15 @@ spring:
   # Nodes MUST have synchronised time (NTP) and distinct instance ids; clock skew
   # produces duplicate or missed fires (spec section 6.5).
 
+wqs:
+  jobs:
+    partition-rollover:
+      enabled: true
+      cron: "0 0 3 * * ?"
+      misfirePolicy: DO_NOTHING
+      params:
+        monthsAhead: "3"
+
 management:
   endpoints:
     web:

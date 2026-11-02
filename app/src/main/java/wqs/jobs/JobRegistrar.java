@@ -98,10 +98,12 @@ public class JobRegistrar {
     /**
      * Compares the stored trigger against the trigger freshly built from current configuration.
      * Comparing trigger-to-trigger -- rather than re-deriving the comparison from individual
-     * {@code JobSpec} fields -- keeps every property {@link #buildTrigger} consumes
-     * automatically in scope, including the misfire instruction and any field added later, so
-     * this cannot silently drift out of sync with {@link #buildTrigger} the way a field-by-field
-     * comparison already has twice (cron-only, then interval-only).
+     * {@code JobSpec} fields -- keeps the misfire instruction and the cron/interval value in
+     * scope via one enumerated set of getter comparisons, so this cannot silently drift out of
+     * sync with {@link #buildTrigger} the way a field-by-field comparison already has twice
+     * (cron-only, then interval-only). It is not a structural diff: a future trigger-level
+     * property (priority, calendar name, end time) that {@link #buildTrigger} started setting
+     * would still need its own branch here.
      */
     private boolean hasChanged(Trigger existing, Trigger desired) {
         if (existing.getMisfireInstruction() != desired.getMisfireInstruction()) {
