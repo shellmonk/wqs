@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: wqs
+  threads:
+    virtual:
+      enabled: true
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: wqs
