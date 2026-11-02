@@ -26,6 +26,7 @@ testcontainers-postgresql = { module = "org.testcontainers:postgresql", version.
 testcontainers-rabbitmq = { module = "org.testcontainers:rabbitmq", version.ref = "testcontainers" }
 testcontainers-junit = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
 jqwik = { module = "net.jqwik:jqwik", version.ref = "jqwik" }
+jqwik-spring = { module = "net.jqwik:jqwik-spring", version = "0.12.0" }
 archunit-junit5 = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
 rabbitmq-stream-client = { module = "com.rabbitmq:stream-client", version.ref = "rabbitmqStream" }
 assertj = { module = "org.assertj:assertj-core", version.ref = "assertj" }

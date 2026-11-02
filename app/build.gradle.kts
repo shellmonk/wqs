@@ -37,6 +37,7 @@ dependencies {
     testImplementation(libs.testcontainers.rabbitmq)
     testImplementation(libs.testcontainers.junit)
     testImplementation(libs.jqwik)
+    testImplementation(libs.jqwik.spring)
     testImplementation(libs.archunit.junit5)
     testImplementation(libs.assertj)
     testImplementation("org.awaitility:awaitility")
