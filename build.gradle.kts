@@ -30,8 +30,10 @@ subprojects {
     extra["testcontainers.version"] = testcontainersVersion
 
     tasks.withType<Test>().configureEach {
+        val excluded = (project.findProperty("excludeTags") as String?)?.split(",") ?: emptyList()
         useJUnitPlatform {
             includeEngines("junit-jupiter", "jqwik")
+            if (excluded.isNotEmpty()) excludeTags(*excluded.toTypedArray())
         }
     }
 }

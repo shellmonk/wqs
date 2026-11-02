@@ -39,6 +39,7 @@ dependencies {
     testImplementation(libs.jqwik)
     testImplementation(libs.archunit.junit5)
     testImplementation(libs.assertj)
+    testImplementation("org.awaitility:awaitility")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
