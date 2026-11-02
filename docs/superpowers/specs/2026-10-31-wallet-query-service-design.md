@@ -1043,6 +1043,12 @@ high-level tables follow §5.6: `("userId", "occurredAt" desc, "kind" desc, "ref
 ("cancelled", "productType", "type")`; high-level: same key, `include ("productType",
 "visibleExclCancelled")`.
 
+**Added in phase 5 (V12)** for level 1–2 assembly, so each session's items are fetched by its own
+key rather than by the page's time span: partial `("userId", "batchId", "occurredAt") where
+"batchId" is not null` on both item tables, and `("userId", "batchId", "startedAt")` on `"wqPlay"`.
+They cost one extra B-tree write per sessioned item — the measured need this section requires (a
+long-lived session otherwise makes the fetch scan every newer item of the user).
+
 Additional indexes are added only when the benchmark harness (§8) shows a measured need.
 
 ### 7.8 Response shape
