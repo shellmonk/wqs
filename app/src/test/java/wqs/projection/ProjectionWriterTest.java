@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,6 +16,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import wqs.db.PartitionManager;
+import wqs.db.PartitionProvisioner;
+import wqs.db.PartitionedTable;
 import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
@@ -37,6 +41,7 @@ class ProjectionWriterTest extends PostgresTestBase {
     @Autowired private ProjectionWriter writer;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private PartitionManager partitionManager;
+    @Autowired private PartitionProvisioner provisioner;
 
     @BeforeEach
     void setUp() {
@@ -71,9 +76,10 @@ class ProjectionWriterTest extends PostgresTestBase {
     void a_failing_item_rolls_back_the_whole_batch_including_the_offset() {
         writer.apply(new ProjectionBatch(STREAM, List.of(tx("tx-1")), 10L));
 
-        // No partition exists for 2029-01, so this insert fails at the database.
+        // Postgres text cannot hold U+0000, so this insert fails at the database -- after tx-3
+        // has been written in the same transaction.
         ProjectionItem unpartitioned = new ProjectionItem(
-                7L, SourceKind.TRANSACTION, "tx-bad", Instant.parse("2029-01-01T00:00:00Z"),
+                7L, SourceKind.TRANSACTION, "tx-bad\u0000", WHEN,
                 11, "b-1", "p-1", (short) 1, new BigDecimal("1.0000"), "EUR", null, null, null);
 
         assertThatThrownBy(() -> writer.apply(
@@ -85,6 +91,27 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(offsetStore.read(STREAM)).contains(10L);
     }
 
+    /** I1 / R100: a month nobody provisioned -- long past, or ahead of the runway -- still projects. */
+    @Test
+    void events_in_never_provisioned_past_and_future_months_project_without_precreated_partitions() {
+        YearMonth past = YearMonth.now(ZoneOffset.UTC).minusYears(3);
+        YearMonth future = YearMonth.now(ZoneOffset.UTC).plusMonths(11);
+        dropPartitions(past);
+        dropPartitions(future);
+        assertThat(partitionManager.runwayMonths(past)).isZero();
+        assertThat(partitionManager.runwayMonths(future)).isZero();
+
+        writer.apply(new ProjectionBatch(STREAM, List.of(
+                tx("tx-past", past.atDay(15).atStartOfDay(ZoneOffset.UTC).toInstant()),
+                tx("tx-future", future.atDay(15).atStartOfDay(ZoneOffset.UTC).toInstant())), 5L));
+
+        assertThat(count("wqWebItem")).isEqualTo(2);
+        assertThat(count("wqSession")).isEqualTo(2);
+        assertThat(partitionManager.runwayMonths(past)).isPositive();
+        assertThat(partitionManager.runwayMonths(future)).isPositive();
+        assertThat(offsetStore.read(STREAM)).contains(5L);
+    }
+
     @Test
     void a_batch_with_no_offset_does_not_touch_the_offset_row() {
         writer.apply(new ProjectionBatch(STREAM, List.of(tx("tx-1")), null));
@@ -92,9 +119,21 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(offsetStore.read(STREAM)).isEmpty();
     }
 
+    private void dropPartitions(YearMonth month) {
+        for (PartitionedTable table : PartitionedTable.values()) {
+            dsl().execute("drop table if exists \"" + table.tableName() + "_"
+                    + month.format(DateTimeFormatter.ofPattern("yyyy_MM")) + "\"");
+        }
+        provisioner.forgetKnownMonths();
+    }
+
     private ProjectionItem tx(String sourceId) {
+        return tx(sourceId, WHEN);
+    }
+
+    private ProjectionItem tx(String sourceId, Instant at) {
         return new ProjectionItem(
-                7L, SourceKind.TRANSACTION, sourceId, WHEN, 11, "b-1", "p-1",
+                7L, SourceKind.TRANSACTION, sourceId, at, 11, "b-" + sourceId, "p-1",
                 (short) 1, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 

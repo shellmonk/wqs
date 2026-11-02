@@ -446,6 +446,20 @@ image does not include it. App-managed DDL means CI, local development and produ
 identical partition logic, and partition rollover — the one piece of time-dependent
 infrastructure in the system — becomes testable locally.
 
+**On-demand provisioning.** The runway only covers *now* onwards, but events arrive for any month:
+the first deployment replays the stream from offset 0 (O-9 backfill), and a producer may send an
+event dated past the runway. So `ProjectionWriter` provisions, **first and before any projection
+write**, a partition in every partitioned table for each `"occurredAt"` month the batch touches
+(those months also cover session/play re-anchor targets, page-index rows and `"wqCountDay"`
+periods). The DDL runs in its **own** transaction, never inside the projection transaction —
+`CREATE TABLE … PARTITION OF` takes an ACCESS EXCLUSIVE lock on the parent. Months known to exist
+are cached per process; the `pg_inherits` check remains the source of truth.
+
+**Sanity window.** A month after now + 12 months is a garbage timestamp, not a partition to create:
+the item is poison and takes the normal retry / per-item / dead-letter path (§6.4). There is **no
+past floor** — a deep replay may create many small historical partitions, which is acceptable at
+monthly granularity.
+
 Partition management is designed so detach-and-archive can be added later without schema change
 (open question O-3).
 

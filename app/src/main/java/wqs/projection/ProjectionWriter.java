@@ -1,10 +1,14 @@
 package wqs.projection;
 
 import java.time.Instant;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import wqs.db.PartitionProvisioner;
 import wqs.domain.PageUnit;
 import wqs.domain.ProjectionItem;
 import wqs.domain.ViewKind;
@@ -28,6 +32,7 @@ public class ProjectionWriter {
     private final CancellationApplier cancellationApplier;
     private final PendingCancelStore pendingCancelStore;
     private final StreamOffsetStore offsetStore;
+    private final PartitionProvisioner partitionProvisioner;
 
     public ProjectionWriter(
             ItemInserter itemInserter,
@@ -36,7 +41,8 @@ public class ProjectionWriter {
             CounterUpdater counterUpdater,
             CancellationApplier cancellationApplier,
             PendingCancelStore pendingCancelStore,
-            StreamOffsetStore offsetStore) {
+            StreamOffsetStore offsetStore,
+            PartitionProvisioner partitionProvisioner) {
         this.itemInserter = itemInserter;
         this.rollupUpdater = rollupUpdater;
         this.highLevelUpdater = highLevelUpdater;
@@ -44,6 +50,7 @@ public class ProjectionWriter {
         this.cancellationApplier = cancellationApplier;
         this.pendingCancelStore = pendingCancelStore;
         this.offsetStore = offsetStore;
+        this.partitionProvisioner = partitionProvisioner;
     }
 
     /**
@@ -52,6 +59,14 @@ public class ProjectionWriter {
      */
     @Transactional
     public WriteResult apply(ProjectionBatch batch) {
+        // FIRST, before any projection write, and in its own transaction: no DDL ever runs inside
+        // this one (spec 5.8, R100). The occurredAt months cover every partitioned row the batch
+        // can write -- item rows, session/play re-anchor targets (MIN(occurredAt)), page-index
+        // rows and "wqCountDay" periods. A month beyond the sanity window throws, which is poison.
+        partitionProvisioner.ensureMonths(batch.items().stream()
+                .map(item -> YearMonth.from(item.occurredAt().atZone(ZoneOffset.UTC)))
+                .collect(Collectors.toSet()));
+
         int projected = 0;
         int duplicates = 0;
         Set<ItemRef> inserted = new LinkedHashSet<>();

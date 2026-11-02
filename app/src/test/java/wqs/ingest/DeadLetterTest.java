@@ -39,7 +39,8 @@ class DeadLetterTest extends PostgresTestBase {
 
     private static final String STREAM = "wallet-transactions";
     private static final Instant WHEN = Instant.parse("2033-09-02T12:00:00Z");
-    private static final Instant POISON_WHEN = Instant.parse("2029-01-01T00:00:00Z");
+    /** Beyond any partition sanity window (spec 5.8): projecting it always fails. */
+    private static final Instant POISON_WHEN = Instant.parse("2099-01-01T00:00:00Z");
 
     @DynamicPropertySource
     static void datasource(DynamicPropertyRegistry registry) {
@@ -70,7 +71,7 @@ class DeadLetterTest extends PostgresTestBase {
 
     @Test
     void a_poison_event_is_recorded_and_the_offset_advances() {
-        // No partition exists for 2029-01, so projecting this always fails.
+        // 2099 is beyond the partition sanity window, so projecting this always fails.
         StreamConsumer consumer = consumer(1, writer, deadLetterStore, fixedClock());
         consumer.start();
 
@@ -243,7 +244,7 @@ class DeadLetterTest extends PostgresTestBase {
 
     @Test
     void an_error_thrown_by_the_writer_enters_recovery_and_is_rethrown() {
-        ProjectionWriter erroring = new ProjectionWriter(null, null, null, null, null, null, null) {
+        ProjectionWriter erroring = new ProjectionWriter(null, null, null, null, null, null, null, null) {
             private int calls;
 
             @Override
@@ -492,7 +493,7 @@ class DeadLetterTest extends PostgresTestBase {
         private int calls;
 
         FlakyWriter(ProjectionWriter delegate, int failFrom, int failTo) {
-            super(null, null, null, null, null, null, null);
+            super(null, null, null, null, null, null, null, null);
             this.delegate = delegate;
             this.failFrom = failFrom;
             this.failTo = failTo;
