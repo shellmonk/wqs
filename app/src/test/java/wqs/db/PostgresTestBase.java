@@ -11,8 +11,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
 /** Shared Postgres 16 container with the full migration set applied once per JVM. */
 public abstract class PostgresTestBase {
 
-    protected static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>("postgres:16").withReuse(true);
+    // No .withReuse(true) here: Testcontainers only honors reuse when the developer has opted
+    // in via `testcontainers.reuse.enable=true` in their own ~/.testcontainers.properties
+    // (deliberately not settable from the project, so CI can't be forced into it). Requesting
+    // it without that opt-in just logs a WARN on every run. A developer who wants reuse locally
+    // can set that property for themselves and re-add the call here.
+    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16");
 
     private static DataSource dataSource;
 
