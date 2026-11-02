@@ -1,0 +1,109 @@
+package wqs.ingest.stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+import wqs.domain.ProjectionItem;
+import wqs.domain.SourceKind;
+import wqs.projection.ProjectionBatch;
+
+class BatchAccumulatorTest {
+
+    private static final Duration MAX_WAIT = Duration.ofMillis(200);
+
+    @Test
+    void flushes_when_max_size_is_reached() {
+        MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
+        BatchAccumulator accumulator = new BatchAccumulator("s", 3, MAX_WAIT, clock);
+
+        accumulator.add(item("a"), 1);
+        accumulator.add(item("b"), 2);
+        assertThat(accumulator.drainIfReady()).isEmpty();
+
+        accumulator.add(item("c"), 3);
+        Optional<ProjectionBatch> batch = accumulator.drainIfReady();
+
+        assertThat(batch).isPresent();
+        assertThat(batch.get().items()).hasSize(3);
+        assertThat(batch.get().committedOffset()).isEqualTo(3L);
+        assertThat(accumulator.pending()).isZero();
+    }
+
+    @Test
+    void flushes_when_the_wait_window_elapses_even_below_max_size() {
+        MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
+        BatchAccumulator accumulator = new BatchAccumulator("s", 500, MAX_WAIT, clock);
+
+        accumulator.add(item("a"), 1);
+        assertThat(accumulator.drainIfReady()).isEmpty();
+
+        clock.advance(Duration.ofMillis(201));
+        Optional<ProjectionBatch> batch = accumulator.drainIfReady();
+
+        assertThat(batch).isPresent();
+        assertThat(batch.get().items()).hasSize(1);
+    }
+
+    @Test
+    void an_empty_accumulator_never_flushes() {
+        MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
+        BatchAccumulator accumulator = new BatchAccumulator("s", 3, MAX_WAIT, clock);
+
+        clock.advance(Duration.ofSeconds(10));
+
+        assertThat(accumulator.drainIfReady()).isEmpty();
+        assertThat(accumulator.drainNow()).isEmpty();
+    }
+
+    @Test
+    void the_committed_offset_is_the_highest_in_the_batch() {
+        MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
+        BatchAccumulator accumulator = new BatchAccumulator("s", 10, MAX_WAIT, clock);
+
+        accumulator.add(item("a"), 7);
+        accumulator.add(item("b"), 9);
+        accumulator.add(item("c"), 8);
+
+        assertThat(accumulator.drainNow().orElseThrow().committedOffset()).isEqualTo(9L);
+    }
+
+    @Test
+    void the_wait_window_restarts_after_a_flush() {
+        MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
+        BatchAccumulator accumulator = new BatchAccumulator("s", 100, MAX_WAIT, clock);
+
+        accumulator.add(item("a"), 1);
+        clock.advance(Duration.ofMillis(201));
+        accumulator.drainIfReady();
+
+        accumulator.add(item("b"), 2);
+        assertThat(accumulator.drainIfReady()).isEmpty();
+    }
+
+    private static ProjectionItem item(String sourceId) {
+        return new ProjectionItem(
+                1L, SourceKind.TRANSACTION, sourceId, Instant.parse("2033-01-01T00:00:00Z"),
+                1, "b", "p", (short) 1, BigDecimal.ONE, "EUR", null, null, null);
+    }
+
+    /** Minimal mutable clock; Clock.fixed cannot advance. */
+    static final class MutableClock extends java.time.Clock {
+        private Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void advance(Duration by) {
+            now = now.plus(by);
+        }
+
+        @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
+        @Override public java.time.Clock withZone(java.time.ZoneId zone) { return this; }
+        @Override public Instant instant() { return now; }
+    }
+}
