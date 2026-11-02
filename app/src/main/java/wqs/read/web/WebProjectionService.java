@@ -1,0 +1,32 @@
+package wqs.read.web;
+
+import java.time.Instant;
+import org.springframework.stereotype.Service;
+import wqs.read.Level0Filter;
+import wqs.read.Level0Request;
+import wqs.read.ProjectionPage;
+import wqs.read.ProjectionReader;
+
+/**
+ * The /web read entry point. Composes the reader with {@link WebLevel0Query} only, so /web's
+ * dependency chain never includes a cc class (spec 9 control 3). {@code userId} is the already-
+ * resolved principal (spec 9 control 1), never a request value.
+ */
+@Service
+public class WebProjectionService {
+
+    private final ProjectionReader reader;
+    private final WebLevel0Query query;
+
+    public WebProjectionService(ProjectionReader reader, WebLevel0Query query) {
+        this.reader = reader;
+        this.query = query;
+    }
+
+    /** Arguments are validated by the caller: page and pageSize >= 1, from <= to, productId null or >= 1. */
+    public ProjectionPage level0(long userId, Instant from, Instant to, Integer productId,
+            boolean excludeCancelled, long page, long pageSize) {
+        return reader.readLevel0(query, new Level0Request(
+                new Level0Filter(userId, productId, excludeCancelled), from, to, page, pageSize));
+    }
+}

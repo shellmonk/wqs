@@ -21,3 +21,9 @@ wqs:
     # window itself is tested with explicit values (PartitionProvisionerTest, and
     # PartitionWindowDeadLetterTest, which runs a context with max-months-ahead=12).
     max-months-ahead: 240
+  web:
+    principal:
+      # The API tests act as the gateway and set X-Authenticated-User-Id themselves. Production
+      # defaults to none (every /web request is 401, D2); WebProjectionSecurityTest pins that mode
+      # with an explicit override.
+      mode: trusted-header

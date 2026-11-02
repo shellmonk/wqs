@@ -38,6 +38,14 @@ wqs:
     # Optional page-size ceiling (spec 7.9). Ships disabled (unset): any pageSize is honoured.
     # When set, larger requests are clamped to it and the response reports the effective size.
     # max-page-size: 1000
+  web:
+    principal:
+      # How /web establishes its user (spec 9, D2; mechanism open as O-2). none (the default):
+      # every /web request is 401. trusted-header: the user id is read from `header`
+      # (default X-Authenticated-User-Id), which the gateway MUST set and MUST strip from client
+      # requests -- WQS cannot tell a forged header from a real one. Exactly one value is accepted.
+      mode: none
+      # header: X-Authenticated-User-Id
   stream:
     # Off by default so broker-less contexts (tests, tooling) start. Deployments enable it with
     # WQS_STREAM_ENABLED=true (Spring relaxed binding).

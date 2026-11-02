@@ -7,6 +7,7 @@ import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.sli
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaFieldAccess;
+import com.tngtech.archunit.core.domain.JavaMethodCall;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import wqs.config.ReaderDsl;
 import wqs.db.RawSqlJustified;
+import wqs.api.web.archfixture.ParameterReadingWebController;
 import wqs.read.archfixture.QualifiedReader;
 import wqs.read.archfixture.UnqualifiedCtorParamReader;
 import wqs.read.archfixture.UnqualifiedInjectedFieldReader;
@@ -32,8 +34,8 @@ import wqs.read.web.archfixture.LeakyWebQuery;
  */
 class ArchitectureTest {
 
-    // Rules marked allowEmptyShould(true) target packages that do not exist until phases 2-3,
-    // so ArchUnit would otherwise fail them for matching zero classes. They go live then.
+    // No rule carries allowEmptyShould(true): every package they target now has classes, so a rule
+    // matching zero classes (a renamed package, say) fails instead of passing hollowly.
 
     private static JavaClasses classes;
 
@@ -49,8 +51,7 @@ class ArchitectureTest {
     void api_does_not_depend_on_jooq() {
         ArchRule rule = noClasses()
                 .that().resideInAPackage("wqs.api..")
-                .should().dependOnClassesThat().resideInAnyPackage("org.jooq..", "wqs.db.generated..")
-                .allowEmptyShould(true);
+                .should().dependOnClassesThat().resideInAnyPackage("org.jooq..", "wqs.db.generated..");
         rule.check(classes);
     }
 
@@ -59,8 +60,7 @@ class ArchitectureTest {
     void mappers_do_not_live_in_api() {
         ArchRule rule = noClasses()
                 .that().resideInAPackage("wqs.api..")
-                .should().beAnnotatedWith("org.mapstruct.Mapper")
-                .allowEmptyShould(true);
+                .should().beAnnotatedWith("org.mapstruct.Mapper");
         rule.check(classes);
     }
 
@@ -85,12 +85,50 @@ class ArchitectureTest {
     }
 
     private static ArchRule webRule() {
-        // wqs.api.web has no classes yet (Task 6), so the rule may match nothing in the main import.
         return noClasses()
                 .that().resideInAnyPackage("wqs.api.web..", "wqs.read.web..")
                 .should().dependOnClassesThat().haveSimpleNameStartingWith("WqCc")
-                .orShould().accessFieldWhere(operatorTableField())
-                .allowEmptyShould(true);
+                .orShould().accessFieldWhere(operatorTableField());
+    }
+
+    /**
+     * Spec 9 control 1: /web's request binding has no path to request parameters for the user.
+     * Nothing in {@code wqs.api.web} may read raw request parameters -- the only way a parameter
+     * reaches a /web handler is a declared, named {@code @RequestParam}, and
+     * {@code WebProjectionSecurityTest.web_controller_binds_no_userId_parameter} pins that none
+     * of those is userId. Matches calls on ServletRequest or any subtype (HttpServletRequest,
+     * wrappers); the query string is included since it carries the same parameters unparsed.
+     */
+    @Test
+    void web_layer_never_reads_raw_request_parameters() {
+        webParameterRule().check(classes);
+    }
+
+    /** Proves the rule above can fail, on both the parameter API and the query string. */
+    @Test
+    void web_parameter_rule_rejects_a_web_class_reading_parameters() {
+        JavaClasses fixture = new ClassFileImporter().importClasses(ParameterReadingWebController.class);
+        assertThatThrownBy(() -> webParameterRule().check(fixture))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("ParameterReadingWebController")
+                .hasMessageContaining("getParameter(")
+                .hasMessageContaining("getQueryString(");
+    }
+
+    private static final java.util.Set<String> RAW_PARAMETER_METHODS = java.util.Set.of(
+            "getParameter", "getParameterMap", "getParameterValues", "getParameterNames", "getQueryString");
+
+    private static ArchRule webParameterRule() {
+        return noClasses()
+                .that().resideInAPackage("wqs.api.web..")
+                .should().callMethodWhere(new DescribedPredicate<JavaMethodCall>(
+                        "the target is a ServletRequest parameter or query-string accessor") {
+                    @Override
+                    public boolean test(JavaMethodCall call) {
+                        return RAW_PARAMETER_METHODS.contains(call.getTarget().getName())
+                                && call.getTargetOwner().isAssignableTo(jakarta.servlet.ServletRequest.class);
+                    }
+                });
     }
 
     private static DescribedPredicate<JavaFieldAccess> operatorTableField() {
