@@ -60,6 +60,30 @@ public class ItemInserter {
         return true;
     }
 
+    /**
+     * Records a zero-amount item in the locator ONLY (spec 4.1, plan D8): it stays idempotent and a
+     * cancel referencing it resolves, but it is written to no view. A zero-amount cancel keeps its
+     * target in "cancels" here, having no item row to carry it.
+     *
+     * @return true if newly recorded, false if already applied.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean recordLocatorOnly(ProjectionItem item) {
+        if (item.amount().signum() != 0) {
+            throw new IllegalArgumentException("only a zero-amount item is locator-only: " + item.sourceId());
+        }
+        return dsl.insertInto(WQ_ITEM_LOCATOR)
+                .set(WQ_ITEM_LOCATOR.source, (short) item.source().code())
+                .set(WQ_ITEM_LOCATOR.sourceId, item.sourceId())
+                .set(WQ_ITEM_LOCATOR.userId, item.userId())
+                .set(WQ_ITEM_LOCATOR.occurredAt, item.occurredAt().atOffset(ZoneOffset.UTC))
+                .set(WQ_ITEM_LOCATOR.itemId, dsl.nextval(WQ_ITEM_ID_SEQ))
+                .set(WQ_ITEM_LOCATOR.zeroAmount, true)
+                .set(WQ_ITEM_LOCATOR.cancels, item.cancels())
+                .onConflictDoNothing()
+                .execute() == 1;
+    }
+
     private void insertInto(ViewKind view, ProjectionItem item, long itemId, OffsetDateTime occurredAt) {
         switch (view) {
             case WEB -> dsl.insertInto(WQ_WEB_ITEM)

@@ -33,7 +33,7 @@ abstract class ApiTestBase extends ProjectionPropertyBase {
     }
 
     protected static ProjectionItem item(long userId, SourceKind source, String sourceId, String at) {
-        return new ProjectionItem(userId, source, sourceId, Instant.parse(at), "P10", "instants", null, null,
+        return new ProjectionItem(userId, source, sourceId, Instant.parse(at), "P10", "keno", null, null,
                 TxTypes.PLAY,
                 new BigDecimal("12.5000"), "EUR", null, null, "{\"note\":\"" + sourceId + "\"}");
     }

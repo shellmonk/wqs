@@ -15,7 +15,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
-import org.jooq.Record2;
+import org.jooq.Record3;
 import org.jooq.Table;
 import org.jooq.TableField;
 import org.jooq.impl.DSL;
@@ -60,6 +60,9 @@ import wqs.domain.ViewKind;
  * The session's key is not touched: startedAt and the product fold over every item, cancelled or
  * not, so a cancel never moves a row.
  *
+ * <p><b>A zero-amount original</b> (spec 4.1) has a locator row and nothing else: the cancel
+ * resolves against it -- it never parks -- and marks nothing.
+ *
  * <p><b>Idempotence.</b> The writer's locator gate stops a replayed cancel before it gets here.
  * A different cancel of an already-cancelled item changes no tally; it only lowers
  * "cancelledBy" to the smallest cancel id, so the stored state does not depend on which of two
@@ -99,11 +102,17 @@ public class CancellationApplier {
         if (!cancel.isCancellation()) {
             throw new IllegalArgumentException("not a cancellation: " + cancel.sourceId());
         }
-        WqCcItemRecord original = findOriginal(cancel);
-        if (original == null) {
+        Record3<Long, OffsetDateTime, Boolean> located = locate(cancel);
+        if (located == null) {
             pendingCancelStore.park(cancel);
             return false;
         }
+        if (located.value3()) {
+            // A zero-amount original is in no view, rollup or counter (spec 4.1): the cancel
+            // resolves -- it must not park -- and there is nothing to mark.
+            return true;
+        }
+        WqCcItemRecord original = fetchOriginal(cancel, located);
 
         SourceKind source = SourceKind.ofCode(original.getSource());
         if (original.getCancelled()) {
@@ -144,7 +153,7 @@ public class CancellationApplier {
     }
 
     /**
-     * The original, read from "wqCcItem" -- every source feeds /cc -- or null if not yet seen.
+     * The original's locator row as (userId, occurredAt, zeroAmount), or null if not yet seen.
      *
      * The cancel's userId must match the original's: an item of another user is treated as not
      * seen, so the cancel parks (and, since {@link PendingCancelStore#drainFor} matches on userId
@@ -152,17 +161,18 @@ public class CancellationApplier {
      * expected mismatch, not a failure; an unexpected failure on the drain path is contained by
      * {@link DrainedCancelApplier}'s savepoint and dead-letters the cancel, never the original.
      */
-    private WqCcItemRecord findOriginal(ProjectionItem cancel) {
-        Record2<Long, OffsetDateTime> located = dsl
-                .select(WQ_ITEM_LOCATOR.userId, WQ_ITEM_LOCATOR.occurredAt)
+    private Record3<Long, OffsetDateTime, Boolean> locate(ProjectionItem cancel) {
+        return dsl
+                .select(WQ_ITEM_LOCATOR.userId, WQ_ITEM_LOCATOR.occurredAt, WQ_ITEM_LOCATOR.zeroAmount)
                 .from(WQ_ITEM_LOCATOR)
                 .where(WQ_ITEM_LOCATOR.source.eq((short) cancel.source().code()),
                        WQ_ITEM_LOCATOR.sourceId.eq(cancel.cancels()),
                        WQ_ITEM_LOCATOR.userId.eq(cancel.userId()))
                 .fetchOne();
-        if (located == null) {
-            return null;
-        }
+    }
+
+    /** The located original, read from "wqCcItem" -- every source feeds /cc. */
+    private WqCcItemRecord fetchOriginal(ProjectionItem cancel, Record3<Long, OffsetDateTime, Boolean> located) {
         return dsl.selectFrom(WQ_CC_ITEM)
                 .where(WQ_CC_ITEM.userId.eq(located.value1()),
                        WQ_CC_ITEM.occurredAt.eq(located.value2()),

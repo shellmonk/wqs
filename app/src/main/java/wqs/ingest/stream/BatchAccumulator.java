@@ -45,6 +45,18 @@ public class BatchAccumulator {
         highestOffset = Math.max(highestOffset, offset);
     }
 
+    /**
+     * Extends the pending batch's committed offset over an event that was skipped without being
+     * buffered (a non-player event), so committing the batch also moves past it. Only valid while
+     * something is pending; with nothing pending the caller persists the offset itself.
+     */
+    public void cover(long offset) {
+        if (pending.isEmpty()) {
+            throw new IllegalStateException("nothing pending to carry offset " + offset);
+        }
+        highestOffset = Math.max(highestOffset, offset);
+    }
+
     /** Flushes if the size threshold is met or the wait window has elapsed. */
     public Optional<ProjectionBatch> drainIfReady() {
         if (pending.isEmpty()) {

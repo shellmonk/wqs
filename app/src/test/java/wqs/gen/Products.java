@@ -2,9 +2,9 @@ package wqs.gen;
 
 /**
  * A small product pool for hand-built test items, as (productId, productType). Both are strings
- * since V10 and both fold as LEAST over a session's items, so the pool keeps the two orders
- * aligned: a lower id always has a lower type, and a session's product type -- the counter key --
- * moves exactly when its product id does.
+ * since V10. A session's pair is its FIRST item's (plan D6), never a per-column LEAST, so the pool
+ * deliberately makes the two orders DISAGREE: P03 has the highest type ("lottery") and P13 the
+ * lowest ("arcade"), so a per-column LEAST pairs P03 with "arcade" -- a product no item has.
  */
 public final class Products {
 
@@ -13,15 +13,15 @@ public final class Products {
         return "P%02d".formatted(n);
     }
 
-    /** The type of product {@code n}: arcade (3) < baccarat (5) < bingo (7) < instants (11) < lottery (13). */
+    /** The type of product {@code n}. 11 is "instants", the default eInstant type: keep its items sessioned. */
     public static String type(int n) {
         return switch (n) {
-            case 3 -> "arcade";
-            case 5 -> "baccarat";
+            case 3 -> "lottery";
+            case 5 -> "keno";
             case 7 -> "bingo";
             case 11 -> "instants";
-            case 12 -> "keno";
-            case 13 -> "lottery";
+            case 12 -> "baccarat";
+            case 13 -> "arcade";
             default -> throw new IllegalArgumentException("no test product " + n);
         };
     }

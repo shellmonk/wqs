@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Objects;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.impl.DSL;
@@ -42,9 +43,16 @@ import wqs.domain.ProjectionItem;
  *       items: {@link CancellationApplier} subtracts a cancelled item's own contribution, and
  *       "playCountExclCancelled" counts plays with a surviving transaction -- so a live item
  *       joining a play that cancels had emptied brings it back, not only a new play.</li>
- *   <li>"productId", "productType" and "currency" = each LEAST over the group's non-null values.
- *       A group's items are expected to agree; if they do not, the smallest value wins regardless
- *       of arrival order rather than whichever item happened to arrive first.</li>
+ *   <li>"productId" and "productType" = the FIRST item's pair (plan D6), first by
+ *       ("occurredAt", "sourceId", "source") -- "startedAt" is that item's occurredAt, and
+ *       "firstSourceId" / "firstSource" hold the rest of its identity as the tie-break for items
+ *       at the same instant. The pair always belongs to one real item (a per-column LEAST could
+ *       pair one item's id with another's type). An item replaces the label when it re-anchors
+ *       the group, or ties its startedAt with a lower (sourceId, source); a null pair is a pair
+ *       like any other.</li>
+ *   <li>"currency" = the first-arriving item's. A session is single-currency: an item of another
+ *       currency is dead-lettered before it gets here ({@link IngestRules}), so every item agrees
+ *       and arrival order cannot matter.</li>
  * </ul>
  */
 @Component
@@ -101,7 +109,7 @@ public class RollupUpdater {
             if (play.previousStart() != null) {
                 movePlay(item, play.previousStart(), play.startedAt());
             }
-            int survivors = upsertPlay(contribution, play.startedAt());
+            int survivors = upsertPlay(contribution, play);
             playIsNew = play.isNew();
             // This item is the play's only surviving transaction: the play is new, or every
             // earlier transaction in it was cancelled (spec 6.3). Either way it rejoins the
@@ -117,7 +125,7 @@ public class RollupUpdater {
         if (session.previousStart() != null) {
             moveSession(item, session.previousStart(), session.startedAt());
         }
-        SessionLabel label = upsertSession(contribution, session.startedAt(), playIsNew, playIsLive);
+        SessionLabel label = upsertSession(contribution, session, playIsNew, playIsLive);
 
         boolean keyChanged = !session.isNew()
                 && (session.previousStart() != null
@@ -209,8 +217,10 @@ public class RollupUpdater {
     }
 
     /** @return the play's txCountExclCancelled after the fold. */
-    private int upsertPlay(Contribution c, OffsetDateTime startedAt) {
+    private int upsertPlay(Contribution c, Anchor anchor) {
         ProjectionItem item = c.item();
+        OffsetDateTime startedAt = anchor.startedAt();
+        Condition first = isFirst(c, anchor, WQ_PLAY.firstSourceId, WQ_PLAY.firstSource);
         return dsl.insertInto(WQ_PLAY)
                 .set(WQ_PLAY.userId, item.userId())
                 .set(WQ_PLAY.batchId, item.batchId())
@@ -220,6 +230,8 @@ public class RollupUpdater {
                 .set(WQ_PLAY.productId, item.productId())
                 .set(WQ_PLAY.productType, item.productType())
                 .set(WQ_PLAY.currency, item.currency())
+                .set(WQ_PLAY.firstSourceId, item.sourceId())
+                .set(WQ_PLAY.firstSource, (short) item.source().code())
                 .set(WQ_PLAY.txCount, 1)
                 .set(WQ_PLAY.txCountExclCancelled, 1)
                 .set(WQ_PLAY.totalPlays, c.plays())
@@ -231,9 +243,10 @@ public class RollupUpdater {
                 .onConflict(WQ_PLAY.userId, WQ_PLAY.startedAt, WQ_PLAY.batchId, WQ_PLAY.subBatchId)
                 .doUpdate()
                 .set(WQ_PLAY.endedAt, latest(WQ_PLAY.endedAt))
-                .set(WQ_PLAY.productId, least(WQ_PLAY.productId))
-                .set(WQ_PLAY.productType, least(WQ_PLAY.productType))
-                .set(WQ_PLAY.currency, least(WQ_PLAY.currency))
+                .set(WQ_PLAY.productId, ifFirst(first, WQ_PLAY.productId))
+                .set(WQ_PLAY.productType, ifFirst(first, WQ_PLAY.productType))
+                .set(WQ_PLAY.firstSourceId, ifFirst(first, WQ_PLAY.firstSourceId))
+                .set(WQ_PLAY.firstSource, ifFirst(first, WQ_PLAY.firstSource))
                 .set(WQ_PLAY.txCount, summed(WQ_PLAY.txCount))
                 .set(WQ_PLAY.txCountExclCancelled, summed(WQ_PLAY.txCountExclCancelled))
                 .set(WQ_PLAY.totalPlays, summed(WQ_PLAY.totalPlays))
@@ -254,8 +267,10 @@ public class RollupUpdater {
      * @return the session's productId, productType and currency after the fold.
      */
     private SessionLabel upsertSession(
-            Contribution c, OffsetDateTime startedAt, boolean playIsNew, boolean playIsLive) {
+            Contribution c, Anchor anchor, boolean playIsNew, boolean playIsLive) {
         ProjectionItem item = c.item();
+        OffsetDateTime startedAt = anchor.startedAt();
+        Condition first = isFirst(c, anchor, WQ_SESSION.firstSourceId, WQ_SESSION.firstSource);
         int playDelta = playIsNew ? 1 : 0;
         int playExclDelta = playIsLive ? 1 : 0;
         return dsl.insertInto(WQ_SESSION)
@@ -266,6 +281,8 @@ public class RollupUpdater {
                 .set(WQ_SESSION.productId, item.productId())
                 .set(WQ_SESSION.productType, item.productType())
                 .set(WQ_SESSION.currency, item.currency())
+                .set(WQ_SESSION.firstSourceId, item.sourceId())
+                .set(WQ_SESSION.firstSource, (short) item.source().code())
                 .set(WQ_SESSION.txCount, 1)
                 .set(WQ_SESSION.txCountExclCancelled, 1)
                 .set(WQ_SESSION.playCount, playDelta)
@@ -279,9 +296,10 @@ public class RollupUpdater {
                 .onConflict(WQ_SESSION.userId, WQ_SESSION.startedAt, WQ_SESSION.batchId)
                 .doUpdate()
                 .set(WQ_SESSION.endedAt, latest(WQ_SESSION.endedAt))
-                .set(WQ_SESSION.productId, least(WQ_SESSION.productId))
-                .set(WQ_SESSION.productType, least(WQ_SESSION.productType))
-                .set(WQ_SESSION.currency, least(WQ_SESSION.currency))
+                .set(WQ_SESSION.productId, ifFirst(first, WQ_SESSION.productId))
+                .set(WQ_SESSION.productType, ifFirst(first, WQ_SESSION.productType))
+                .set(WQ_SESSION.firstSourceId, ifFirst(first, WQ_SESSION.firstSourceId))
+                .set(WQ_SESSION.firstSource, ifFirst(first, WQ_SESSION.firstSource))
                 .set(WQ_SESSION.txCount, summed(WQ_SESSION.txCount))
                 .set(WQ_SESSION.txCountExclCancelled, summed(WQ_SESSION.txCountExclCancelled))
                 .set(WQ_SESSION.playCount, summed(WQ_SESSION.playCount))
@@ -298,7 +316,7 @@ public class RollupUpdater {
                         r.get(WQ_SESSION.productType), r.get(WQ_SESSION.currency)));
     }
 
-    /** The session's labels after a fold: each LEAST over its items. */
+    /** The session's labels after a fold: the first item's product pair, and the currency. */
     private record SessionLabel(String productId, String productType, String currency) {
     }
 
@@ -312,9 +330,27 @@ public class RollupUpdater {
         return DSL.greatest(field, DSL.excluded(field));
     }
 
-    /** LEAST(existing, incoming); Postgres LEAST ignores NULLs. */
-    private static <T> Field<T> least(Field<T> field) {
-        return DSL.least(field, DSL.excluded(field));
+    /**
+     * Whether the incoming item becomes the group's first item, for ON CONFLICT DO UPDATE. The
+     * claim has already moved the anchor to MIN(occurredAt), so: an item that re-anchored the
+     * group is strictly earliest; one later than the anchor is not first; one AT the anchor ties,
+     * and the lower (sourceId, source) wins -- the only comparison left to the database.
+     */
+    private static Condition isFirst(
+            Contribution c, Anchor anchor, Field<String> firstSourceId, Field<Short> firstSource) {
+        if (anchor.previousStart() != null) {
+            return DSL.trueCondition();
+        }
+        if (!c.at().isEqual(anchor.startedAt())) {
+            return DSL.falseCondition();
+        }
+        return DSL.row(DSL.excluded(firstSourceId), DSL.excluded(firstSource))
+                .lt(DSL.row(firstSourceId, firstSource));
+    }
+
+    /** The incoming value when the item is first, else the existing one. */
+    private static <T> Field<T> ifFirst(Condition first, Field<T> field) {
+        return DSL.when(first, DSL.excluded(field)).otherwise(field);
     }
 
     private record Contribution(

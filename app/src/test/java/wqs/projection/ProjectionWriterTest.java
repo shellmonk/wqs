@@ -120,6 +120,141 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(offsetStore.read(STREAM)).isEmpty();
     }
 
+    // --- Phase 5 ingest rules (spec 4.1, plan D6-D8) ---------------------------------------------
+
+    /** D8: recorded in the locator so it stays idempotent, written to nothing else. */
+    @Test
+    void zero_amount_item_writes_locator_only() {
+        WriteResult first = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 1L));
+
+        assertThat(count("wqItemLocator")).isEqualTo(1);
+        assertThat(dsl().fetchOne("select \"zeroAmount\" from \"wqItemLocator\"").get(0, Boolean.class)).isTrue();
+        assertNothingProjected();
+        assertThat(first.projected()).isZero();
+        assertThat(first.skipped()).isEqualTo(1);
+        assertThat(offsetStore.read(STREAM)).contains(1L);
+
+        WriteResult again = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 2L));
+        assertThat(again.duplicates()).isEqualTo(1);
+        assertThat(again.skipped()).isZero();
+        assertThat(count("wqItemLocator")).isEqualTo(1);
+        assertNothingProjected();
+    }
+
+    /**
+     * A cancel of a zero-amount item has its own amount, so it is projected; it resolves against
+     * the locator row, marks nothing and never parks -- in either arrival order.
+     */
+    @Test
+    void cancel_of_zero_amount_item_resolves_and_is_itself_projected() {
+        for (boolean cancelFirst : new boolean[] {false, true}) {
+            clearProjection();
+            ProjectionItem target = zero("z-1");
+            ProjectionItem cancel = cancelOf("c-1", "z-1", new BigDecimal("-2.0000"));
+            List<ProjectionItem> order = cancelFirst ? List.of(cancel, target) : List.of(target, cancel);
+            writer.apply(new ProjectionBatch(STREAM, List.of(order.get(0)), 1L));
+            writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
+
+            assertThat(count("wqWebItem")).as("cancelFirst=" + cancelFirst).isEqualTo(1);
+            assertThat(dsl().fetchOne("select \"sourceId\" from \"wqWebItem\"").get(0, String.class)).isEqualTo("c-1");
+            assertThat(dsl().fetchOne("select count(*)::int from \"wqWebItem\" where \"cancelled\"")
+                    .get(0, Integer.class)).isZero();
+            assertThat(count("wqPendingCancel")).as("cancelFirst=" + cancelFirst).isZero();
+            assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        }
+    }
+
+    /** A zero-amount cancel is itself locator-only, and still cancels its (non-zero) target. */
+    @Test
+    void zero_amount_cancel_is_locator_only_and_still_cancels_its_target() {
+        for (boolean cancelFirst : new boolean[] {false, true}) {
+            clearProjection();
+            ProjectionItem target = unsessioned("t-1", "lottery", new BigDecimal("3.0000"));
+            ProjectionItem cancel = cancelOf("c-1", "t-1", BigDecimal.ZERO);
+            List<ProjectionItem> order = cancelFirst ? List.of(cancel, target) : List.of(target, cancel);
+            writer.apply(new ProjectionBatch(STREAM, List.of(order.get(0)), 1L));
+            writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
+
+            assertThat(count("wqItemLocator")).isEqualTo(2);
+            assertThat(count("wqWebItem")).as("only the target has an item row").isEqualTo(1);
+            assertThat(dsl().fetchOne("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\"").intoArray())
+                    .as("cancelFirst=" + cancelFirst).containsExactly(true, "c-1");
+            assertThat(count("wqPendingCancel")).isZero();
+            assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        }
+    }
+
+    /** D6 / O-4: a session is single-currency; the offending item alone is dead-lettered. */
+    @Test
+    void currency_mismatch_in_session_dead_letters() {
+        writer.apply(new ProjectionBatch(STREAM, List.of(inSession("e-1", "EUR")), 1L));
+        String sessionBefore = dsl().fetch("select * from \"wqSession\"").formatCSV();
+
+        WriteResult result = writer.apply(new ProjectionBatch(STREAM,
+                List.of(inSession("u-1", "USD"), tx("other")), 3L, List.of(2L, 3L)));
+
+        assertThat(result.deadLettered()).isEqualTo(1);
+        assertThat(result.projected()).isEqualTo(1);
+        assertThat(dsl().fetch("select * from \"wqSession\" where \"batchId\" = 'b-shared'").formatCSV())
+                .isEqualTo(sessionBefore);
+        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqItemLocator\"").where("\"sourceId\" = 'u-1'")))
+                .as("not even the locator").isZero();
+        assertThat(deadLetters()).containsExactly("u-1|2|currency-mismatch");
+        assertThat(offsetStore.read(STREAM)).contains(3L);
+        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+    }
+
+    /** D7 / P-7: an eInstant item must be sessioned; one that is not is dead-lettered. */
+    @Test
+    void einstant_without_batch_dead_letters() {
+        WriteResult result = writer.apply(new ProjectionBatch(STREAM,
+                List.of(unsessioned("ei-1", "instants", new BigDecimal("1.0000")),
+                        unsessioned("lo-1", "lottery", new BigDecimal("1.0000"))),
+                8L, List.of(7L, 8L)));
+
+        assertThat(result.deadLettered()).isEqualTo(1);
+        assertThat(result.projected()).isEqualTo(1);
+        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqItemLocator\"").where("\"sourceId\" = 'ei-1'"))).isZero();
+        assertThat(deadLetters()).containsExactly("ei-1|7|einstant-unsessioned");
+        assertThat(offsetStore.read(STREAM)).contains(8L);
+    }
+
+    private void assertNothingProjected() {
+        for (String table : List.of("wqWebItem", "wqCcItem", "wqGroupLocator", "wqSession", "wqPlay",
+                "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth", "wqPendingCancel")) {
+            assertThat(count(table)).as(table).isZero();
+        }
+    }
+
+    private List<String> deadLetters() {
+        return dsl().fetch("select \"sourceId\" || '|' || coalesce(\"streamOffset\"::text, '-') || '|' || \"error\""
+                + " from \"wqDeadLetter\" order by \"deadLetterId\"").getValues(0, String.class);
+    }
+
+    private ProjectionItem zero(String sourceId) {
+        return new ProjectionItem(
+                7L, SourceKind.TRANSACTION, sourceId, WHEN, "P11", "instants", "b-z", "p-z",
+                TxTypes.WIN, new BigDecimal("0.0000"), "EUR", null, null, null);
+    }
+
+    private ProjectionItem cancelOf(String sourceId, String target, BigDecimal amount) {
+        return new ProjectionItem(
+                7L, SourceKind.TRANSACTION, sourceId, WHEN.plusSeconds(60), "P13", "lottery", null, null,
+                TxTypes.CANCEL, amount, "EUR", null, target, null);
+    }
+
+    private ProjectionItem unsessioned(String sourceId, String productType, BigDecimal amount) {
+        return new ProjectionItem(
+                7L, SourceKind.TRANSACTION, sourceId, WHEN, "P13", productType, null, null,
+                TxTypes.PLAY, amount, "EUR", null, null, null);
+    }
+
+    private ProjectionItem inSession(String sourceId, String currency) {
+        return new ProjectionItem(
+                7L, SourceKind.TRANSACTION, sourceId, WHEN, "P11", "instants",
+                "b-shared", "p-1", TxTypes.PLAY, new BigDecimal("5.0000"), currency, null, null, null);
+    }
+
     private void dropPartitions(YearMonth month) {
         for (PartitionedTable table : PartitionedTable.values()) {
             dsl().execute("drop table if exists \"" + table.tableName() + "_"

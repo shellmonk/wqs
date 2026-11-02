@@ -238,6 +238,35 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
                 .startsWith("session mismatch").contains("batchId=b1");
     }
 
+    /**
+     * D6: the oracle expects the FIRST item's pair. Here the per-column LEAST is (P03, arcade) --
+     * no item's product -- while the first item's is (P13, arcade); a session or page row carrying
+     * the LEAST id is drift.
+     */
+    @Test
+    void a_session_labelled_by_a_per_column_least_is_drift() {
+        writer.apply(new ProjectionBatch("s", List.of(
+                labelled("x1", T0, "P13", "arcade"),
+                labelled("x2", T0.plusSeconds(1), "P03", "lottery")), 2L));
+        assertThat(invariants.drift()).as("first item's pair").isEmpty();
+
+        execute("""
+                update "wqSession" set "productId" = 'P03' where "batchId" = 'b2'""");
+        execute("""
+                update "wqCcHighLevel" set "productId" = 'P03' where "refId" = 'b2'""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("session mismatch").contains("batchId=b2");
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("page row key mismatch").contains("view=CC", "refId=b2",
+                        "expectedProductId=P13", "storedProductId=P03");
+    }
+
+    private static ProjectionItem labelled(String id, Instant at, String productId, String productType) {
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, productId, productType, "b2", "b2-p",
+                TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
+    }
+
     @Test
     void a_page_row_at_a_stale_key_is_high_level_drift() {
         execute("""
@@ -301,6 +330,18 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
                 .startsWith("cancelled without a cancel").contains("sourceId=t2");
     }
 
+    /** A zero-amount cancel lives in the locator only (D8), yet still counts as t2's cancel. */
+    @Test
+    void a_zero_amount_cancel_in_the_locator_is_seen_by_the_cancellation_oracle() {
+        execute("""
+                insert into "wqItemLocator" ("source", "sourceId", "userId", "occurredAt", "itemId",
+                    "zeroAmount", "cancels")
+                values (1, 'cz', 1, timestamptz '2034-04-01 02:00:00+00', -1, true, 't2')""");
+
+        assertThat(invariants.cancellationDrift()).hasSize(2)
+                .allSatisfy(line -> assertThat(line).startsWith("cancel not applied").contains("sourceId=t2"));
+    }
+
     @Test
     void a_parked_cancel_whose_target_exists_is_cancellation_drift() {
         execute("""
@@ -323,7 +364,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     }
 
     private static ProjectionItem cancel(SourceKind source, String id, String cancels) {
-        return new ProjectionItem(1L, source, id, T0.plusSeconds(7_200), "P11", "instants", null, null,
+        return new ProjectionItem(1L, source, id, T0.plusSeconds(7_200), "P13", "arcade", null, null,
                 TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, cancels, null);
     }
 }

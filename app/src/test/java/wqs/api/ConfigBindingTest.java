@@ -83,4 +83,22 @@ class ConfigBindingTest {
         runner.run(ctx -> assertThat(ctx).hasNotFailed());
         assertThat(output.getOut()).doesNotContain("/cc access is OPEN");
     }
+
+    /** D3/D7: which product types are eInstant; the default is the stream's "instants". */
+    @Test
+    void einstant_product_types_default_to_instants_and_a_blank_entry_fails_startup() {
+        ApplicationContextRunner einstant = new ApplicationContextRunner()
+                .withUserConfiguration(EInstantCfg.class);
+        einstant.run(ctx -> assertThat(ctx.getBean(wqs.projection.EInstantProperties.class).productTypes())
+                .containsExactly("instants"));
+        einstant.withPropertyValues("wqs.einstant.product-types=instants,scratch")
+                .run(ctx -> assertThat(ctx.getBean(wqs.projection.EInstantProperties.class).isEInstant("scratch"))
+                        .isTrue());
+        einstant.withPropertyValues("wqs.einstant.product-types[0]=instants", "wqs.einstant.product-types[1]= ")
+                .run(ctx -> assertThat(ctx).hasFailed());
+    }
+
+    @Configuration
+    @EnableConfigurationProperties(wqs.projection.EInstantProperties.class)
+    static class EInstantCfg {}
 }

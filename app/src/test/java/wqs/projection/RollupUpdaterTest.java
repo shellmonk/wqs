@@ -174,8 +174,9 @@ class RollupUpdaterTest extends PostgresTestBase {
         assertThat(session.getEndedAt()).isEqualTo(utc(T0.plusSeconds(80)));
         assertThat(session.getTxCount()).isEqualTo(5);
         assertThat(session.getPlayCount()).isEqualTo(2);
-        assertThat(session.getProductId()).isEqualTo(Products.id(11));
-        assertThat(session.getProductType()).isEqualTo(Products.type(11));
+        // t1, the first item, carries product 12 -- not the LEAST of the session's products.
+        assertThat(session.getProductId()).isEqualTo(Products.id(12));
+        assertThat(session.getProductType()).isEqualTo(Products.type(12));
         assertThat(session.getTotalPlays()).isEqualByComparingTo("7.0000");
         assertThat(session.getTotalWins()).isEqualByComparingTo("8.7500");
         assertThat(session.getNet()).isEqualByComparingTo("1.7500");
@@ -199,10 +200,11 @@ class RollupUpdaterTest extends PostgresTestBase {
     void the_session_key_reports_a_product_change_without_a_time_change() {
         apply(wager("t1", "b1", "p1", "5.0000", T0, 12));
 
-        assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
+        // Same instant, lower sourceId: t0 is the first item, so its product is the session's.
+        assertThat(apply(wager("t0", "b1", "p1", "1.0000", T0, 11)))
                 .isEqualTo(rr(false, false, T0, 11, T0, 12, true));
-        // A higher product does not displace the LEAST: no key change.
-        assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), 13)))
+        // A later item does not displace the first item's product, whatever its value.
+        assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), 3)))
                 .isEqualTo(rr(false, false, T0, 11, null, null, false));
     }
 
@@ -210,11 +212,12 @@ class RollupUpdaterTest extends PostgresTestBase {
     void the_session_key_reports_a_product_arriving_after_none() {
         apply(wager("t1", "b1", "p1", "5.0000", T0, null));
 
+        // A later item with a product does not label a session whose first item has none...
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
+                .isEqualTo(rr(false, false, T0, null, null, null, false));
+        // ...but a new first item does, and a null pair is displaced like any other.
+        assertThat(apply(wager("t0", "b1", "p1", "1.0000", T0, 11)))
                 .isEqualTo(rr(false, false, T0, 11, T0, null, true));
-        // A null product later does not displace the value.
-        assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), null)))
-                .isEqualTo(rr(false, false, T0, 11, null, null, false));
     }
 
     @Test
@@ -239,6 +242,58 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         assertThat(apply(win("t2", "b1", "p1", "1.0000", T0.plusSeconds(10))))
                 .isEqualTo(rr(false, false, T0, 11, null, null, false));
+    }
+
+    /**
+     * D6: the session's (productId, productType) is its FIRST item's pair, never a per-column
+     * LEAST, which here would pair P03 with "arcade" -- a product no item has.
+     */
+    @Test
+    void the_session_and_play_product_is_the_first_items_pair_in_any_order() {
+        ProjectionItem first = labelled("t9", T0, "P13", "arcade");
+        ProjectionItem later = labelled("t1", T0.plusSeconds(30), "P03", "lottery");
+
+        apply(first);
+        apply(later);
+        Map<String, List<Map<String, Object>>> inOrder = snapshot();
+        assertThat(pair(session("b1").getProductId(), session("b1").getProductType())).isEqualTo("P13/arcade");
+        assertThat(pair(play("b1", "p1").getProductId(), play("b1", "p1").getProductType())).isEqualTo("P13/arcade");
+
+        clean();
+        apply(later);
+        RollupResult reanchor = apply(first);
+        assertThat(snapshot()).isEqualTo(inOrder);
+        assertThat(reanchor.sessionKeyChanged()).isTrue();
+        assertThat(reanchor.previousSessionProductType()).isEqualTo("lottery");
+        assertThat(reanchor.sessionProductType()).isEqualTo("arcade");
+    }
+
+    /** Items at the same instant: the lower (sourceId, source) is first, whatever arrives first. */
+    @Test
+    void a_tie_on_occurred_at_is_broken_by_source_id() {
+        ProjectionItem a = labelled("tA", T0, "P13", "lottery");
+        ProjectionItem b = labelled("tB", T0, "P03", "arcade");
+
+        apply(b);
+        RollupResult tie = apply(a);
+        Map<String, List<Map<String, Object>>> aWins = snapshot();
+        assertThat(pair(session("b1").getProductId(), session("b1").getProductType())).isEqualTo("P13/lottery");
+        assertThat(tie.sessionKeyChanged()).isTrue();
+        assertThat(tie.previousSessionStart()).isEqualTo(T0);
+
+        clean();
+        apply(a);
+        assertThat(apply(b).sessionKeyChanged()).isFalse();
+        assertThat(snapshot()).isEqualTo(aWins);
+    }
+
+    private static ProjectionItem labelled(String id, Instant at, String productId, String productType) {
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, productId, productType, "b1", "p1",
+                TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
+    }
+
+    private static String pair(String productId, String productType) {
+        return productId + "/" + productType;
     }
 
     @Test

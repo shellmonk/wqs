@@ -258,6 +258,71 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(count("wqDeadLetter")).isZero();
     }
 
+    /**
+     * Security gate (spec 4.1, D8): owner "2-7" is NOT player 7. A non-player event writes nothing
+     * at all -- no locator, item, rollup, page row or counter -- is counted, and the offset still
+     * moves past it, alone or behind a buffered player event.
+     */
+    @Test
+    void non_player_owner_is_skipped_and_counted() {
+        StreamConsumer consumer = consumer(1, Duration.ofMillis(200));
+        consumer.start();
+
+        source.queue(nonPlayer("np-1"), 4);
+        source.deliverAll();
+        consumer.poll();
+
+        for (String table : java.util.List.of("wqItemLocator", "wqWebItem", "wqCcItem", "wqGroupLocator",
+                "wqSession", "wqPlay", "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth",
+                "wqPendingCancel", "wqDeadLetter")) {
+            assertThat(count(table)).as(table).isZero();
+        }
+        assertThat(offsetStore.read("wallet-transactions")).contains(4L);
+        assertThat(skipped("non-player")).isEqualTo(1.0);
+        assertThat(skipped("zero-amount")).as("pre-registered").isZero();
+    }
+
+    @Test
+    void a_non_player_event_behind_a_buffered_player_event_is_covered_by_the_batch_offset() {
+        StreamConsumer consumer = consumer(10, Duration.ofMillis(200));
+        consumer.start();
+
+        source.queue(payload("tx-1"), 5);
+        source.queue(nonPlayer("np-1"), 6);
+        source.deliverAll();
+        consumer.stop(); // flushes the buffered batch
+
+        assertThat(count("wqItemLocator")).isEqualTo(1);
+        assertThat(skipped("non-player")).isEqualTo(1.0);
+        assertThat(offsetStore.read("wallet-transactions")).contains(6L);
+    }
+
+    @Test
+    void a_zero_amount_event_is_counted_as_skipped() {
+        StreamConsumer consumer = consumer(1, Duration.ofMillis(200));
+        consumer.start();
+
+        source.queue(new StreamPayload("z-1", 1, 7L, WHEN, "PRIZE", "P1", "instants", "b-1", "p-1",
+                new BigDecimal("0.0000"), "EUR", null, null, java.util.Map.of()), 3);
+        source.deliverAll();
+        consumer.poll();
+
+        assertThat(skipped("zero-amount")).isEqualTo(1.0);
+        assertThat(count("wqItemLocator")).isEqualTo(1);
+        assertThat(count("wqWebItem")).isZero();
+        assertThat(offsetStore.read("wallet-transactions")).contains(3L);
+    }
+
+    private double skipped(String reason) {
+        var counter = registry.find("wqs.ingest.skipped").tag("reason", reason).counter();
+        assertThat(counter).as("wqs.ingest.skipped{reason=" + reason + "}").isNotNull();
+        return counter.count();
+    }
+
+    private StreamPayload nonPlayer(String id) {
+        return new StreamPayload(id, 2, 7L, WHEN, "TT_BUY", "11", null, "b-1", "p-1", new BigDecimal("5.0000"), "EUR", null, null, java.util.Map.of());
+    }
+
     private StreamConsumer consumerWith(Clock clock, int batchSize) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);

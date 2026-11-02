@@ -57,7 +57,7 @@ public record ProjectionSnapshot(
 
     private static List<String> locatorRows(DSLContext dsl) {
         return dsl.fetch("""
-                         select "source", "sourceId", "userId", "occurredAt"
+                         select "source", "sourceId", "userId", "occurredAt", "zeroAmount", "cancels"
                          from "wqItemLocator"
                          order by "source", "sourceId"
                          """)

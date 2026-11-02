@@ -18,7 +18,9 @@ import wqs.domain.ViewKind;
 /**
  * The single write choke point. Nothing else in WQS holds a write connection (spec section 6).
  *
- * Implements the ordering of spec 6.2: for each item, gate and insert, then (for a cancellation)
+ * Implements the ordering of spec 6.2: for each item, the ingest rules of spec 4.1 (a zero-amount
+ * item is recorded in the locator only; a currency-mismatched or unsessioned eInstant item is
+ * dead-lettered alone), then gate and insert, then (for a cancellation)
  * apply or park it, then rollups, page index and counters; after the items, drain the cancels
  * parked for items this batch inserted; then the offset last -- all in one transaction, so
  * projection state and consumer position advance or roll back together.
@@ -38,6 +40,8 @@ public class ProjectionWriter {
     private final PartitionProvisioner partitionProvisioner;
     private final DrainedCancelApplier drainedCancelApplier;
     private final DrainedCancelDeadLetters drainedCancelDeadLetters;
+    private final IngestRules ingestRules;
+    private final RejectedItemDeadLetters rejectedItemDeadLetters;
 
     public ProjectionWriter(
             ItemInserter itemInserter,
@@ -49,7 +53,9 @@ public class ProjectionWriter {
             OffsetSink offsetStore,
             PartitionProvisioner partitionProvisioner,
             DrainedCancelApplier drainedCancelApplier,
-            DrainedCancelDeadLetters drainedCancelDeadLetters) {
+            DrainedCancelDeadLetters drainedCancelDeadLetters,
+            IngestRules ingestRules,
+            RejectedItemDeadLetters rejectedItemDeadLetters) {
         this.itemInserter = itemInserter;
         this.rollupUpdater = rollupUpdater;
         this.highLevelUpdater = highLevelUpdater;
@@ -60,6 +66,8 @@ public class ProjectionWriter {
         this.partitionProvisioner = partitionProvisioner;
         this.drainedCancelApplier = drainedCancelApplier;
         this.drainedCancelDeadLetters = drainedCancelDeadLetters;
+        this.ingestRules = ingestRules;
+        this.rejectedItemDeadLetters = rejectedItemDeadLetters;
     }
 
     /**
@@ -78,9 +86,40 @@ public class ProjectionWriter {
 
         int projected = 0;
         int duplicates = 0;
+        int skipped = 0;
+        int deadLettered = 0;
         Set<ItemRef> inserted = new LinkedHashSet<>();
 
-        for (ProjectionItem item : batch.items()) {
+        for (int i = 0; i < batch.items().size(); i++) {
+            ProjectionItem item = batch.items().get(i);
+
+            // Zero-amount (spec 4.1, D8): the locator row only, so it stays idempotent and a
+            // cancel referencing it resolves; no view, rollup, page row or counter. A zero-amount
+            // cancel still cancels its target -- the effect lives on the target's rows.
+            if (item.amount().signum() == 0) {
+                if (!itemInserter.recordLocatorOnly(item)) {
+                    duplicates++;
+                    continue;
+                }
+                skipped++;
+                inserted.add(ItemRef.of(item));
+                if (item.isCancellation()) {
+                    cancellationApplier.apply(item);
+                }
+                continue;
+            }
+
+            // Rejected items (D6, D7) are dead-lettered alone and nothing of them is written, not
+            // even the locator row; the rest of the batch applies. Checked before the gate, so a
+            // re-delivered rejected item is rejected again rather than counted as a duplicate.
+            String rejection = ingestRules.rejection(item);
+            if (rejection != null) {
+                log.warn("Dead-lettering item {} (source {}): {}", item.sourceId(), item.source(), rejection);
+                rejectedItemDeadLetters.recordRejected(batch.stream(), batch.offsetOf(i), item, rejection);
+                deadLettered++;
+                continue;
+            }
+
             // The gate makes everything below safe to do incrementally: a replayed event never
             // gets past it, so no aggregate, counter or cancellation is ever applied twice.
             if (!itemInserter.insertIfAbsent(item)) {
@@ -102,7 +141,6 @@ public class ProjectionWriter {
         // Each is applied in its own savepoint. One that fails is rolled back alone, stays removed
         // from "wqPendingCancel" and is dead-lettered ITSELF: failing the batch instead would make
         // the per-item fallback dead-letter the innocent original whose arrival drained it.
-        int deadLettered = 0;
         for (ProjectionItem parked : pendingCancelStore.drainFor(inserted)) {
             try {
                 drainedCancelApplier.apply(parked);
@@ -118,7 +156,7 @@ public class ProjectionWriter {
             offsetStore.write(batch.stream(), batch.committedOffset());
         }
 
-        return new WriteResult(projected, duplicates, deadLettered);
+        return new WriteResult(projected, duplicates, deadLettered, skipped);
     }
 
     /**

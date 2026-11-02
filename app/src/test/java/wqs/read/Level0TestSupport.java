@@ -23,7 +23,7 @@ abstract class Level0TestSupport extends ProjectionPropertyBase {
     protected static ProjectionItem item(
             SourceKind source, String id, String at, String product, String cancels, String detail) {
         return new ProjectionItem(USER, source, id, Instant.parse(at), product,
-                product == null ? null : "instants", null, null, TxTypes.PLAY,
+                product == null ? null : "keno", null, null, TxTypes.PLAY,
                 new BigDecimal("1.0000"), "EUR", null, cancels, detail);
     }
 

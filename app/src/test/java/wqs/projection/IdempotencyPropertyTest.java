@@ -95,13 +95,15 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
 
     /**
      * Convergence cannot see deterministic misrouting or deterministic dropping, so check
-     * completeness directly: each distinct (source, sourceId) is in exactly the view tables its
-     * source routes to (once), and nothing else is.
+     * completeness directly: each distinct (source, sourceId) with a non-zero amount is in exactly
+     * the view tables its source routes to (once), and nothing else is -- in particular no
+     * zero-amount item; and every item, zero-amount or not, has its locator row.
      */
     private void assertRoutedExactly(List<ProjectionItem> items) {
         List<String> expectedWeb = new ArrayList<>();
         List<String> expectedCc = new ArrayList<>();
         for (ProjectionItem item : items) {
+            if (item.amount().signum() == 0) continue; // locator only (spec 4.1, D8)
             String key = item.source().code() + "/" + item.sourceId();
             if (expectedWeb.contains(key) || expectedCc.contains(key)) continue; // generated keys are unique
             if (item.source().views().contains(wqs.domain.ViewKind.WEB)) expectedWeb.add(key);
@@ -109,6 +111,8 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
         }
         assertThat(keys("wqWebItem")).as("wqWebItem").containsExactlyInAnyOrderElementsOf(expectedWeb);
         assertThat(keys("wqCcItem")).as("wqCcItem").containsExactlyInAnyOrderElementsOf(expectedCc);
+        assertThat(keys("wqItemLocator")).as("wqItemLocator").containsExactlyInAnyOrderElementsOf(
+                items.stream().map(i -> i.source().code() + "/" + i.sourceId()).distinct().toList());
     }
 
     private List<String> keys(String table) {

@@ -36,11 +36,10 @@ import wqs.domain.ViewKind;
  * item joining a session whose row in a view its source feeds is hidden REVIVES it, since the
  * item is itself a surviving item in that view.
  *
- * Currency: a session row carries the SESSION's currency (LEAST over its items, exactly as
- * "wqSession" holds it, from {@link RollupResult#sessionCurrency}), never the triggering item's --
- * otherwise a mixed-currency session's row would depend on which item opened it in each view.
- * Currency is not part of the key, so when a later item lowers it the existing rows are updated in
- * place, in every view. An unsessioned row carries its item's own currency.
+ * Currency: a session row carries the SESSION's currency (from {@link RollupResult#sessionCurrency},
+ * exactly as "wqSession" holds it). A session is single-currency -- an item of another currency
+ * is dead-lettered before it gets here (plan D6) -- so the currency never changes and rows never
+ * need re-syncing. An unsessioned row carries its item's own currency.
  *
  * A cancellation never creates a row; its effects are applied by {@link CancellationApplier}.
  */
@@ -108,11 +107,6 @@ public class HighLevelUpdater {
                 revived.add(view);
             }
         }
-        // This item may have lowered the session's currency; rows inserted or moved above
-        // already carry it, any other existing row is brought in line here (all views).
-        for (ViewKind view : ViewKind.values()) {
-            syncCurrency(view(view), item, rollup);
-        }
         return new HighLevelResult(inserted, moved,
                 moved.isEmpty() ? null : rollup.previousSessionStart(),
                 moved.isEmpty() ? null : rollup.previousSessionProductType(),
@@ -129,18 +123,6 @@ public class HighLevelUpdater {
                        v.refId.eq(item.batchId()),
                        v.visible.isFalse())
                 .execute() > 0;
-    }
-
-    /** Sets the session row's currency to the session's, where a row exists and differs. */
-    private void syncCurrency(View v, ProjectionItem item, RollupResult rollup) {
-        dsl.update(v.table)
-                .set(v.currency, rollup.sessionCurrency())
-                .where(v.userId.eq(item.userId()),
-                       v.occurredAt.eq(utc(rollup.sessionStart())),
-                       v.kind.eq(KIND_SESSION),
-                       v.refId.eq(item.batchId()),
-                       v.currency.ne(rollup.sessionCurrency()))
-                .execute();
     }
 
     private Set<ViewKind> insertForSource(ProjectionItem item, Instant at, short kind,

@@ -114,13 +114,14 @@ public final class ReadGenerators {
                                 Tuple.of(5, SourceKind.TRANSACTION),
                                 Tuple.of(2, SourceKind.CLAIMABLE_PRIZE),
                                 Tuple.of(3, SourceKind.PAYMENT)),
-                        Arbitraries.<String[]>of(new String[] {"P11", "instants"},
+                        Arbitraries.<String[]>of(new String[] {"P11", "keno"},
                                         new String[] {"P13", "lottery"})
                                 .injectNull(0.3),
                         cancelSpecs().injectNull(0.8),
                         Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(4)
                                 .map(c -> "{\"gameCode\": \"" + c + "\"}").injectNull(0.5),
-                        Arbitraries.longs().between(-50_000, 50_000))
+                        // Never zero: a zero-amount item is locator-only (spec 4.1) and in no view.
+                        Arbitraries.longs().between(-50_000, 50_000).filter(cents -> cents != 0))
                 .as(ItemSpec::new);
     }
 

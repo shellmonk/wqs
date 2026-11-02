@@ -289,7 +289,7 @@ class ProjectionApiTest extends ApiTestBase {
     @Test
     void excludeCancelledTransactions_is_optional_and_bound() throws Exception {
         project(new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, "t1-cancel",
-                java.time.Instant.parse("2034-02-13T10:00:00Z"), "P10", "instants", null, null,
+                java.time.Instant.parse("2034-02-13T10:00:00Z"), "P10", "keno", null, null,
                 TxTypes.CANCEL,
                 new java.math.BigDecimal("12.5000"), "EUR", null, "t1", null));
         mvc.perform(cc("pageSize", "10"))

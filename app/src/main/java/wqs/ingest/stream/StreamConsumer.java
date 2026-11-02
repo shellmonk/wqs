@@ -18,6 +18,7 @@ import wqs.db.TxTypeRegistry;
 import wqs.domain.ProjectionItem;
 import wqs.ingest.DeadLetterStore;
 import wqs.metrics.CachedGaugeValue;
+import wqs.projection.IngestSkipMetrics;
 import wqs.projection.ProjectionBatch;
 import wqs.projection.ProjectionWriter;
 import wqs.projection.StreamPayloadMapper;
@@ -44,6 +45,8 @@ public class StreamConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(StreamConsumer.class);
     private static final Duration OFFSET_LAG_TTL = Duration.ofSeconds(15);
+    /** {@code userContext.ownerId} = "{userType}-{userId}"; only players are projected (spec 4.1). */
+    private static final int PLAYER = 1;
 
     private final StreamSource source;
     private final StreamProperties properties;
@@ -64,6 +67,7 @@ public class StreamConsumer {
     private final Counter deadLetteredCounter;
     private final DistributionSummary batchSize;
     private final Timer batchDuration;
+    private final IngestSkipMetrics skipMetrics;
 
     /** True after an unrecoverable failure until poll() has re-subscribed from the stored offset. */
     private boolean recovering;
@@ -101,6 +105,8 @@ public class StreamConsumer {
                 .tag("source", "stream").tag("outcome", "duplicate").register(registry);
         this.deadLetteredCounter = Counter.builder("wqs.ingest.events")
                 .tag("source", "stream").tag("outcome", "deadlettered").register(registry);
+
+        this.skipMetrics = new IngestSkipMetrics(registry);
 
         this.batchSize = DistributionSummary.builder("wqs.ingest.batch.size")
                 .description("Events per applied stream batch")
@@ -194,6 +200,12 @@ public class StreamConsumer {
             return; // Stale subscription, or recovering: redelivered from the stored offset later.
         }
         try {
+            if (payload.userType() != PLAYER) {
+                // Security gate (spec 4.1, D8), BEFORE mapping: owner "2-1717" is not player 1717,
+                // and mapping would merge it into that player's data. Nothing is written.
+                skipNonPlayer(payload, offset);
+                return;
+            }
             ProjectionItem item;
             try {
                 item = payloadMapper.toItem(payload, txTypes);
@@ -248,6 +260,21 @@ public class StreamConsumer {
         } catch (Throwable e) {
             enterRecovery(e);
             rethrowIfError(e);
+        }
+    }
+
+    /**
+     * A non-player event is skipped, never buffered. Its offset is persisted now when nothing is
+     * buffered, otherwise carried by the pending batch's committed offset, so the stored offset
+     * still moves past it. (If the process dies first, it is redelivered and skipped again.)
+     */
+    private void skipNonPlayer(StreamPayload payload, long offset) {
+        log.debug("Skipping event {} at offset {}: owner is not a player", payload.id(), offset);
+        skipMetrics.nonPlayer();
+        if (accumulator.pending() == 0) {
+            offsetStore.write(properties.name(), offset);
+        } else {
+            accumulator.cover(offset);
         }
     }
 
@@ -385,7 +412,9 @@ public class StreamConsumer {
         RuntimeException lastError = null;
         for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
             try {
-                WriteResult result = writer.apply(new ProjectionBatch(batch.stream(), List.of(item), null));
+                // The item's own offset, so a rule rejection inside the writer records where it was.
+                WriteResult result = writer.apply(new ProjectionBatch(
+                        batch.stream(), List.of(item), null, itemOffset == null ? null : List.of(itemOffset)));
                 count(result);
                 return true;
             } catch (RuntimeException e) {
@@ -428,6 +457,7 @@ public class StreamConsumer {
         projectedCounter.increment(result.projected());
         duplicateCounter.increment(result.duplicates());
         deadLetteredCounter.increment(result.deadLettered());
+        skipMetrics.zeroAmount(result.skipped());
     }
 
     private void recordLag(List<ProjectionItem> items) {

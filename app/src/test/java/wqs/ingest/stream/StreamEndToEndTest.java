@@ -115,11 +115,15 @@ class StreamEndToEndTest extends PostgresTestBase {
         assertThat(confirmed.await(10, TimeUnit.SECONDS)).as("broker confirm").isTrue();
     }
 
-    /** A real-format TT_BUY event (nested walAccountTransactions shape), optionally in a session. */
+    /**
+     * A real-format TT_BUY event (nested walAccountTransactions shape), optionally in a session.
+     * An unsessioned one is a lottery ticket: an unsessioned eInstant item is dead-lettered (P-7).
+     */
     private static String event(String id, String at, String type, String amount, String batch) {
         return "{\"id\":\"" + id + "\",\"type\":\"" + type + "\","
                 + "\"amount\":{\"amount\":" + amount + ",\"currency\":\"EUR\"},"
-                + "\"productId\":\"TIKIKALACABANA\",\"productType\":\"instants\","
+                + "\"productId\":\"TIKIKALACABANA\",\"productType\":\""
+                + (batch == null ? "lottery" : "instants") + "\","
                 + "\"userContext\":{\"ownerId\":\"1-" + USER + "\"},"
                 + "\"batchContext\":{\"batchId\":\"" + (batch == null ? "" : batch) + "\"},"
                 + "\"createdContext\":{\"created\":\"" + at + "\"}}";

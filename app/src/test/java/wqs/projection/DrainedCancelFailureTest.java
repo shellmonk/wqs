@@ -116,7 +116,7 @@ class DrainedCancelFailureTest extends PostgresTestBase {
     }
 
     private static ProjectionItem cancel(String id, String cancels) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0.plusSeconds(60), "P11", "instants", null, null,
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0.plusSeconds(60), "P13", "arcade", null, null,
                 TxTypes.CANCEL, new BigDecimal("5.0000"), "EUR", null, cancels, null);
     }
 

@@ -18,6 +18,7 @@ import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.projection.source.StreamPayload;
 import wqs.projection.DrainedCancelDeadLetters;
+import wqs.projection.RejectedItemDeadLetters;
 
 /**
  * Isolates poison events so ingestion keeps flowing (spec 6.4).
@@ -33,7 +34,7 @@ import wqs.projection.DrainedCancelDeadLetters;
  * database is down) does the exception escape, and then the offset must not move.
  */
 @Component
-public class DeadLetterStore implements DrainedCancelDeadLetters {
+public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDeadLetters {
 
     private static final Logger log = LoggerFactory.getLogger(DeadLetterStore.class);
 
@@ -66,6 +67,16 @@ public class DeadLetterStore implements DrainedCancelDeadLetters {
         record(stream, null, cancel, error, 1);
     }
 
+    /**
+     * An item an ingest rule rejected (spec 4.1). The error text is the reason exactly
+     * ({@code currency-mismatch}, {@code einstant-unsessioned}), so rows can be selected by it; one
+     * attempt, since a rule rejects deterministically.
+     */
+    @Override
+    public void recordRejected(String stream, Long offset, ProjectionItem item, String reason) {
+        write(stream, offset, (short) item.source().code(), item.sourceId(), item, reason, 1);
+    }
+
     /** Records an event that could not even be mapped to an item, using the raw wire payload. */
     public void record(String stream, Long offset, StreamPayload payload, Exception error, int attempts) {
         write(stream, offset, (short) SourceKind.TRANSACTION.code(),
@@ -84,7 +95,12 @@ public class DeadLetterStore implements DrainedCancelDeadLetters {
     private void write(
             String stream, Long offset, short source, String sourceId,
             Object payload, Exception error, int attempts) {
-        String errorText = describe(error);
+        write(stream, offset, source, sourceId, payload, describe(error), attempts);
+    }
+
+    private void write(
+            String stream, Long offset, short source, String sourceId,
+            Object payload, String errorText, int attempts) {
         try {
             requiresNew.executeWithoutResult(status ->
                     insert(stream, offset, source, sourceId, JSONB.valueOf(serialize(payload)), errorText, attempts));

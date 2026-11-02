@@ -22,9 +22,14 @@ import wqs.domain.MoneyDirection;
  * <ul>
  *   <li>A cancellation is an item row ("cancels" non-blank). It is counted at the ITEM page unit
  *       like any row, but never rolls up and never gets a page-index row.</li>
- *   <li>A session's key is (MIN occurredAt, LEAST non-null productType) over its non-cancellation
- *       items, cancelled or not -- a cancel never moves a row. Its productId and currency are
- *       LEAST likewise.</li>
+ *   <li>A session's key is (MIN occurredAt, the FIRST item's productType) over its
+ *       non-cancellation items, cancelled or not -- a cancel never moves a row. First is by
+ *       ("occurredAt", "sourceId", "source") (plan D6); its productId is the same item's, so the
+ *       pair always belongs to one item. A session is single-currency (mismatches are
+ *       dead-lettered), so its currency is any item's -- MIN here.</li>
+ *   <li>A zero-amount item is in the locator only ("zeroAmount"), in no table checked here; a
+ *       zero-amount cancel's target is in the locator's "cancels" and still counts as a
+ *       cancel.</li>
  *   <li>Counters are sparse: a stored row with cntAll = 0 is itself drift.</li>
  * </ul>
  */
@@ -50,7 +55,7 @@ public final class ProjectionInvariants {
 
     /**
      * Cancellation itself (spec 6.3), per view item table: an item is "cancelled" exactly when a
-     * cancel item for it exists -- same source, same user, "cancels" = its sourceId -- and then
+     * cancel for it exists -- a cancel item row, or a zero-amount cancel's locator row -- same source, same user, "cancels" = its sourceId -- and then
      * "cancelledBy" is the least such cancel's sourceId (null otherwise). And "wqPendingCancel"
      * holds exactly the cancels whose target is absent (no locator row with that source,
      * sourceId and user).
@@ -61,12 +66,20 @@ public final class ProjectionInvariants {
     public List<String> cancellationDrift() {
         List<String> drift = new ArrayList<>();
         String cancels = "c.\"cancels\" is not null and btrim(c.\"cancels\") <> ''";
+        // Every cancel: projected cancel rows, and zero-amount cancels, which live in the locator
+        // only (spec 4.1) yet still cancel their target.
+        String allCancels = """
+                select c."source", c."userId", c."sourceId", c."cancels" as target
+                from "wqCcItem" c where %s
+                union all
+                select l."source", l."userId", l."sourceId", l."cancels"
+                from "wqItemLocator" l where l."zeroAmount" and l."cancels" is not null
+                """.formatted(cancels);
         for (String[] view : new String[][] {{"WEB", "wqWebItem"}, {"CC", "wqCcItem"}}) {
             drift.addAll(dsl.fetch("""
                     with cancel as (
-                        select c."source", c."userId", c."cancels" as target, min(c."sourceId") as "by"
-                        from "wqCcItem" c
-                        where %3$s
+                        select "source", "userId", target, min("sourceId") as "by"
+                        from (%4$s) all_cancels
                         group by 1, 2, 3
                     )
                     select case when i."cancelled" and k.target is null then 'cancelled without a cancel'
@@ -81,16 +94,15 @@ public final class ProjectionInvariants {
                     where i."cancelled" <> (k.target is not null)
                        or i."cancelledBy" is distinct from k."by"
                     order by 3, 4, 5
-                    """.formatted(view[1], view[0], cancels))
+                    """.formatted(view[1], view[0], cancels, allCancels))
                     .map(ProjectionInvariants::describe));
         }
         drift.addAll(dsl.fetch("""
                 with expected as (
-                    select c."source", c."sourceId", c."cancels", c."userId"
-                    from "wqCcItem" c
-                    where %1$s
-                      and not exists (select 1 from "wqItemLocator" l
-                                      where l."source" = c."source" and l."sourceId" = c."cancels"
+                    select c."source", c."sourceId", c.target as "cancels", c."userId"
+                    from (%2$s) c
+                    where not exists (select 1 from "wqItemLocator" l
+                                      where l."source" = c."source" and l."sourceId" = c.target
                                         and l."userId" = c."userId")
                 )
                 select case when e."sourceId" is null then 'unexpected pending cancel'
@@ -105,7 +117,7 @@ public final class ProjectionInvariants {
                  and p."cancelsSourceId" = e."cancels" and p."userId" = e."userId"
                 where e."sourceId" is null or p."cancelSourceId" is null
                 order by 2, 3, 4
-                """.formatted(cancels))
+                """.formatted(cancels, allCancels))
                 .map(ProjectionInvariants::describe));
         return drift;
     }
@@ -196,7 +208,8 @@ public final class ProjectionInvariants {
      * playCountExclCancelled = plays with at least one non-cancelled item; totalPlays, totalWins
      * (abs(amount) by the type's "wqTxType" direction, exactly as {@link RollupUpdater}) and net
      * = wins - plays, each with its ExclCancelled form; startedAt = MIN occurredAt, endedAt = MAX,
-     * productId, productType and currency = LEAST non-null. Session and play locators sit at the row's
+     * productId and productType = the first item's pair by (occurredAt, sourceId, source),
+     * currency = MIN (the session is single-currency). Session and play locators sit at the row's
      * startedAt. Orphan rows (no items) and missing rows are reported too.
      */
     public List<String> aggregationDrift() {
@@ -205,6 +218,7 @@ public final class ProjectionInvariants {
         String sessioned = """
                 select i."userId", i."batchId", i."subBatchId", i."occurredAt", i."productId",
                        i."productType", i."currency"::text as currency, i."cancelled",
+                       i."sourceId", i."source",
                        %s as plays, %s as wins
                 from "wqCcItem" i
                 where i."batchId" is not null and %s
@@ -219,7 +233,8 @@ public final class ProjectionInvariants {
                 coalesce(sum(wins) filter (where not "cancelled"), 0)
                   - coalesce(sum(plays) filter (where not "cancelled"), 0) as "netExclCancelled",
                 min("occurredAt") as "startedAt", max("occurredAt") as "endedAt",
-                min("productId") as "productId", min("productType") as "productType",
+                (array_agg("productId" order by "occurredAt", "sourceId", "source"))[1] as "productId",
+                (array_agg("productType" order by "occurredAt", "sourceId", "source"))[1] as "productType",
                 min(currency) as currency
                 """;
         String compared = """
@@ -319,10 +334,10 @@ public final class ProjectionInvariants {
      *
      * Per view V (its item table holds exactly the items whose source feeds V): one session row
      * for each session with at least one non-cancellation item in V, at the session key
-     * (startedAt, productType) folded over ALL the session's non-cancellation items (productId
-     * folded likewise and carried on the row), visible iff at
-     * least one of its non-cancellation items in V is not cancelled, carrying the session's
-     * currency (LEAST over the same items as the key); and one row per non-cancellation
+     * (startedAt, productType) over ALL the session's non-cancellation items -- the product being
+     * the first item's by (occurredAt, sourceId, source), productId from the same item and carried
+     * on the row -- visible iff at least one of its non-cancellation items in V is not cancelled,
+     * carrying the session's currency; and one row per non-cancellation
      * unsessioned item in V, at the item's own (occurredAt, productType) with its own productId
      * and currency,
      * visible iff the item is not cancelled. Rows are matched on (userId, kind, refId), so a row at the
@@ -335,8 +350,10 @@ public final class ProjectionInvariants {
             drift.addAll(dsl.fetch("""
                     with session_key as (
                         select i."userId", i."batchId", min(i."occurredAt") as "startedAt",
-                               min(i."productId") as "productId",
-                               min(i."productType") as "productType",
+                               (array_agg(i."productId"
+                                    order by i."occurredAt", i."sourceId", i."source"))[1] as "productId",
+                               (array_agg(i."productType"
+                                    order by i."occurredAt", i."sourceId", i."source"))[1] as "productType",
                                min(i."currency"::text) as currency
                         from "wqCcItem" i
                         where i."batchId" is not null and %3$s

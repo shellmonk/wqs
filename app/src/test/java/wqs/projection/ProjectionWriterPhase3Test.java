@@ -156,7 +156,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 txProduct("u1", "b2", "p1", T0, null),
                 txProduct("u2", "b2", "p2", T0.plusSeconds(10), 11),
-                ccOnlyAdjustment("a1", "b2", T0.plusSeconds(20), 7)), 1L));
+                // Ties u1 at the session's start with a lower sourceId: the first item (D6).
+                ccOnlyAdjustment("a1", "b2", T0, 7)), 1L));
 
         // Product-only changes: still one row per view, now at product 7.
         assertThat(highLevelProducts("wqWebHighLevel")).containsExactly(Products.id(7));
@@ -178,19 +179,19 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     /**
-     * R98: a session's page rows carry the SESSION's currency -- LEAST over its items, as
-     * "wqSession" does -- in every view, whatever order its items arrive in. t1 (USD, both views)
-     * and a1 (AUD, /cc only) each open the session's row in a view first depending on order; t0
-     * (USD, a day earlier) re-anchors it, so the row is also moved. Every order must leave both
-     * views' rows at AUD, identical, and agreeing with the session.
+     * R98 / D6: a session's page rows carry the SESSION's currency in every view, whatever order
+     * its items arrive in. t1 (both views) and a1 (/cc only) each open the session's row in a view
+     * first depending on order; t0 (a day earlier) re-anchors it, so the row is also moved. Every
+     * order leaves both views' rows at USD, identical, and agreeing with the session. A later
+     * item in another currency is dead-lettered and changes nothing (single-currency session).
      */
     @Test
-    void session_page_rows_carry_the_least_currency_in_every_view_in_any_arrival_order() {
+    void session_page_rows_carry_the_session_currency_in_every_view_in_any_arrival_order() {
         Instant dayBefore = T0.minus(1, java.time.temporal.ChronoUnit.DAYS);
         List<ProjectionItem> items = List.of(
                 txCurrency("t1", T0, "USD"),
                 new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a1", T0.plusSeconds(10), "P11",
-                        "instants", "b9", null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "AUD", null, null, null),
+                        "instants", "b9", null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "USD", null, null, null),
                 txCurrency("t0", dayBefore, "USD"));
 
         List<String> expected = null;
@@ -200,18 +201,12 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
             for (ProjectionItem item : order) {
                 writer.apply(new ProjectionBatch("s", List.of(item), ++offset));
             }
-            List<String> rows = dsl().fetch("""
-                    select 'web' as v, "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
-                    from "wqWebHighLevel" where "kind" = 0
-                    union all
-                    select 'cc', "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
-                    from "wqCcHighLevel" where "kind" = 0
-                    order by 1""").map(r -> r.intoList().toString());
+            List<String> rows = sessionPageRows();
             String described = order.stream().map(ProjectionItem::sourceId).toList().toString();
-            assertThat(rows).as(described).hasSize(2).allMatch(row -> row.contains("AUD"));
+            assertThat(rows).as(described).hasSize(2).allMatch(row -> row.contains("USD"));
             String sessionCurrency = dsl().fetchOne("select \"currency\" from \"wqSession\"")
                     .get(0, String.class);
-            assertThat(sessionCurrency).as(described).isEqualTo("AUD");
+            assertThat(sessionCurrency).as(described).isEqualTo("USD");
             assertThat(new ProjectionInvariants(dsl()).drift()).as(described).isEmpty();
             if (expected == null) {
                 expected = rows;
@@ -219,6 +214,24 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 assertThat(rows).as(described).isEqualTo(expected);
             }
         }
+
+        WriteResult mismatch = writer.apply(new ProjectionBatch("s", List.of(
+                new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a2", dayBefore.minusSeconds(5), "P11",
+                        "instants", "b9", null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "AUD", null, null, null)),
+                9L));
+        assertThat(mismatch.deadLettered()).isEqualTo(1);
+        assertThat(sessionPageRows()).isEqualTo(expected);
+        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+    }
+
+    private List<String> sessionPageRows() {
+        return dsl().fetch("""
+                select 'web' as v, "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
+                from "wqWebHighLevel" where "kind" = 0
+                union all
+                select 'cc', "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
+                from "wqCcHighLevel" where "kind" = 0
+                order by 1""").map(r -> r.intoList().toString());
     }
 
     private ProjectionItem txCurrency(String id, Instant at, String currency) {

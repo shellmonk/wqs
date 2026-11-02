@@ -92,7 +92,7 @@ class TotalsPropertyTest extends ReadPropertyBase {
                         "{\"gameCode\": \"x\"}"),
                 item("a", "2034-01-05T10:00:00Z"),
                 new ProjectionItem(1L, SourceKind.TRANSACTION, "a-c", Instant.parse("2034-01-06T00:00:00Z"), "P11",
-                        "instants", null, null, TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, "a", null)));
+                        "keno", null, null, TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, "a", null)));
         Level0Filter f = new Level0Filter(1L, false);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-02-01T00:00:00Z");
@@ -119,7 +119,7 @@ class TotalsPropertyTest extends ReadPropertyBase {
     }
 
     private static ProjectionItem item(String id, String at) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "instants", null, null,
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "keno", null, null,
                 TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 }

@@ -333,7 +333,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     static ProjectionItem item(String id, String at) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "instants", null, null,
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "keno", null, null,
                 TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 }

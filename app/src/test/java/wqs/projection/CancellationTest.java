@@ -375,15 +375,16 @@ class CancellationTest extends PostgresTestBase {
         assertThat(sessionStart()).isEqualTo(T0.minus(1, ChronoUnit.DAYS));
         assertNoDrift();
 
-        // Later at a lower product still: product-only change, and the WEB row is revived.
-        apply(txProduct("t9", "b1", "p9", T0.plusSeconds(500), 3));
+        // At the session's start with a lower sourceId than a0 ("a" < "a0"): it is now the first
+        // item (D6), so a product-only change, and the WEB row is revived.
+        apply(txProduct("a", "b1", "p9", T0.minus(1, ChronoUnit.DAYS), 3));
 
         assertThat(sessionVisible(WEB)).isTrue();
         assertThat(highLevelProduct(WEB)).isEqualTo("P03");
         assertNoDrift();
 
         // And cancelling within the re-anchored session uncounts at the session's NEW key.
-        apply(cancelOf("c9", "t9"));
+        apply(cancelOf("c9", "a"));
 
         assertThat(sessionVisible(WEB)).isFalse();
         assertThat(sessionVisible(CC)).isTrue();
@@ -518,7 +519,7 @@ class CancellationTest extends PostgresTestBase {
 
     private ProjectionItem cancelOfUser(long userId, String id, String cancels) {
         return new ProjectionItem(
-                userId, SourceKind.TRANSACTION, id, T0.plusSeconds(120), "P11", "instants", null, null,
+                userId, SourceKind.TRANSACTION, id, T0.plusSeconds(120), "P13", "arcade", null, null,
                 TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, cancels, null);
     }
 

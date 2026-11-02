@@ -31,16 +31,19 @@ public final class EventGenerators {
     private static final Instant SESSION_START_MIN = WINDOW_START.plus(1, ChronoUnit.DAYS);
 
     /*
-     * The product pool, as (productId, productType). Ids and types are strings since V10, and
-     * each is LEAST over a session's items, so both orderings matter: P03 < P07 < P11 < P13 and
-     * "arcade" < "bingo" < "instants" < "lottery". A session's product TYPE -- the counter key --
-     * therefore moves exactly when its product id does.
+     * The product pool, as (productId, productType) -- the {@link Products} pairs. A session's
+     * pair is its FIRST item's (plan D6), so the pool deliberately makes the two orders DISAGREE:
+     * P03 < P07 < P11 < P13 but "arcade" (P13) < "bingo" (P07) < "instants" (P11) < "lottery"
+     * (P03). A per-column LEAST would pair P03 with "arcade" -- a product no item has -- and the
+     * oracles would catch it. P11 is eInstant ("instants", the default wqs.einstant.product-types),
+     * so every P11 item stays sessioned (P-7).
      */
-    private static final String[] P03 = {"P03", "arcade"};
-    private static final String[] P07 = {"P07", "bingo"};
-    private static final String[] P11 = {"P11", "instants"};
-    private static final String[] P13 = {"P13", "lottery"};
+    private static final String[] P03 = {Products.id(3), Products.type(3)};
+    private static final String[] P07 = {Products.id(7), Products.type(7)};
+    private static final String[] P11 = {Products.id(11), Products.type(11)};
+    private static final String[] P13 = {Products.id(13), Products.type(13)};
     private static final String[] NO_PRODUCT = {null, null};
+    private static final String EINSTANT = "instants";
 
     /** Heavily skewed: user 1 appears far more often than user 20. */
     public static Arbitrary<Long> users() {
@@ -70,9 +73,10 @@ public final class EventGenerators {
     }
 
     /**
-     * The currency of the /cc-only adjustment and the claimable prize joining a session: EUR (the
-     * transactions' currency) half the time, otherwise a second currency above or below it, so
-     * sessions mix currencies and their LEAST depends on which items have arrived.
+     * The currency of session 0 (every item of it, the /cc-only adjustments included) and of the
+     * claimable prize's session: EUR half the time, otherwise another one, so sessions in other
+     * currencies are exercised. A session is single-currency (plan D6): mixing currencies within
+     * one would dead-letter whichever item arrived second, which depends on arrival order.
      */
     private static Arbitrary<String> joiningCurrencies() {
         return Arbitraries.frequency(
@@ -95,15 +99,14 @@ public final class EventGenerators {
      * A sequence of items clustered into sessions: each session gets a batchId, a product, and
      * between 1 and 4 plays, each play 1 to 3 transactions.
      *
-     * Products vary so that a session's key (startedAt, LEAST(productType)) depends on arrival
-     * order, which drives every product-changing path under permutation: even sessions use
-     * product P11, odd sessions P13 with a product-less FIRST play (so an early null-product
-     * arrival is later raised to P13 in place, or never seen as a change if it arrives last), and
-     * session 0 is joined by a /cc-only adjustment a day earlier at product P07 (start AND product
-     * move) and one after its last transaction at product P03 (product-only change, same start).
-     * Half the time those adjustments (and the claimable prize) are in USD or AUD rather than the
-     * transactions' EUR, so session 0's LEAST currency -- which its page rows must carry in both
-     * views -- also depends on arrival order.
+     * A session's key is (startedAt, first item's productType) (plan D6), so products vary to make
+     * the key depend on arrival order on every path: session 0 is joined by a /cc-only adjustment
+     * a day earlier at product P07 (re-anchor: start AND product move) and one after its last
+     * transaction at product P03 (must NOT relabel it); odd sessions open with a product-less
+     * play tied, at the same instant, with a lower-sourceId /cc-only adjustment at P03 (the
+     * tie-break relabels the session from no product, or never, depending on order). Every
+     * session also has a zero-amount prize step at its first instant (locator-only, D8). Session
+     * 0 and the prize session are in EUR, USD or AUD; everything else in EUR.
      */
     public static Arbitrary<List<ProjectionItem>> itemSequences() {
         return Combinators.combine(
@@ -172,7 +175,14 @@ public final class EventGenerators {
             }
             int cancels = random.nextInt(8) == 0 ? 2 : 1;
             for (int c = 1; c <= cancels; c++) {
-                ProjectionItem cancel = cancelOf(item, "-cancel" + c, random.nextBoolean());
+                // Usually the reversal (a zero-amount item's cancel is then zero-amount too, and
+                // locator-only); sometimes not: a non-zero cancel of a zero-amount item is
+                // projected and marks nothing, a zero-amount cancel of a live item still cancels it.
+                BigDecimal amount = item.amount().negate();
+                if (random.nextInt(4) == 0) {
+                    amount = item.amount().signum() == 0 ? new BigDecimal("-1.0000") : BigDecimal.ZERO.setScale(4);
+                }
+                ProjectionItem cancel = cancelOf(item, "-cancel" + c, random.nextBoolean(), amount);
                 if (random.nextInt(3) == 0) {
                     // Before its original: anywhere earlier, so often in an earlier batch.
                     int originalAt = result.size() - 1;
@@ -185,12 +195,17 @@ public final class EventGenerators {
         return result;
     }
 
-    private static ProjectionItem cancelOf(ProjectionItem item, String suffix, boolean grouped) {
+    /**
+     * An eInstant item's cancel always keeps the session: an unsessioned eInstant item is
+     * dead-lettered (P-7, plan D7), and these sequences model valid producer data.
+     */
+    private static ProjectionItem cancelOf(ProjectionItem item, String suffix, boolean grouped, BigDecimal amount) {
+        grouped = grouped || EINSTANT.equals(item.productType());
         return new ProjectionItem(
                 item.userId(), item.source(), item.sourceId() + suffix,
                 item.occurredAt().plusSeconds(90), item.productId(), item.productType(),
                 grouped ? item.batchId() : null, grouped ? item.subBatchId() : null,
-                TxTypes.CANCEL, item.amount().negate(), item.currency(), null,
+                TxTypes.CANCEL, amount, item.currency(), null,
                 item.sourceId(), null);
     }
 
@@ -206,6 +221,8 @@ public final class EventGenerators {
         for (int s = 0; s < sessions; s++) {
             String batchId = "u" + userId + "-s" + s;
             String[] sessionProduct = s % 2 == 0 ? P11 : P13;
+            String currency = s == 0 ? joiningCurrency : "EUR";
+            Instant firstAt = start.plusSeconds((sequence + 1) * 7L);
             for (int p = 0; p < plays; p++) {
                 String[] product = s % 2 == 1 && p == 0 ? NO_PRODUCT : sessionProduct;
                 String subBatchId = batchId + "-p" + p;
@@ -221,11 +238,25 @@ public final class EventGenerators {
                             subBatchId,
                             t == 0 ? TxTypes.PLAY : TxTypes.WIN,
                             amount,
-                            "EUR",
+                            currency,
                             null,
                             null,
                             detail));
                 }
+            }
+            // A losing prize step: zero-amount, so locator-only (spec 4.1, D8). It sits AT the
+            // session's first instant with the session's play, yet must never label or count.
+            items.add(new ProjectionItem(
+                    userId, SourceKind.TRANSACTION, batchId + "-z", firstAt, P07[0], P07[1],
+                    batchId, batchId + "-p0", TxTypes.WIN, BigDecimal.ZERO.setScale(4), currency,
+                    null, null, null));
+            if (s % 2 == 1) {
+                // A tie with the session's first transaction (product-less): same instant, lower
+                // sourceId ("-a" < "-t"), so this /cc-only item is the session's first item and
+                // its pair labels the session, whichever arrives first.
+                items.add(new ProjectionItem(
+                        userId, SourceKind.MANUAL_ADJUSTMENT, batchId + "-a", firstAt, P03[0], P03[1],
+                        batchId, null, TxTypes.NEUTRAL, amount, currency, null, null, null));
             }
         }
 

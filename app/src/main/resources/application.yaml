@@ -52,6 +52,10 @@ wqs:
     # deny (the default): every /cc request is 403. open: /cc serves any userId to any caller
     # (a WARN is logged at startup). Any other value fails startup.
     access: deny
+  einstant:
+    # Product types that are eInstant (spec 4.1, D3), matched exactly. An eInstant item without a
+    # batchId is dead-lettered at ingest (einstant-unsessioned, D7). A blank entry fails startup.
+    product-types: instants
   stream:
     # Off by default so broker-less contexts (tests, tooling) start. Deployments enable it with
     # WQS_STREAM_ENABLED=true (Spring relaxed binding).
