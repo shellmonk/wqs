@@ -14,6 +14,7 @@ public class FakeStreamSource implements StreamSource {
     private Long subscribedFrom;
     private int closeCount;
     private int subscribeCount;
+    private Runnable onClose = () -> {};
 
     public void queue(StreamPayload payload, long offset) {
         queued.add(new Object[] {payload, offset});
@@ -47,6 +48,22 @@ public class FakeStreamSource implements StreamSource {
         handlers.get(handlerIndex).onMessage(payload, offset);
     }
 
+    /** Delivers a raw body that could not be deserialised through the n-th handler ever subscribed. */
+    public void deliverUndeserializableVia(int handlerIndex, byte[] body, long offset) {
+        handlers.get(handlerIndex)
+                .onUndeserializable(body, offset, new IllegalArgumentException("undeserializable stream message"));
+    }
+
+    /** Delivers a raw undeserialisable body through the current (latest) handler. */
+    public void deliverUndeserializable(byte[] body, long offset) {
+        deliverUndeserializableVia(handlers.size() - 1, body, offset);
+    }
+
+    /** Runs inside every close(), before it can throw; lets tests observe the caller's lock state. */
+    public void onClose(Runnable action) {
+        this.onClose = action;
+    }
+
     public void failOnClose(boolean fail) {
         this.failOnClose = fail;
     }
@@ -74,6 +91,7 @@ public class FakeStreamSource implements StreamSource {
     @Override
     public void close() {
         closeCount++;
+        onClose.run();
         if (failOnClose) {
             throw new IllegalStateException("close failed");
         }

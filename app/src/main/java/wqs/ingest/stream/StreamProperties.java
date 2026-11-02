@@ -8,6 +8,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param batchMaxWait   flush threshold in elapsed time; ~200ms gives sub-second freshness
  * @param maxAttempts    attempts before an event is dead-lettered (spec 6.4)
  * @param recoveryBackoff wait before re-subscribing from the stored offset after an unrecoverable failure
+ * @param uri            RabbitMQ stream endpoint, e.g. {@code rabbitmq-stream://user:pass@host:5552}
  */
 @ConfigurationProperties(prefix = "wqs.stream")
 public record StreamProperties(
@@ -16,7 +17,8 @@ public record StreamProperties(
         int batchMaxSize,
         Duration batchMaxWait,
         int maxAttempts,
-        Duration recoveryBackoff) {
+        Duration recoveryBackoff,
+        String uri) {
 
     public StreamProperties {
         if (name == null || name.isBlank()) {
@@ -33,6 +35,9 @@ public record StreamProperties(
         }
         if (recoveryBackoff == null) {
             recoveryBackoff = Duration.ofSeconds(5);
+        }
+        if (uri == null || uri.isBlank()) {
+            uri = "rabbitmq-stream://localhost:5552";
         }
     }
 }

@@ -58,6 +58,8 @@ public class StreamConsumer {
     private Instant recoverAt;
     /** Bumped on every (re)subscribe and on failure/stop; handlers of older generations are ignored. */
     private int generation;
+    /** Set by stop(), cleared by start(): poll() and recovery are no-ops, so nothing re-subscribes after stop. */
+    private boolean stopped;
 
     public StreamConsumer(
             StreamSource source,
@@ -95,20 +97,44 @@ public class StreamConsumer {
                 .register(registry);
     }
 
-    public synchronized void start() {
-        // Start from a clean slate: no leftover subscription, buffer or recovering state.
+    /**
+     * Every {@code source.close()} in this class runs OUTSIDE the monitor: a client close may wait
+     * for an in-flight handler that is itself blocked on the monitor. The generation bump (done
+     * under the lock, before the close) keeps any late delivery from the closing subscription inert.
+     */
+    public void start() {
+        synchronized (this) {
+            // Start from a clean slate: no leftover subscription, buffer or recovering state.
+            generation++;
+            accumulator.clear();
+            recovering = false;
+            stopped = false;
+        }
         closeQuietly();
-        accumulator.clear();
-        recovering = false;
-        subscribe();
+        synchronized (this) {
+            if (!stopped) {
+                subscribe();
+            }
+        }
     }
 
+    /** Caller holds the monitor. */
     private void subscribe() {
         // Resume from the NEXT offset. Subscribing at the committed offset replays the last event.
         long from = offsetStore.read(properties.name()).map(o -> o + 1).orElse(0L);
         log.info("Subscribing to stream {} from offset {}", properties.name(), from);
         int gen = ++generation;
-        source.subscribe(from, (payload, offset) -> onMessage(gen, payload, offset));
+        source.subscribe(from, new StreamSource.StreamHandler() {
+            @Override
+            public void onMessage(StreamPayload payload, long offset) {
+                StreamConsumer.this.onMessage(gen, payload, offset);
+            }
+
+            @Override
+            public void onUndeserializable(byte[] body, long offset, Exception error) {
+                StreamConsumer.this.onUndeserializable(gen, body, offset, error);
+            }
+        });
     }
 
     private void closeQuietly() {
@@ -121,7 +147,7 @@ public class StreamConsumer {
     }
 
     private synchronized void onMessage(int gen, StreamPayload payload, long offset) {
-        if (gen != generation || recovering) {
+        if (gen != generation || recovering || stopped) {
             return; // Stale subscription, or recovering: redelivered from the stored offset later.
         }
         try {
@@ -155,6 +181,32 @@ public class StreamConsumer {
         log.error("Cannot map event {} at offset {}; dead-lettering it",
                 payload.transactionId(), offset, cause);
         deadLetterStore.record(properties.name(), offset, payload, cause, 1);
+        afterDeadLetter(offset);
+    }
+
+    /**
+     * A body that could not even be parsed (see {@link RabbitStreamSource}) is poison too. It goes
+     * through the same machinery as an unmappable event: same generation fence, same recovery on
+     * failure, same offset rule. In particular this does NOT advance the stored offset when an
+     * earlier event is still buffered -- the next batch's higher offset covers the poison row; if
+     * the process dies first, the body is redelivered and recorded again, which is harmless.
+     */
+    private synchronized void onUndeserializable(int gen, byte[] body, long offset, Exception error) {
+        if (gen != generation || recovering || stopped) {
+            return;
+        }
+        try {
+            log.error("Cannot deserialise the message at offset {}; dead-lettering the raw body", offset, error);
+            deadLetterStore.record(properties.name(), offset, body, error, 1);
+            afterDeadLetter(offset);
+        } catch (Throwable e) {
+            enterRecovery(e);
+            rethrowIfError(e);
+        }
+    }
+
+    /** Dead letter is durable. Persist the offset only if nothing earlier is still buffered. */
+    private void afterDeadLetter(long offset) {
         deadLetteredCounter.increment();
         if (accumulator.pending() == 0) {
             offsetStore.write(properties.name(), offset);
@@ -162,34 +214,52 @@ public class StreamConsumer {
     }
 
     /** Flushes a partially filled batch whose wait window has elapsed. Called on a short timer. */
-    public synchronized void poll() {
-        if (recovering) {
-            if (!clock.instant().isBefore(recoverAt)) {
-                // Closed here on the timer thread, never from the client's dispatch thread.
-                closeQuietly();
-                recover();
+    public void poll() {
+        synchronized (this) {
+            if (stopped) {
+                return;
             }
-            return;
+            if (!recovering) {
+                try {
+                    accumulator.drainIfReady().ifPresent(this::applyBatch);
+                } catch (Throwable e) {
+                    enterRecovery(e);
+                    rethrowIfError(e);
+                }
+                return;
+            }
+            if (clock.instant().isBefore(recoverAt)) {
+                return;
+            }
         }
-        try {
-            accumulator.drainIfReady().ifPresent(this::applyBatch);
-        } catch (Throwable e) {
-            enterRecovery(e);
-            rethrowIfError(e);
+        // Backoff elapsed. Close on the timer thread, never on the client's dispatch thread and
+        // never under the monitor. Handlers of the failed generation are already fenced.
+        closeQuietly();
+        synchronized (this) {
+            if (stopped || !recovering) {
+                return; // stop() or start() intervened while we were closing
+            }
+            recover();
         }
     }
 
-    public synchronized void stop() {
+    public void stop() {
         try {
-            if (!recovering) {
-                accumulator.drainNow().ifPresent(this::applyBatch);
+            synchronized (this) {
+                stopped = true;
+                try {
+                    if (!recovering) {
+                        accumulator.drainNow().ifPresent(this::applyBatch);
+                    }
+                } catch (RuntimeException e) {
+                    // Not advanced, so the batch is redelivered on the next start.
+                    log.error("Final flush failed on stop; unflushed events will be redelivered", e);
+                } finally {
+                    generation++;
+                }
             }
-        } catch (RuntimeException e) {
-            // Not advanced, so the batch is redelivered on the next start.
-            log.error("Final flush failed on stop; unflushed events will be redelivered", e);
         } finally {
-            generation++;
-            closeQuietly();
+            closeQuietly(); // outside the monitor
         }
     }
 

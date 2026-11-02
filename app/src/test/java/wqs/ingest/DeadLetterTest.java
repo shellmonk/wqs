@@ -294,6 +294,121 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(offsetStore.read(STREAM)).isEmpty();
     }
 
+    @Test
+    void an_undeserializable_body_is_dead_lettered_raw_and_the_idle_offset_advances() {
+        StreamConsumer consumer = consumer(10, writer, deadLetterStore, fixedClock());
+        consumer.start();
+        byte[] body = "{not json".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        source.deliverUndeserializable(body, 8);
+
+        assertThat(count()).isEqualTo(1);
+        var row = dsl().fetchOne(
+                "select \"streamOffset\", \"stream\", \"attempts\", \"error\", "
+                        + "\"payload\"->>'rawBase64' as raw from \"wqDeadLetter\"");
+        assertThat(row.get("streamOffset", Long.class)).isEqualTo(8L);
+        assertThat(row.get("stream", String.class)).isEqualTo(STREAM);
+        assertThat(row.get("attempts", Integer.class)).isEqualTo(1);
+        assertThat(row.get("error", String.class)).contains("undeserializable");
+        assertThat(java.util.Base64.getDecoder().decode(row.get("raw", String.class))).isEqualTo(body);
+        assertThat(registry.find("wqs.ingest.events").tag("outcome", "deadlettered").counter().count())
+                .isEqualTo(1.0);
+        // Nothing earlier is buffered, so the recorded poison is fully accounted for.
+        assertThat(offsetStore.read(STREAM)).contains(8L);
+    }
+
+    @Test
+    void an_undeserializable_body_does_not_advance_the_offset_past_buffered_events() {
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumer(10, writer, deadLetterStore, clock);
+        consumer.start();
+
+        source.queue(payload("tx-1", WHEN), 1);
+        source.deliverAll();                              // buffered, not applied
+        source.deliverUndeserializable(new byte[] {1, 2, 3}, 2);
+
+        assertThat(count()).isEqualTo(1);
+        assertThat(offsetStore.read(STREAM)).isEmpty();   // would skip unprojected offset 1
+
+        source.queue(payload("tx-3", WHEN), 3);
+        source.deliverAll();
+        clock.advance(Duration.ofSeconds(1));
+        consumer.poll();                                  // window elapsed: batch covers 1..3
+
+        assertThat(count("wqWebItem")).isEqualTo(2);
+        assertThat(offsetStore.read(STREAM)).contains(3L);
+    }
+
+    @Test
+    void an_undeserializable_body_from_a_stale_subscription_is_ignored() {
+        StreamConsumer consumer = consumer(10, writer, deadLetterStore, fixedClock());
+        consumer.start();
+        consumer.stop();
+        consumer.start();
+
+        source.deliverUndeserializableVia(0, new byte[] {9}, 77);
+
+        assertThat(count()).isZero();
+        assertThat(offsetStore.read(STREAM)).isEmpty();
+    }
+
+    @Test
+    void a_failed_raw_dead_letter_write_moves_no_offset_and_enters_recovery() {
+        DeadLetterStore dbDown = new DeadLetterStore(null, null) {
+            @Override
+            public void record(String s, Long o, byte[] b, Exception e, int a) {
+                throw new IllegalStateException("database down");
+            }
+        };
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumer(10, writer, dbDown, clock);
+        consumer.start();
+
+        source.deliverUndeserializable(new byte[] {1}, 4); // must not throw
+
+        assertThat(offsetStore.read(STREAM)).isEmpty();
+        clock.advance(Duration.ofSeconds(10));
+        consumer.poll();
+        assertThat(source.subscribeCount()).isEqualTo(2);
+        assertThat(source.subscribedFrom()).isZero();      // redelivered from the stored offset
+    }
+
+    @Test
+    void the_source_is_never_closed_while_the_consumer_monitor_is_held() {
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer[] holder = new StreamConsumer[1];
+        java.util.List<Boolean> heldDuringClose = new java.util.ArrayList<>();
+        source.onClose(() -> heldDuringClose.add(Thread.holdsLock(holder[0])));
+        holder[0] = consumer(1, new FlakyWriter(writer, 1, 4), alwaysFailingStore(), clock);
+
+        holder[0].start();                                  // closes any leftover subscription
+        source.queue(payload("tx-1", WHEN), 1);
+        source.deliverAll();                                // -> recovery
+        clock.advance(Duration.ofSeconds(10));
+        holder[0].poll();                                   // closes, then re-subscribes
+        holder[0].stop();                                   // drains, then closes
+
+        assertThat(heldDuringClose).hasSize(3).containsOnly(false);
+    }
+
+    @Test
+    void stop_makes_poll_and_recovery_no_ops_so_nothing_re_subscribes_after_stop() {
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumer(1, new FlakyWriter(writer, 1, 4), alwaysFailingStore(), clock);
+        consumer.start();
+        source.queue(payload("tx-1", WHEN), 1);
+        source.deliverAll();                                // recovering
+        consumer.stop();
+
+        clock.advance(Duration.ofSeconds(60));
+        consumer.poll();
+
+        assertThat(source.subscribeCount()).isEqualTo(1);
+        // A late delivery through the pre-stop handler is inert as well.
+        source.deliverVia(0, payload("tx-2", WHEN), 2);
+        assertThat(count("wqWebItem")).isZero();
+    }
+
     private static DeadLetterStore alwaysFailingStore() {
         return new DeadLetterStore(null, null) {
             @Override
@@ -306,7 +421,7 @@ class DeadLetterTest extends PostgresTestBase {
     private StreamConsumer consumer(int batchSize, ProjectionWriter w, DeadLetterStore store, Clock clock) {
         return new StreamConsumer(
                 source,
-                new StreamProperties(true, STREAM, batchSize, Duration.ofMillis(1), 2, Duration.ofSeconds(5)),
+                new StreamProperties(true, STREAM, batchSize, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
                 payloadMapper, w, offsetStore, registry, clock, store);
     }
 

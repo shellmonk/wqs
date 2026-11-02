@@ -53,14 +53,22 @@ class RabbitStreamSourceSmokeTest {
 
                 environment.streamCreator().stream("smoke").create();
 
-                StreamProperties properties = new StreamProperties(true, "smoke", 10, null, 3, null);
+                StreamProperties properties = new StreamProperties(true, "smoke", 10, null, 3, null, null);
                 RabbitStreamSource source =
                         new RabbitStreamSource(environment, properties, new ObjectMapper());
                 List<StreamPayload> payloads = new CopyOnWriteArrayList<>();
                 List<Long> offsets = new CopyOnWriteArrayList<>();
-                source.subscribe(0, (payload, offset) -> {
-                    payloads.add(payload);
-                    offsets.add(offset);
+                source.subscribe(0, new StreamSource.StreamHandler() {
+                    @Override
+                    public void onMessage(StreamPayload payload, long offset) {
+                        payloads.add(payload);
+                        offsets.add(offset);
+                    }
+
+                    @Override
+                    public void onUndeserializable(byte[] body, long offset, Exception error) {
+                        throw new AssertionError("unexpected poison", error);
+                    }
                 });
 
                 String json = "{\"transactionId\":\"tx-smoke\",\"userId\":7,"

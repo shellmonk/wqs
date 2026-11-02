@@ -118,7 +118,7 @@ class StreamConsumerTest extends PostgresTestBase {
 
     private StreamConsumer consumer(int batchSize, Duration maxWait) {
         StreamProperties properties =
-                new StreamProperties(true, "wallet-transactions", batchSize, maxWait, 3, null);
+                new StreamProperties(true, "wallet-transactions", batchSize, maxWait, 3, null, null);
         return new StreamConsumer(
                 source, properties, payloadMapper, writer, offsetStore, registry,
                 Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);

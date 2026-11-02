@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.OffsetSpecification;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -17,8 +19,7 @@ import java.util.Set;
  * persisted by the projection transaction instead (spec 6.2), so this only chooses where to
  * start reading.
  *
- * <p>Deliberately not a Spring component: it needs a {@link Environment}, and production wiring
- * of that bean and the consumer lifecycle is a separate concern.
+ * <p>Not a Spring component itself: {@link StreamConfig} builds it (only when the stream is enabled).
  *
  * <p>O-13 assumption: wire field names equal the {@link StreamPayload} record-component names.
  * Every other field is preserved in {@code extra} (as text) so it reaches the "detail" jsonb.
@@ -51,8 +52,18 @@ public class RabbitStreamSource implements StreamSource {
                 .stream(properties.name())
                 .offset(OffsetSpecification.offset(fromOffset))
                 .messageHandler((context, message) -> {
-                    StreamPayload payload = parse(objectMapper, message.getBodyAsBinary());
-                    handler.onMessage(payload, context.offset());
+                    byte[] body = message.getBodyAsBinary();
+                    long offset = context.offset();
+                    StreamPayload payload;
+                    try {
+                        payload = parse(objectMapper, body);
+                    } catch (Exception e) {
+                        // Throwing here would make the client skip the message: silent loss.
+                        // Only parse failures are poison; handler failures must not be caught here.
+                        handler.onUndeserializable(body, offset, e);
+                        return;
+                    }
+                    handler.onMessage(payload, offset);
                 })
                 .build();
     }
@@ -65,6 +76,11 @@ public class RabbitStreamSource implements StreamSource {
             old.close();
         }
     }
+
+    /** Cap on raw numeric text before it is handed to a parser (numeric(20,4) needs < 30 chars). */
+    private static final int MAX_NUMERIC_TEXT = 64;
+    private static final int MONEY_SCALE = 4;
+    private static final int MONEY_INTEGER_DIGITS = 16; // numeric(20,4)
 
     static StreamPayload parse(ObjectMapper objectMapper, byte[] body) {
         JsonNode root;
@@ -91,15 +107,16 @@ public class RabbitStreamSource implements StreamSource {
 
         return new StreamPayload(
                 required(root, "transactionId").asText(),
-                required(root, "userId").asLong(),
-                Instant.parse(required(root, "occurredAt").asText()),
-                optional(root, "productId") == null ? null : root.get("productId").asInt(),
+                (long) integral(required(root, "userId"), "userId", Long.MIN_VALUE, Long.MAX_VALUE),
+                instant(required(root, "occurredAt")),
+                optional(root, "productId") == null ? null
+                        : (int) integral(root.get("productId"), "productId", Integer.MIN_VALUE, Integer.MAX_VALUE),
                 text(root, "batchId"),
                 text(root, "subBatchId"),
-                (short) required(root, "type").asInt(),
-                decimal(required(root, "amount")),
+                (short) integral(required(root, "type"), "type", Short.MIN_VALUE, Short.MAX_VALUE),
+                money(required(root, "amount"), "amount"),
                 required(root, "currency").asText(),
-                optional(root, "balanceAfter") == null ? null : decimal(root.get("balanceAfter")),
+                optional(root, "balanceAfter") == null ? null : money(root.get("balanceAfter"), "balanceAfter"),
                 text(root, "cancelsTransactionId"),
                 extra);
     }
@@ -122,8 +139,69 @@ public class RabbitStreamSource implements StreamSource {
         return node == null ? null : node.asText();
     }
 
-    /** Exact decimal: numbers via their decimal value, strings via their text. Never double. */
-    private static BigDecimal decimal(JsonNode node) {
-        return node.isNumber() ? node.decimalValue() : new BigDecimal(node.asText());
+    private static Instant instant(JsonNode node) {
+        if (!node.isTextual()) {
+            throw new IllegalArgumentException("occurredAt must be an ISO-8601 instant string");
+        }
+        try {
+            return Instant.parse(node.asText());
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("occurredAt is not a valid ISO-8601 instant", e);
+        }
+    }
+
+    /**
+     * An integral JSON number, or integral numeric text, within [min, max]. Never
+     * {@code asInt()}/{@code asLong()}, which silently turn garbage into 0 or truncate.
+     */
+    private static long integral(JsonNode node, String field, long min, long max) {
+        BigInteger value;
+        if (node.isIntegralNumber()) {
+            value = node.bigIntegerValue();
+        } else if (node.isTextual() && node.asText().length() <= MAX_NUMERIC_TEXT) {
+            try {
+                value = new BigInteger(node.asText());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(field + " is not an integer", e);
+            }
+        } else {
+            throw new IllegalArgumentException(field + " must be an integral number");
+        }
+        if (value.compareTo(BigInteger.valueOf(min)) < 0 || value.compareTo(BigInteger.valueOf(max)) > 0) {
+            throw new IllegalArgumentException(field + " is out of range");
+        }
+        return value.longValueExact();
+    }
+
+    /**
+     * Exact decimal that must fit numeric(20,4): numbers via their decimal value, strings via
+     * their text (length-capped first). Never double. Bounds are checked on the value stripped of
+     * trailing zeros, using scale and precision only, so an exponent bomb such as 1e999999999 is
+     * rejected without ever being expanded.
+     */
+    private static BigDecimal money(JsonNode node, String field) {
+        BigDecimal value;
+        if (node.isNumber()) {
+            value = node.decimalValue();
+        } else if (node.isTextual()) {
+            String text = node.asText();
+            if (text.length() > MAX_NUMERIC_TEXT) {
+                throw new IllegalArgumentException(field + " numeric text is too long");
+            }
+            try {
+                value = new BigDecimal(text);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(field + " is not a decimal number", e);
+            }
+        } else {
+            throw new IllegalArgumentException(field + " must be a number");
+        }
+        BigDecimal stripped = value.signum() == 0 ? BigDecimal.ZERO : value.stripTrailingZeros();
+        long integerDigits = (long) stripped.precision() - stripped.scale();
+        if (stripped.scale() > MONEY_SCALE || integerDigits > MONEY_INTEGER_DIGITS) {
+            throw new IllegalArgumentException(field + " does not fit numeric(20,4)");
+        }
+        // 0e999999999 is a legal zero with an absurd scale; never pass that on.
+        return value.signum() == 0 ? BigDecimal.ZERO.setScale(MONEY_SCALE) : value;
     }
 }

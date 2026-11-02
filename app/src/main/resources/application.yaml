@@ -26,6 +26,12 @@ spring:
   # produces duplicate or missed fires (spec section 6.5).
 
 wqs:
+  stream:
+    # Off by default so broker-less contexts (tests, tooling) start. Deployments enable it with
+    # WQS_STREAM_ENABLED=true (Spring relaxed binding).
+    enabled: false
+    name: wallet-transactions
+    uri: rabbitmq-stream://localhost:5552
   jobs:
     partition-rollover:
       enabled: true

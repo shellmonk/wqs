@@ -3,6 +3,8 @@ package wqs.ingest;
 import static wqs.db.generated.Tables.WQ_DEAD_LETTER;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Base64;
+import java.util.Map;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.springframework.stereotype.Component;
@@ -43,6 +45,17 @@ public class DeadLetterStore {
     public void record(String stream, Long offset, StreamPayload payload, Exception error, int attempts) {
         insert(stream, offset, (short) SourceKind.TRANSACTION.code(),
                 payload.transactionId(), payload, error, attempts);
+    }
+
+    /**
+     * Records a message whose body could not be deserialised at all. The payload is
+     * {@code {"rawBase64": "..."}}: the exact bytes, so the row is replayable once the cause is fixed.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void record(String stream, Long offset, byte[] rawBody, Exception error, int attempts) {
+        byte[] body = rawBody == null ? new byte[0] : rawBody;
+        insert(stream, offset, (short) SourceKind.TRANSACTION.code(), null,
+                Map.of("rawBase64", Base64.getEncoder().encodeToString(body)), error, attempts);
     }
 
     private void insert(
