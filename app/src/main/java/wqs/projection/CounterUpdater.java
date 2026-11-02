@@ -12,7 +12,6 @@ import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Table;
 import org.jooq.TableField;
-import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,6 +33,13 @@ import wqs.domain.ViewKind;
  * {@link #countHighLevel} for each view in {@code inserted()} at the current key, and
  * {@link #moveHighLevel} for each view in {@code moved()} from
  * (movedFrom, movedFromProductId) to the current key, with that row's visibility.
+ *
+ * Decrements are strict: every key a decrement targets was counted first (the gate and the
+ * per-view page-index mirror guarantee it), so a decrement that does not affect exactly one row
+ * is a bug and throws {@link IllegalStateException} naming the full key. The table CHECK
+ * constraints (non-negative, excl <= all) reject a decrement that would go below zero. Either
+ * failure aborts the projection transaction, which the consumer turns into per-item fallback
+ * and dead-letter: loud and replayable instead of silent counter drift (spec P-2).
  *
  * All mutators require a surrounding transaction (callers supply it).
  */
@@ -173,22 +179,32 @@ public class CounterUpdater {
 
     private <R extends Record> void decrement(
             Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
-        var update = dsl.update(t.table())
-                .set(t.cntAll(), DSL.greatest(t.cntAll().minus(1L), DSL.inline(0L)));
+        var update = dsl.update(t.table()).set(t.cntAll(), t.cntAll().minus(1L));
         var step = excl
-                ? update.set(t.cntExclCancelled(),
-                        DSL.greatest(t.cntExclCancelled().minus(1L), DSL.inline(0L)))
+                ? update.set(t.cntExclCancelled(), t.cntExclCancelled().minus(1L))
                 : update;
-        step.where(rowIs(t, userId, view, unit, key)).execute();
+        int rows = step.where(rowIs(t, userId, view, unit, key)).execute();
+        requireOneRow(rows, t, userId, view, unit, key);
     }
 
     private <R extends Record> void decrementExcl(
             Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
-        dsl.update(t.table())
-                .set(t.cntExclCancelled(),
-                        DSL.greatest(t.cntExclCancelled().minus(1L), DSL.inline(0L)))
+        int rows = dsl.update(t.table())
+                .set(t.cntExclCancelled(), t.cntExclCancelled().minus(1L))
                 .where(rowIs(t, userId, view, unit, key))
                 .execute();
+        requireOneRow(rows, t, userId, view, unit, key);
+    }
+
+    private static <R extends Record> void requireOneRow(
+            int rows, Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
+        if (rows != 1) {
+            throw new IllegalStateException(
+                    "counter decrement hit " + rows + " rows, expected 1: table="
+                            + t.table().getName() + " userId=" + userId + " view=" + view
+                            + " unit=" + unit + " productId=" + key.productId()
+                            + " period=" + key.period());
+        }
     }
 
     private static <R extends Record> org.jooq.Condition rowIs(

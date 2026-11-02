@@ -176,6 +176,11 @@ class CounterUpdaterTest extends PostgresTestBase {
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isEqualTo(1);
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isEqualTo(1);
+        assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isEqualTo(1);
+        assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isEqualTo(1);
+        assertThat(dayExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isEqualTo(1);
+        assertThat(dayExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isEqualTo(1);
+        assertThat(monthExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isEqualTo(1);
     }
 
     @Test
@@ -187,7 +192,43 @@ class CounterUpdaterTest extends PostgresTestBase {
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isZero();
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, NEXT_DAY)).isEqualTo(1);
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isZero();
+        assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isZero();
+        assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isEqualTo(1);
         assertThat(rows("wqCountDay")).isEqualTo(3); // 11@T0 (0), 0@T0 (0), 0@NEXT_DAY (1)
+    }
+
+    @Test
+    void decrementing_a_missing_row_throws() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                run(u -> u.moveHighLevel(1L, ViewKind.WEB, 11, T0, 11, NEXT_DAY, true)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wqCountDay")
+                .hasMessageContaining("productId=11");
+    }
+
+    @Test
+    void uncounting_twice_throws_instead_of_clamping() {
+        run(u -> u.countItem(tx("t1", 11)));
+        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, 11, T0));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, 11, T0)))
+                .isInstanceOf(RuntimeException.class);
+        assertThat(dayCount(ViewKind.WEB, PageUnit.ITEM, 11, T0)).isEqualTo(1);
+    }
+
+    @Test
+    void the_check_constraint_rejects_negative_and_excl_above_all() {
+        run(u -> u.countItem(tx("t1", 11)));
+
+        for (String table : new String[] {"wqCountDay", "wqCountMonth"}) {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> dsl().execute(
+                    "update \"" + table + "\" set \"cntAll\" = -1, \"cntExclCancelled\" = -1"))
+                    .hasMessageContaining("check");
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> dsl().execute(
+                    "update \"" + table + "\" set \"cntExclCancelled\" = \"cntAll\" + 1"))
+                    .hasMessageContaining("check");
+        }
     }
 
     private ProjectionItem tx(String id, Integer productId) {

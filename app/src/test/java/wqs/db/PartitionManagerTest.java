@@ -30,7 +30,8 @@ class PartitionManagerTest extends PostgresTestBase {
                           "wqSession_2031_01", "wqSession_2031_02", "wqSession_2031_03",
                           "wqPlay_2031_01", "wqPlay_2031_02", "wqPlay_2031_03",
                           "wqWebHighLevel_2031_01", "wqWebHighLevel_2031_02", "wqWebHighLevel_2031_03",
-                          "wqCcHighLevel_2031_01", "wqCcHighLevel_2031_02", "wqCcHighLevel_2031_03");
+                          "wqCcHighLevel_2031_01", "wqCcHighLevel_2031_02", "wqCcHighLevel_2031_03",
+                          "wqCountDay_2031_01", "wqCountDay_2031_02", "wqCountDay_2031_03");
     }
 
     @Test

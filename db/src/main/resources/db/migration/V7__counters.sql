@@ -11,6 +11,7 @@ create table "wqCountMonth" (
     "period"            date     not null,  -- first day of the month, UTC
     "cntAll"            bigint   not null default 0,
     "cntExclCancelled"  bigint   not null default 0,
+    check ("cntAll" >= 0 and "cntExclCancelled" >= 0 and "cntExclCancelled" <= "cntAll"),
     primary key ("userId", "viewKind", "pageUnit", "productId", "period")
 );
 
@@ -23,5 +24,6 @@ create table "wqCountDay" (
     "period"            date     not null,
     "cntAll"            bigint   not null default 0,
     "cntExclCancelled"  bigint   not null default 0,
+    check ("cntAll" >= 0 and "cntExclCancelled" >= 0 and "cntExclCancelled" <= "cntAll"),
     primary key ("userId", "viewKind", "pageUnit", "productId", "period")
 ) partition by range ("period");
