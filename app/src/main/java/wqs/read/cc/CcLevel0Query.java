@@ -12,7 +12,9 @@ import java.util.List;
 import java.util.Map;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.springframework.stereotype.Component;
 import wqs.domain.ViewKind;
 import wqs.read.ItemEntry;
@@ -63,16 +65,19 @@ public class CcLevel0Query implements Level0Query {
         }
         Instant min = keys.stream().map(ItemKey::occurredAt).min(Comparator.naturalOrder()).orElseThrow();
         Instant max = keys.stream().map(ItemKey::occurredAt).max(Comparator.naturalOrder()).orElseThrow();
-        // One array bind (itemId = any(?)) instead of 2 binds per key: page size is unbounded.
-        // itemId comes from a global sequence, so within the user and the occurredAt window it
-        // identifies exactly one row.
+        // One array bind instead of 2 binds per key: page size is unbounded. Joined through
+        // unnest(?), which Postgres evaluates once; "itemId" = any(?) re-evaluates the text-bound
+        // array per row (array_in is not constant-folded), O(rows x keys). itemId comes from a
+        // global sequence, so within the user and the occurredAt window it identifies one row.
         Long[] ids = keys.stream().map(ItemKey::itemId).toArray(Long[]::new);
+        Table<?> wanted = DSL.unnest(DSL.val(ids, SQLDataType.BIGINT.getArrayDataType())).as("wanted", "id");
         Map<ItemKey, ItemEntry> byKey = new HashMap<>();
-        tx.selectFrom(WQ_CC_ITEM)
+        tx.select(WQ_CC_ITEM.fields())
+                .from(WQ_CC_ITEM)
+                .join(wanted).on(WQ_CC_ITEM.itemId.eq(wanted.field("id", Long.class)))
                 .where(WQ_CC_ITEM.userId.eq(userId))
                 .and(WQ_CC_ITEM.occurredAt.between(utc(min), utc(max)))
-                .and(WQ_CC_ITEM.itemId.eq(DSL.any(ids)))
-                .fetch()
+                .fetchInto(WQ_CC_ITEM)
                 .forEach(r -> byKey.put(
                         new ItemKey(r.getOccurredAt().toInstant(), r.getItemId()), mapper.toEntry(r)));
         List<ItemEntry> out = new ArrayList<>(keys.size());

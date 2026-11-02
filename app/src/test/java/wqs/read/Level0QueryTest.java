@@ -106,6 +106,36 @@ class Level0QueryTest extends Level0TestSupport {
         }
     }
 
+    /**
+     * F1 (final review): the key array is one bind joined through unnest, which Postgres
+     * evaluates once. "itemId" = any(?) re-evaluated the text-bound array per row (40k keys:
+     * 44 s). Timing-free: asserts the executed statement's text and its plan.
+     */
+    @Test
+    void fetch_joins_the_key_array_through_unnest_not_a_per_row_any() {
+        project(
+                item(TRANSACTION, "a", "2034-02-01T01:00:00Z", 11, null, null),
+                item(PAYMENT, "b", "2034-02-02T01:00:00Z", 11, null, null));
+        Level0Filter f = new Level0Filter(USER, null, false);
+        Instant lo = t("2034-02-01T00:00:00Z");
+        Instant hi = t("2034-03-01T00:00:00Z");
+        for (Level0Query q : List.of(web, cc)) {
+            List<org.jooq.Query> executed = new java.util.ArrayList<>();
+            org.jooq.DSLContext recording = org.jooq.impl.DSL.using(readerDsl.configuration().derive(
+                    org.jooq.ExecuteListener.onExecuteStart(ctx -> executed.add(ctx.query()))));
+            List<ItemKey> keys = q.keys(readerDsl, f, lo, hi, 0, 10);
+            assertThat(q.fetch(recording, USER, keys)).hasSameSizeAs(keys).isNotEmpty();
+
+            assertThat(executed).as(q.view() + " fetch statements").hasSize(1);
+            String sql = executed.get(0).getSQL();
+            assertThat(sql).as(q.view() + " sql").contains("unnest(cast(? as bigint[]))")
+                    .doesNotContainIgnoringCase("any (").doesNotContain("::cstring");
+            String plan = String.join("\n", readerDsl.fetch(org.jooq.impl.DSL.resultQuery("explain {0}", executed.get(0)))
+                    .getValues(0, String.class));
+            assertThat(plan).as(q.view() + " plan").contains("Function Scan on unnest").doesNotContain("ANY (");
+        }
+    }
+
     @Test
     void fetch_returns_payload_in_key_order_with_raw_detail() throws Exception {
         project(
