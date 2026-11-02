@@ -32,10 +32,21 @@ public final class EventGenerators {
                 net.jqwik.api.Tuple.of(1, 5L));
     }
 
-    public static Arbitrary<SourceKind> sources() {
-        return Arbitraries.of(
-                SourceKind.TRANSACTION, SourceKind.TRANSACTION, SourceKind.TRANSACTION,
-                SourceKind.CLAIMABLE_PRIZE, SourceKind.PAYMENT, SourceKind.MANUAL_ADJUSTMENT);
+    /**
+     * Non-session sources that get a sourceId deliberately COLLIDING with a TRANSACTION's sourceId
+     * (same user). The locator key is (source, sourceId), so these must all be applied; a gate
+     * keyed on sourceId alone would silently drop them. LIMIT is excluded (no producer yet).
+     */
+    public static Arbitrary<java.util.Set<SourceKind>> collidingSources() {
+        return Arbitraries.of(SourceKind.PAYMENT, SourceKind.MANUAL_ADJUSTMENT, SourceKind.CLAIMABLE_PRIZE)
+                .set().ofMinSize(1).ofMaxSize(3);
+    }
+
+    /** Null about half the time, otherwise a small JSON object, so JSONB round-trips are compared. */
+    private static Arbitrary<String> details() {
+        return Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(6)
+                .map(code -> "{\"gameCode\": \"" + code + "\"}")
+                .injectNull(0.5);
     }
 
     private static Arbitrary<Instant> timestamps() {
@@ -59,12 +70,15 @@ public final class EventGenerators {
                         Arbitraries.integers().between(1, 4),   // plays per session
                         Arbitraries.integers().between(1, 3),   // transactions per play
                         timestamps(),
-                        amounts())
+                        amounts(),
+                        collidingSources(),
+                        details())
                 .as(EventGenerators::buildSequence);
     }
 
     private static List<ProjectionItem> buildSequence(
-            long userId, int sessions, int plays, int txPerPlay, Instant start, BigDecimal amount) {
+            long userId, int sessions, int plays, int txPerPlay, Instant start, BigDecimal amount,
+            java.util.Set<SourceKind> colliding, String detail) {
         List<ProjectionItem> items = new ArrayList<>();
         int sequence = 0;
 
@@ -86,7 +100,7 @@ public final class EventGenerators {
                             "EUR",
                             null,
                             null,
-                            null));
+                            detail));
                 }
             }
         }
@@ -96,6 +110,21 @@ public final class EventGenerators {
                 userId, SourceKind.PAYMENT, "u" + userId + "-pay" + sequence,
                 start.plusSeconds(sequence * 7L + 1), null, null, null,
                 (short) 9, amount.abs(), "EUR", null, null, null));
+
+        // Cross-source collisions: same user, same sourceId string as a TRANSACTION, different source.
+        String shared = "u" + userId + "-x" + sequence;
+        long at = sequence * 7L + 2;
+        items.add(new ProjectionItem(userId, SourceKind.TRANSACTION, shared, start.plusSeconds(at),
+                11, "u" + userId + "-sx", "u" + userId + "-sx-p0", (short) 1, amount, "EUR", null, null, detail));
+        for (SourceKind kind : colliding) {
+            at += 3;
+            boolean sessioned = kind == SourceKind.CLAIMABLE_PRIZE; // prizes carry a session; payments/adjustments do not
+            items.add(new ProjectionItem(userId, kind, shared, start.plusSeconds(at),
+                    sessioned ? 11 : null,
+                    sessioned ? "u" + userId + "-sprize" : null,
+                    sessioned ? "u" + userId + "-sprize-p0" : null,
+                    (short) (kind == SourceKind.PAYMENT ? 9 : 3), amount, "EUR", null, null, detail));
+        }
 
         return items;
     }

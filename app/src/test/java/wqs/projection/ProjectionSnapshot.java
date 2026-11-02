@@ -24,7 +24,7 @@ public record ProjectionSnapshot(List<String> webItems, List<String> ccItems, Li
                                 "batchId", "subBatchId", "type", "amount", "currency",
                                 "balanceAfter", "cancelled", "cancelledBy", "cancels", "detail"
                          from "%s"
-                         order by "userId", "occurredAt", "sourceId"
+                         order by "userId", "occurredAt", "source", "sourceId"
                          """.formatted(table))
                 .map(Record::toString);
     }

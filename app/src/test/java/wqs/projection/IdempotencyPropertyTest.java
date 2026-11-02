@@ -72,6 +72,7 @@ class IdempotencyPropertyTest extends PostgresTestBase {
         ProjectionSnapshot once = applyAndSnapshot(items);
         applyBatches(items);
 
+        assertRoutedExactly(items);
         assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(once);
     }
 
@@ -82,7 +83,31 @@ class IdempotencyPropertyTest extends PostgresTestBase {
 
     private ProjectionSnapshot applyAndSnapshot(List<ProjectionItem> items) {
         applyBatches(items);
+        assertRoutedExactly(items);
         return ProjectionSnapshot.of(dsl());
+    }
+
+    /**
+     * Convergence cannot see deterministic misrouting or deterministic dropping, so check
+     * completeness directly: each distinct (source, sourceId) is in exactly the view tables its
+     * source routes to (once), and nothing else is.
+     */
+    private void assertRoutedExactly(List<ProjectionItem> items) {
+        List<String> expectedWeb = new ArrayList<>();
+        List<String> expectedCc = new ArrayList<>();
+        for (ProjectionItem item : items) {
+            String key = item.source().code() + "/" + item.sourceId();
+            if (expectedWeb.contains(key) || expectedCc.contains(key)) continue; // generated keys are unique
+            if (item.source().views().contains(wqs.domain.ViewKind.WEB)) expectedWeb.add(key);
+            if (item.source().views().contains(wqs.domain.ViewKind.CC)) expectedCc.add(key);
+        }
+        assertThat(keys("wqWebItem")).as("wqWebItem").containsExactlyInAnyOrderElementsOf(expectedWeb);
+        assertThat(keys("wqCcItem")).as("wqCcItem").containsExactlyInAnyOrderElementsOf(expectedCc);
+    }
+
+    private List<String> keys(String table) {
+        return dsl().fetch("select \"source\", \"sourceId\" from \"" + table + "\"")
+                .map(r -> r.get(0) + "/" + r.get(1));
     }
 
     /** Applies in small batches, since batch boundaries are themselves a source of reordering. */
