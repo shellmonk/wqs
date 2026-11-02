@@ -219,6 +219,27 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(offsetStore.read(STREAM)).contains(8L);
     }
 
+    /**
+     * F1: a cancel is exempt from the eInstant rule. It never rolls up or gets a page row, so an
+     * unsessioned eInstant cancel cannot put anything into the unsessioned set; dead-lettering it
+     * would leave its target silently live.
+     */
+    @Test
+    void an_unsessioned_einstant_cancel_cancels_its_target() {
+        ProjectionItem target = inSession("ei-t", "EUR");
+        ProjectionItem cancel = new ProjectionItem(
+                7L, SourceKind.TRANSACTION, "ei-c", WHEN.plusSeconds(60), "P11", "instants", null, null,
+                TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, "ei-t", null);
+
+        WriteResult result = writer.apply(new ProjectionBatch(STREAM, List.of(target, cancel), 2L, List.of(1L, 2L)));
+
+        assertThat(result.deadLettered()).isZero();
+        assertThat(deadLetters()).isEmpty();
+        assertThat(dsl().fetchOne("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\" where \"sourceId\" = 'ei-t'")
+                .intoArray()).containsExactly(true, "ei-c");
+        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+    }
+
     private void assertNothingProjected() {
         for (String table : List.of("wqWebItem", "wqCcItem", "wqGroupLocator", "wqSession", "wqPlay",
                 "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth", "wqPendingCancel")) {

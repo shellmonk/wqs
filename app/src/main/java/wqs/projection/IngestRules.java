@@ -16,13 +16,15 @@ import wqs.domain.ProjectionItem;
  * the rest of its batch applies.
  * <ul>
  *   <li>{@code einstant-unsessioned} (plan D7, spec 7.4): an item whose product type is eInstant
- *       ({@link EInstantProperties}) and that has no batchId. The ingest half of P-7; it applies
- *       to every item, cancellations included.</li>
+ *       ({@link EInstantProperties}) and that has no batchId. The ingest half of P-7.</li>
  *   <li>{@code currency-mismatch} (plan D6, O-4): a sessioned item whose currency differs from its
- *       existing session's. A session is single-currency, so its sums mean something. A
- *       cancellation is exempt: it never rolls up, so it cannot mix the session's currency, and
- *       rejecting it would leave its original uncancelled.</li>
+ *       existing session's. A session is single-currency, so its sums mean something.</li>
  * </ul>
+ * A cancellation is exempt from BOTH rules. It never rolls up and never gets a page-index row,
+ * so it can neither mix a session's currency nor put anything into the eInstant view's
+ * unsessioned set -- P-7 constrains the view's non-cancellation rows -- and a real eInstant
+ * TT_CANCEL may arrive with an empty batchContext. Rejecting it would leave its original
+ * silently live.
  * Zero-amount items are decided before these rules: they are written to no view or rollup, so
  * neither rule's invariant can be broken by one.
  */
@@ -47,11 +49,11 @@ public class IngestRules {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public String rejection(ProjectionItem item) {
+        if (item.isCancellation()) {
+            return null; // exempt from both rules, see the class comment
+        }
         if (!item.isSessioned()) {
             return eInstant.isEInstant(item.productType()) ? RejectedItemDeadLetters.EINSTANT_UNSESSIONED : null;
-        }
-        if (item.isCancellation()) {
-            return null;
         }
         String sessionCurrency = dsl.select(WQ_SESSION.currency)
                 .from(WQ_GROUP_LOCATOR)

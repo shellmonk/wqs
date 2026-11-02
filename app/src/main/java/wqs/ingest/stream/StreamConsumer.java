@@ -209,10 +209,13 @@ public class StreamConsumer {
             ProjectionItem item;
             try {
                 item = payloadMapper.toItem(payload, txTypes);
-            } catch (IllegalArgumentException e) {
-                // Only bad input is poison (the mapper and the domain reject it this way). Anything
-                // else -- notably a DataAccessException from the type registry -- is infrastructure:
-                // it falls to the outer catch and retries via recovery, never dead-lettering.
+            } catch (IllegalArgumentException | org.springframework.dao.NonTransientDataAccessException e) {
+                // Poison: bad input (the mapper and the domain reject it with IAE), or a database
+                // failure that is NOT transient -- e.g. a DataIntegrityViolationException from the
+                // type registry's first-sighting insert -- which would fail identically on every
+                // retry and stall the stream for good. Anything else (TransientDataAccessException,
+                // RecoverableDataAccessException, ...) is infrastructure: it falls to the outer
+                // catch and retries via recovery, never dead-lettering.
                 deadLetterUnmappable(payload, offset, e);
                 return;
             }
@@ -235,7 +238,7 @@ public class StreamConsumer {
      * when nothing earlier is still buffered; otherwise the next batch's higher offset covers it.
      * (If the process dies in between, the event is redelivered and recorded again: harmless.)
      */
-    private void deadLetterUnmappable(StreamPayload payload, long offset, IllegalArgumentException cause) {
+    private void deadLetterUnmappable(StreamPayload payload, long offset, RuntimeException cause) {
         log.error("Cannot map event {} at offset {}; dead-lettering it",
                 payload.id(), offset, cause);
         deadLetterStore.record(properties.name(), offset, payload, cause, 1);

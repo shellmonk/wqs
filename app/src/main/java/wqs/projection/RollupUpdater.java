@@ -46,7 +46,8 @@ import wqs.domain.ProjectionItem;
  *   <li>"productId" and "productType" = the FIRST item's pair (plan D6), first by
  *       ("occurredAt", "sourceId", "source") -- "startedAt" is that item's occurredAt, and
  *       "firstSourceId" / "firstSource" hold the rest of its identity as the tie-break for items
- *       at the same instant. The pair always belongs to one real item (a per-column LEAST could
+ *       at the same instant, compared in the database's TEXT order (so "10" sorts before "9":
+ *       not numeric, but deterministic, which is all P-1 needs). The pair always belongs to one real item (a per-column LEAST could
  *       pair one item's id with another's type). An item replaces the label when it re-anchors
  *       the group, or ties its startedAt with a lower (sourceId, source); a null pair is a pair
  *       like any other.</li>

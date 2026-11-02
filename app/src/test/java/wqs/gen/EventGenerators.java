@@ -36,14 +36,13 @@ public final class EventGenerators {
      * P03 < P07 < P11 < P13 but "arcade" (P13) < "bingo" (P07) < "instants" (P11) < "lottery"
      * (P03). A per-column LEAST would pair P03 with "arcade" -- a product no item has -- and the
      * oracles would catch it. P11 is eInstant ("instants", the default wqs.einstant.product-types),
-     * so every P11 item stays sessioned (P-7).
+     * so every non-cancellation P11 item stays sessioned (P-7); cancels may drop the session.
      */
     private static final String[] P03 = {Products.id(3), Products.type(3)};
     private static final String[] P07 = {Products.id(7), Products.type(7)};
     private static final String[] P11 = {Products.id(11), Products.type(11)};
     private static final String[] P13 = {Products.id(13), Products.type(13)};
     private static final String[] NO_PRODUCT = {null, null};
-    private static final String EINSTANT = "instants";
 
     /** Heavily skewed: user 1 appears far more often than user 20. */
     public static Arbitrary<Long> users() {
@@ -196,11 +195,10 @@ public final class EventGenerators {
     }
 
     /**
-     * An eInstant item's cancel always keeps the session: an unsessioned eInstant item is
-     * dead-lettered (P-7, plan D7), and these sequences model valid producer data.
+     * Half the cancels drop the session, eInstant ones included: a cancel is exempt from the
+     * eInstant rule (it never rolls up or gets a page row), and must still cancel its target.
      */
     private static ProjectionItem cancelOf(ProjectionItem item, String suffix, boolean grouped, BigDecimal amount) {
-        grouped = grouped || EINSTANT.equals(item.productType());
         return new ProjectionItem(
                 item.userId(), item.source(), item.sourceId() + suffix,
                 item.occurredAt().plusSeconds(90), item.productId(), item.productType(),

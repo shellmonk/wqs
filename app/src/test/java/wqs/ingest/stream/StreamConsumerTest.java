@@ -323,6 +323,34 @@ class StreamConsumerTest extends PostgresTestBase {
         return new StreamPayload(id, 2, 7L, WHEN, "TT_BUY", "11", null, "b-1", "p-1", new BigDecimal("5.0000"), "EUR", null, null, java.util.Map.of());
     }
 
+    /**
+     * F2b: a NON-transient database failure while mapping (here a constraint violation from the
+     * registry's first-sighting insert) will fail the same way on every retry, so it is poison:
+     * dead-lettered with the offset advanced, never a permanent stall.
+     */
+    @Test
+    void a_non_transient_registry_failure_is_dead_lettered_and_the_offset_advances() {
+        wqs.db.TxTypeRegistry broken = org.mockito.Mockito.spy(txTypes);
+        org.mockito.Mockito.doThrow(new org.springframework.dao.DataIntegrityViolationException("value too long"))
+                .when(broken).idOf("TT_BUY");
+        StreamProperties properties =
+                new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null);
+        StreamConsumer consumer = new StreamConsumer(
+                source, properties, payloadMapper, broken, writer, offsetStore, registry,
+                Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
+        consumer.start();
+
+        source.queue(payload("tx-poison"), 6);
+        source.deliverAll();
+
+        assertThat(count("wqDeadLetter")).isEqualTo(1);
+        assertThat(dsl().fetchOne("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").intoArray())
+                .containsExactly("tx-poison", 6L);
+        assertThat(offsetStore.read("wallet-transactions")).contains(6L);
+        assertThat(count("wqWebItem")).isZero();
+        assertThat(source.subscribeCount()).as("no recovery re-subscribe").isEqualTo(1);
+    }
+
     private StreamConsumer consumerWith(Clock clock, int batchSize) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);

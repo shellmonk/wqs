@@ -114,6 +114,21 @@ public class RabbitStreamSource implements StreamSource {
     private static final int MONEY_SCALE = 4;
     private static final int MONEY_INTEGER_DIGITS = 16; // numeric(20,4)
 
+    /**
+     * Every real transaction type code is upper-case letters, digits and underscores, at most 64
+     * characters (walAccountTransactions.transactionType is varchar(64), source-schema.sql). The
+     * registry inserts a first-sighted code; anything else is rejected HERE as poison, so a code
+     * the database would refuse can never become a retry-forever failure downstream.
+     */
+    private static final java.util.regex.Pattern TYPE_CODE = java.util.regex.Pattern.compile("[A-Z0-9_]{1,64}");
+
+    private static String typeCode(String code) {
+        if (!TYPE_CODE.matcher(code).matches()) {
+            throw new IllegalArgumentException("type must match [A-Z0-9_]{1,64}");
+        }
+        return code;
+    }
+
     static StreamPayload parse(ObjectMapper objectMapper, byte[] body) {
         JsonNode root;
         try {
@@ -148,7 +163,7 @@ public class RabbitStreamSource implements StreamSource {
                 userType,
                 userId,
                 instant(required(createdContext, "createdContext.created", "created"), "createdContext.created"),
-                textual(required(root, "type"), "type"),
+                typeCode(textual(required(root, "type"), "type")),
                 text(root, "productId"),
                 text(root, "productType"),
                 batchContext == null ? null : text(batchContext, "batchContext.batchId", "batchId"),

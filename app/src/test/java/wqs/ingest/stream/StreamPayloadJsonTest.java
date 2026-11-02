@@ -253,6 +253,21 @@ class StreamPayloadJsonTest {
         }
     }
 
+    /**
+     * F2a: the wire type code is checked at parse time. A code the type registry would insert --
+     * and Postgres could reject -- must be poison (dead-lettered), never a retry-forever failure.
+     * Every real code is upper-case letters, digits and underscores (source-schema.sql).
+     */
+    @Test
+    void a_malformed_type_code_is_poison() {
+        for (String bad : new String[] {"\"" + "A".repeat(65) + "\"", "\"tt_buy\"", "\"TT BUY\"", "\"\""}) {
+            assertThatThrownBy(() -> parse(with("type", bad)))
+                    .as("type=" + bad).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("type");
+        }
+        assertThat(parse(with("type", "\"" + "A".repeat(64) + "\"")).type()).hasSize(64);
+        assertThat(parse(with("type", "\"TT_PRIZE_IN2\"")).type()).isEqualTo("TT_PRIZE_IN2");
+    }
+
     /** A NUL in any text field would be unstorable in Postgres (text and jsonb alike). */
     @Test
     void a_nul_in_any_text_field_is_rejected_naming_the_field() {
