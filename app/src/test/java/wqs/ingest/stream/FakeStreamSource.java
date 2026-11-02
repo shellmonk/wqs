@@ -8,6 +8,8 @@ public class FakeStreamSource implements StreamSource {
 
     private final List<Object[]> queued = new ArrayList<>();
     private StreamHandler handler;
+    private final List<StreamHandler> handlers = new ArrayList<>();
+    private boolean failOnClose;
     private final List<Object[]> history = new ArrayList<>();
     private Long subscribedFrom;
     private int closeCount;
@@ -40,6 +42,15 @@ public class FakeStreamSource implements StreamSource {
         }
     }
 
+    /** Delivers through the n-th handler ever subscribed (0-based), live or stale. */
+    public void deliverVia(int handlerIndex, StreamPayload payload, long offset) {
+        handlers.get(handlerIndex).onMessage(payload, offset);
+    }
+
+    public void failOnClose(boolean fail) {
+        this.failOnClose = fail;
+    }
+
     public int closeCount() {
         return closeCount;
     }
@@ -57,10 +68,14 @@ public class FakeStreamSource implements StreamSource {
         this.subscribedFrom = fromOffset;
         this.subscribeCount++;
         this.handler = handler;
+        handlers.add(handler);
     }
 
     @Override
     public void close() {
         closeCount++;
+        if (failOnClose) {
+            throw new IllegalStateException("close failed");
+        }
     }
 }

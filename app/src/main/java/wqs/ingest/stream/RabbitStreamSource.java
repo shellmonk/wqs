@@ -45,6 +45,8 @@ public class RabbitStreamSource implements StreamSource {
 
     @Override
     public void subscribe(long fromOffset, StreamHandler handler) {
+        // Never leave a previous consumer alive beside the new one.
+        close();
         consumer = environment.consumerBuilder()
                 .stream(properties.name())
                 .offset(OffsetSpecification.offset(fromOffset))
@@ -58,7 +60,9 @@ public class RabbitStreamSource implements StreamSource {
     @Override
     public void close() {
         if (consumer != null) {
-            consumer.close();
+            com.rabbitmq.stream.Consumer old = consumer;
+            consumer = null;
+            old.close();
         }
     }
 

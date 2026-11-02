@@ -63,7 +63,8 @@ public class DeadLetterStore {
         try {
             return JSONB.valueOf(objectMapper.writeValueAsString(payload));
         } catch (Exception e) {
-            return JSONB.valueOf("{\"unserializable\":true}");
+            // Never write a placeholder: the offset would advance past an event stored nowhere.
+            throw new IllegalStateException("cannot serialise dead-letter payload", e);
         }
     }
 

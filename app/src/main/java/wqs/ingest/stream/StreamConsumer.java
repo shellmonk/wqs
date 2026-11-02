@@ -56,6 +56,8 @@ public class StreamConsumer {
     /** True after an unrecoverable failure until poll() has re-subscribed from the stored offset. */
     private boolean recovering;
     private Instant recoverAt;
+    /** Bumped on every (re)subscribe and on failure/stop; handlers of older generations are ignored. */
+    private int generation;
 
     public StreamConsumer(
             StreamSource source,
@@ -94,6 +96,10 @@ public class StreamConsumer {
     }
 
     public synchronized void start() {
+        // Start from a clean slate: no leftover subscription, buffer or recovering state.
+        closeQuietly();
+        accumulator.clear();
+        recovering = false;
         subscribe();
     }
 
@@ -101,12 +107,22 @@ public class StreamConsumer {
         // Resume from the NEXT offset. Subscribing at the committed offset replays the last event.
         long from = offsetStore.read(properties.name()).map(o -> o + 1).orElse(0L);
         log.info("Subscribing to stream {} from offset {}", properties.name(), from);
-        source.subscribe(from, this::onMessage);
+        int gen = ++generation;
+        source.subscribe(from, (payload, offset) -> onMessage(gen, payload, offset));
     }
 
-    private synchronized void onMessage(StreamPayload payload, long offset) {
-        if (recovering) {
-            return; // The source is closed; anything arriving now is redelivered after recovery.
+    private void closeQuietly() {
+        try {
+            source.close();
+        } catch (RuntimeException e) {
+            // Safe: the generation bump makes any surviving subscription's messages inert.
+            log.warn("Closing the source failed", e);
+        }
+    }
+
+    private synchronized void onMessage(int gen, StreamPayload payload, long offset) {
+        if (gen != generation || recovering) {
+            return; // Stale subscription, or recovering: redelivered from the stored offset later.
         }
         try {
             ProjectionItem item;
@@ -118,8 +134,15 @@ public class StreamConsumer {
             }
             accumulator.add(item, offset);
             accumulator.drainIfReady().ifPresent(this::applyBatch);
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
             enterRecovery(e);
+            rethrowIfError(e);
+        }
+    }
+
+    private static void rethrowIfError(Throwable e) {
+        if (e instanceof Error error) {
+            throw error;
         }
     }
 
@@ -142,14 +165,17 @@ public class StreamConsumer {
     public synchronized void poll() {
         if (recovering) {
             if (!clock.instant().isBefore(recoverAt)) {
+                // Closed here on the timer thread, never from the client's dispatch thread.
+                closeQuietly();
                 recover();
             }
             return;
         }
         try {
             accumulator.drainIfReady().ifPresent(this::applyBatch);
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
             enterRecovery(e);
+            rethrowIfError(e);
         }
     }
 
@@ -162,18 +188,16 @@ public class StreamConsumer {
             // Not advanced, so the batch is redelivered on the next start.
             log.error("Final flush failed on stop; unflushed events will be redelivered", e);
         } finally {
-            source.close();
+            generation++;
+            closeQuietly();
         }
     }
 
-    private void enterRecovery(RuntimeException cause) {
+    private void enterRecovery(Throwable cause) {
         log.error("Unrecoverable failure on stream {}; dropping the buffer and re-subscribing "
                 + "from the stored offset after {}", properties.name(), properties.recoveryBackoff(), cause);
-        try {
-            source.close();
-        } catch (RuntimeException e) {
-            log.warn("Closing the source failed", e);
-        }
+        // Only flip state here (this may run on the client's dispatch thread); poll() closes.
+        generation++;
         accumulator.clear();
         recovering = true;
         recoverAt = clock.instant().plus(properties.recoveryBackoff());
@@ -183,8 +207,9 @@ public class StreamConsumer {
         recovering = false;
         try {
             subscribe();
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
             enterRecovery(e);
+            rethrowIfError(e);
         }
     }
 

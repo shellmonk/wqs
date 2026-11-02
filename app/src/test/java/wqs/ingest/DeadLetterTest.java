@@ -194,6 +194,115 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(count()).isZero();
     }
 
+    @Test
+    void a_stale_subscription_cannot_feed_the_consumer_or_advance_the_offset() {
+        FlakyWriter flaky = new FlakyWriter(writer, 1, 4); // event 1 fails all attempts
+        DeadLetterStore dbDown = alwaysFailingStore();
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumer(1, flaky, dbDown, clock);
+        consumer.start();
+
+        source.queue(payload("tx-1", WHEN), 1);
+        source.deliverAll(); // handler 0 -> recovery
+        source.failOnClose(true); // the old subscription cannot be closed
+
+        consumer.stop();
+        consumer.start(); // handler 1, recovering reset
+        clock.advance(Duration.ofSeconds(10));
+        consumer.poll();
+        assertThat(source.subscribeCount()).isEqualTo(2); // poll did not re-subscribe again
+
+        // Stale handler 0 delivers far ahead; it must be ignored.
+        source.deliverVia(0, payload("tx-1000", WHEN), 1000);
+        consumer.poll();
+        assertThat(count("wqWebItem")).isZero();
+        assertThat(offsetStore.read(STREAM)).isEmpty();
+
+        // The live handler (1) feeds normally.
+        source.deliverVia(1, payload("tx-1", WHEN), 1);
+        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(offsetStore.read(STREAM)).contains(1L);
+    }
+
+    @Test
+    void a_failed_source_close_during_recovery_does_not_leave_the_old_subscription_live() {
+        FlakyWriter flaky = new FlakyWriter(writer, 1, 4);
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumer(1, flaky, alwaysFailingStore(), clock);
+        consumer.start();
+        source.queue(payload("tx-1", WHEN), 1);
+        source.deliverAll();
+        source.failOnClose(true);
+
+        clock.advance(Duration.ofSeconds(10));
+        consumer.poll(); // close throws (swallowed), re-subscribes
+        assertThat(source.subscribeCount()).isEqualTo(2);
+
+        source.deliverVia(0, payload("tx-999", WHEN), 999);
+        assertThat(count("wqWebItem")).isZero();
+        assertThat(offsetStore.read(STREAM)).isEmpty();
+    }
+
+    @Test
+    void an_error_thrown_by_the_writer_enters_recovery_and_is_rethrown() {
+        ProjectionWriter erroring = new ProjectionWriter(null, null) {
+            private int calls;
+
+            @Override
+            public WriteResult apply(ProjectionBatch batch) {
+                if (++calls == 1) {
+                    throw new StackOverflowError("simulated");
+                }
+                return writer.apply(batch);
+            }
+        };
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumer(1, erroring, deadLetterStore, clock);
+        consumer.start();
+        source.queue(payload("tx-1", WHEN), 1);
+        source.queue(payload("tx-2", WHEN), 2);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(source::deliverAll)
+                .isInstanceOf(StackOverflowError.class);
+        // tx-1 was drained but not applied: nothing stored, buffer dropped.
+        assertThat(offsetStore.read(STREAM)).isEmpty();
+        source.deliverVia(0, payload("tx-2", WHEN), 2); // ignored while recovering
+        assertThat(offsetStore.read(STREAM)).isEmpty();
+
+        clock.advance(Duration.ofSeconds(10));
+        consumer.poll();
+        assertThat(source.subscribedFrom()).isZero();
+        source.redeliverFromSubscription();
+        assertThat(count("wqWebItem")).isEqualTo(2);
+        assertThat(offsetStore.read(STREAM)).contains(2L);
+    }
+
+    @Test
+    void a_failed_dead_letter_write_for_a_later_item_does_not_move_the_offset() {
+        DeadLetterStore dbDown = alwaysFailingStore();
+        StreamConsumer consumer = consumer(3, writer, dbDown, fixedClock());
+        consumer.start();
+
+        // Whole batch fails (poison), item 1 projects alone, poison item 2 cannot be dead-lettered.
+        source.queue(payload("tx-1", WHEN), 1);
+        source.queue(payload("tx-poison", POISON_WHEN), 2);
+        source.queue(payload("tx-3", WHEN), 3);
+        source.deliverAll();
+
+        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count()).isZero();
+        assertThat(offsetStore.read(STREAM)).isEmpty();
+    }
+
+    private static DeadLetterStore alwaysFailingStore() {
+        return new DeadLetterStore(null, null) {
+            @Override
+            public void record(String s, Long o, ProjectionItem i, Exception e, int a) {
+                throw new IllegalStateException("database down");
+            }
+        };
+    }
+
     private StreamConsumer consumer(int batchSize, ProjectionWriter w, DeadLetterStore store, Clock clock) {
         return new StreamConsumer(
                 source,
