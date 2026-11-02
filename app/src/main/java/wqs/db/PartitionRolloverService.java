@@ -3,8 +3,8 @@ package wqs.db;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.YearMonth;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -12,6 +12,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Service;
+import wqs.metrics.CachedGaugeValue;
 
 /**
  * Keeps monthly partitions provisioned ahead of now, and publishes how much runway remains.
@@ -25,17 +26,23 @@ public class PartitionRolloverService {
 
     private static final Logger log = LoggerFactory.getLogger(PartitionRolloverService.class);
     private static final int STARTUP_MONTHS_AHEAD = 1;
+    private static final Duration GAUGE_TTL = Duration.ofSeconds(60);
 
     private final PartitionManager partitionManager;
     private final Clock clock;
-    private final AtomicInteger runway = new AtomicInteger();
+    private final CachedGaugeValue runway;
 
     public PartitionRolloverService(
             PartitionManager partitionManager, MeterRegistry registry, Clock clock) {
         this.partitionManager = partitionManager;
         this.clock = clock;
 
-        Gauge.builder("wqs.partition.runway.months", runway, AtomicInteger::get)
+        // Computed on scrape (cached ~60s), never set by rollOver alone: a gauge set only when the
+        // job runs freezes on every cluster node the job does not fire on, and after a failed run
+        // -- reporting a healthy runway while the real one shrinks to zero.
+        this.runway = new CachedGaugeValue(
+                () -> partitionManager.runwayMonths(YearMonth.now(clock)), clock, GAUGE_TTL);
+        Gauge.builder("wqs.partition.runway.months", runway, CachedGaugeValue::get)
                 .description("Consecutive months of partitions provisioned from the current month")
                 .register(registry);
     }
@@ -45,7 +52,7 @@ public class PartitionRolloverService {
         YearMonth current = YearMonth.now(clock);
         int created = partitionManager.ensurePartitionsAhead(current, monthsAhead);
         int remaining = partitionManager.runwayMonths(current);
-        runway.set(remaining);
+        runway.invalidate();
 
         if (created > 0) {
             log.info("Created {} partitions; runway is now {} months", created, remaining);

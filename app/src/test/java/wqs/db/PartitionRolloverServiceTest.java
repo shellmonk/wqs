@@ -58,4 +58,26 @@ class PartitionRolloverServiceTest extends PostgresTestBase {
         assertThat(gauge).isNotNull();
         assertThat(gauge.value()).isGreaterThanOrEqualTo(4.0);
     }
+
+    /** I2: the gauge must follow the clock even when the rollover job never runs on this node. */
+    @Test
+    void the_runway_gauge_decreases_as_time_passes_without_the_job_running() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        PartitionManager manager = new PartitionManager(dsl());
+        manager.ensurePartitionsAhead(YearMonth.of(2032, 6), 3); // June..September, no job involved
+        Instant[] now = {FIXED.instant()};
+        Clock moving = new Clock() {
+            @Override public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+            @Override public Clock withZone(java.time.ZoneId zone) { return this; }
+            @Override public Instant instant() { return now[0]; }
+        };
+        new PartitionRolloverService(manager, registry, moving);
+        Gauge gauge = registry.find("wqs.partition.runway.months").gauge();
+        double before = gauge.value();
+
+        now[0] = now[0].plus(java.time.Duration.ofDays(31)); // July: one month of runway used up
+
+        assertThat(before).isGreaterThanOrEqualTo(4.0);
+        assertThat(gauge.value()).isEqualTo(before - 1);
+    }
 }
