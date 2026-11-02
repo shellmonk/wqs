@@ -192,7 +192,8 @@ public class ProjectionWriter {
         // After the move: a revived row is counted in cntAll already, at the current key.
         for (ViewKind view : highLevel.revived()) {
             counterUpdater.recountExclCancelled(
-                    item.userId(), view, PageUnit.HIGH_LEVEL, productType, at);
+                    item.userId(), view, PageUnit.HIGH_LEVEL, productType,
+                    wqs.domain.CounterSentinels.ALL_TYPES, at);
         }
     }
 }

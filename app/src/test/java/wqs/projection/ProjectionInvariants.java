@@ -132,28 +132,31 @@ public final class ProjectionInvariants {
      * "visibleExclCancelled". Each row counts under its own product type (when it has one) and the
      * ALL sentinel ''. A productType of '' counts once, as the write path's key set does.
      *
-     * The type key is the ALL sentinel 0 on every row: the per-type ITEM fan-out is not written
-     * yet (plan Task 4, ruling R1), and HIGH_LEVEL rows never carry a type (D4).
+     * The type key (D4): an ITEM row counts under its own "type" and the ALL sentinel 0, crossed
+     * with its product keys -- four keys, or two without a product type. HIGH_LEVEL rows never
+     * carry a type: only the type sentinel 0.
      */
     public List<String> counterDrift() {
         return dsl.fetch("""
                 with src as (
                     select 1 as v, 0 as u, "userId", "occurredAt" as t, "productType" as p,
-                           not "cancelled" as vis from "wqWebItem"
+                           not "cancelled" as vis, "type"::int as ty from "wqWebItem"
                   union all
-                    select 2, 0, "userId", "occurredAt", "productType", not "cancelled" from "wqCcItem"
+                    select 2, 0, "userId", "occurredAt", "productType", not "cancelled", "type"::int
+                    from "wqCcItem"
                   union all
-                    select 1, 1, "userId", "occurredAt", "productType", "visibleExclCancelled"
+                    select 1, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", 0
                     from "wqWebHighLevel"
                   union all
-                    select 2, 1, "userId", "occurredAt", "productType", "visibleExclCancelled"
+                    select 2, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", 0
                     from "wqCcHighLevel"
                 ),
                 keyed as (
-                    select v, u, "userId", p as prod, 0 as typ, t, vis from src
-                    where p is not null and p <> ''
-                  union all
-                    select v, u, "userId", '', 0, t, vis from src
+                    select distinct v, u, "userId", pk.prod, tk.typ, t, vis, src_id
+                    from (select row_number() over () as src_id, * from src) s,
+                         lateral (values (s.p), ('')) as pk(prod),
+                         lateral (values (s.ty), (0)) as tk(typ)
+                    where pk.prod is not null
                 ),
                 expected as (
                     select 'day' as tier, "userId", v, u, prod, typ,

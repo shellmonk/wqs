@@ -2,6 +2,8 @@ package wqs.projection;
 
 import static wqs.db.generated.Tables.WQ_COUNT_DAY;
 import static wqs.db.generated.Tables.WQ_COUNT_MONTH;
+import static wqs.domain.CounterSentinels.ALL_PRODUCT_TYPES;
+import static wqs.domain.CounterSentinels.ALL_TYPES;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -15,6 +17,7 @@ import org.jooq.TableField;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import wqs.domain.CounterSentinels;
 import wqs.domain.PageUnit;
 import wqs.domain.ProjectionItem;
 import wqs.domain.ViewKind;
@@ -24,13 +27,13 @@ import wqs.domain.ViewKind;
  * "wqCountDay" for the partial months at each end of a range. Periods are UTC.
  *
  * Keys are (productType, typeId) per tier (V10). productType = '' is the ALL-product-types
- * sentinel, so the common unfiltered query reads one row rather than summing across product
- * types. A counted row therefore touches two product keys per tier: its own product type (when it
- * has one) and the sentinel. A row with no product type touches the sentinel only.
+ * sentinel and typeId = 0 the ALL-transaction-types sentinel ({@link CounterSentinels}), so the
+ * common unfiltered query reads one row rather than summing across values.
  *
- * typeId = 0 is the ALL-transaction-types sentinel. Every key written here uses it: the
- * per-type fan-out of ITEM counters is not maintained yet (plan Task 4; ruling R1), and HIGH_LEVEL
- * counters never carry a type (plan D4).
+ * ITEM counters fan out to four keys per tier (plan D4): (pt,t), (pt,ALL), (ALL,t), (ALL,ALL),
+ * where t is the item's type. An item with no product type writes only the two ALL-product keys.
+ * HIGH_LEVEL counters never carry a type: (pt,ALL) and (ALL,ALL), or (ALL,ALL) alone without a
+ * product type.
  *
  * ITEM counters are per item, in each view the item's source feeds. HIGH_LEVEL counters mirror
  * the page index per view, so they are driven per view from {@link HighLevelResult}:
@@ -54,12 +57,6 @@ import wqs.domain.ViewKind;
 @Component
 public class CounterUpdater {
 
-    /** The ALL-product-types sentinel; unreachable from input (blank is normalised to null). */
-    static final String ALL_PRODUCT_TYPES = "";
-
-    /** The ALL-transaction-types sentinel; real "wqTxType" ids start at 1. */
-    static final short ALL_TYPES = 0;
-
     private final DSLContext dsl;
 
     public CounterUpdater(DSLContext dsl) {
@@ -70,8 +67,8 @@ public class CounterUpdater {
     @Transactional(propagation = Propagation.MANDATORY)
     public void countItem(ProjectionItem item) {
         for (ViewKind view : item.source().views()) {
-            apply(keys(item.productType(), item.occurredAt()), item.userId(), view, PageUnit.ITEM,
-                    +1, true);
+            apply(keys(PageUnit.ITEM, item.productType(), item.type(), item.occurredAt()), item.userId(),
+                    view, PageUnit.ITEM, +1, true);
         }
     }
 
@@ -82,7 +79,8 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void countHighLevel(long userId, ViewKind view, String productType, Instant at) {
-        apply(keys(productType, at), userId, view, PageUnit.HIGH_LEVEL, +1, true);
+        apply(keys(PageUnit.HIGH_LEVEL, productType, ALL_TYPES, at), userId, view, PageUnit.HIGH_LEVEL,
+                +1, true);
     }
 
     /**
@@ -98,8 +96,8 @@ public class CounterUpdater {
             String fromProductType, Instant from,
             String toProductType, Instant to,
             boolean visibleExclCancelled) {
-        Set<Key> oldKeys = keys(fromProductType, from);
-        Set<Key> newKeys = keys(toProductType, to);
+        Set<Key> oldKeys = keys(PageUnit.HIGH_LEVEL, fromProductType, ALL_TYPES, from);
+        Set<Key> newKeys = keys(PageUnit.HIGH_LEVEL, toProductType, ALL_TYPES, to);
         Set<Key> removed = new LinkedHashSet<>(oldKeys);
         removed.removeAll(newKeys);
         Set<Key> added = new LinkedHashSet<>(newKeys);
@@ -114,8 +112,9 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void uncountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, String productType, Instant at) {
-        for (Key key : keys(productType, at)) {
+            long userId, ViewKind view, PageUnit unit, String productType, short typeId,
+            Instant at) {
+        for (Key key : keys(unit, productType, typeId, at)) {
             decrementExcl(tier(key.month()), userId, view, unit, key);
         }
     }
@@ -129,8 +128,9 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void recountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, String productType, Instant at) {
-        for (Key key : keys(productType, at)) {
+            long userId, ViewKind view, PageUnit unit, String productType, short typeId,
+            Instant at) {
+        for (Key key : keys(unit, productType, typeId, at)) {
             incrementExcl(tier(key.month()), userId, view, unit, key);
         }
     }
@@ -140,16 +140,30 @@ public class CounterUpdater {
     /** One counter row address within a tier. */
     private record Key(boolean month, String productType, short typeId, LocalDate period) {}
 
-    private static Set<Key> keys(String productType, Instant at) {
+    /**
+     * The key set of one page unit: {own product type, ALL} x {own type, ALL} for ITEM,
+     * {own product type, ALL} x {ALL} for HIGH_LEVEL (its {@code typeId} is ignored), in both tiers.
+     */
+    private static Set<Key> keys(PageUnit unit, String productType, short typeId, Instant at) {
         LocalDate day = LocalDate.ofInstant(at, ZoneOffset.UTC);
         LocalDate monthStart = day.withDayOfMonth(1);
-        Set<Key> keys = new LinkedHashSet<>();
+        Set<String> products = new LinkedHashSet<>();
         if (productType != null) {
-            keys.add(new Key(false, productType, ALL_TYPES, day));
-            keys.add(new Key(true, productType, ALL_TYPES, monthStart));
+            products.add(productType);
         }
-        keys.add(new Key(false, ALL_PRODUCT_TYPES, ALL_TYPES, day));
-        keys.add(new Key(true, ALL_PRODUCT_TYPES, ALL_TYPES, monthStart));
+        products.add(ALL_PRODUCT_TYPES);
+        Set<Short> types = new LinkedHashSet<>();
+        if (unit == PageUnit.ITEM) {
+            types.add(typeId);
+        }
+        types.add(ALL_TYPES);
+        Set<Key> keys = new LinkedHashSet<>();
+        for (String p : products) {
+            for (Short t : types) {
+                keys.add(new Key(false, p, t, day));
+                keys.add(new Key(true, p, t, monthStart));
+            }
+        }
         return keys;
     }
 

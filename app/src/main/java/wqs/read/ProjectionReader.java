@@ -14,6 +14,7 @@ import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
 import wqs.config.ReaderDsl;
+import wqs.domain.PageUnit;
 import wqs.read.Segment.Tier;
 
 /** Level-0 reads assembled from counters and live slices (spec 7.5). */
@@ -120,9 +121,11 @@ public class ProjectionReader {
             LocalDate newest = period(run.get(0));
             LocalDate oldest = period(run.get(run.size() - 1));
             if (run.get(0).tier() == Tier.MONTH) {
-                months.putAll(counters.months(tx, q.view(), f, oldest, newest));
+                months.putAll(counters.monthCounts(tx, f.userId(), q.view(), PageUnit.ITEM, Set.of(), Set.of(),
+                        f.excludeCancelled(), oldest, newest));
             } else {
-                days.putAll(counters.days(tx, q.view(), f, oldest, newest));
+                days.putAll(counters.dayCounts(tx, f.userId(), q.view(), PageUnit.ITEM, Set.of(), Set.of(),
+                        f.excludeCancelled(), oldest, newest));
             }
         }
         long[] counts = new long[segments.size()];

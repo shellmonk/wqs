@@ -26,6 +26,7 @@ import wqs.db.TxTypeRegistry;
 import wqs.db.generated.tables.records.WqCcItemRecord;
 import wqs.db.generated.tables.records.WqSessionRecord;
 import wqs.domain.MoneyDirection;
+import wqs.domain.CounterSentinels;
 import wqs.domain.PageUnit;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
@@ -125,7 +126,8 @@ public class CancellationApplier {
         Instant occurredAt = original.getOccurredAt().toInstant();
         for (ViewKind view : source.views()) {
             counterUpdater.uncountExclCancelled(
-                    userId, view, PageUnit.ITEM, original.getProductType(), occurredAt);
+                    userId, view, PageUnit.ITEM, original.getProductType(), original.getType(),
+                    occurredAt);
         }
 
         // A cancellation contributed to no rollup and no page unit, so cancelling one (should a
@@ -301,7 +303,8 @@ public class CancellationApplier {
                     + " hid " + rows + ": view=" + view + " userId=" + userId + " at=" + at
                     + " kind=" + kind + " refId=" + refId);
         }
-        counterUpdater.uncountExclCancelled(userId, view, PageUnit.HIGH_LEVEL, productType, at);
+        counterUpdater.uncountExclCancelled(userId, view, PageUnit.HIGH_LEVEL, productType,
+                CounterSentinels.ALL_TYPES, at);
     }
 
     private static boolean isCancellation(String cancels) {

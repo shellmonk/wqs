@@ -60,7 +60,8 @@ class CounterUpdaterTest extends PostgresTestBase {
 
         assertThat(dayCount(ViewKind.CC, PageUnit.ITEM, "", T0)).isEqualTo(1);
         assertThat(dayCount(ViewKind.WEB, PageUnit.ITEM, "", T0)).isZero();
-        assertThat(rows("wqCountDay")).isEqualTo(1);
+        // No product type: (ALL, type) and (ALL, ALL) only.
+        assertThat(rows("wqCountDay")).isEqualTo(2);
     }
 
     @Test
@@ -98,7 +99,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     void uncounting_reduces_only_the_excl_cancelled_tally() {
         run(u -> u.countItem(tx("t1", "t11")));
 
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", T0));
+        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", TxTypes.PLAY, T0));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.ITEM, "t11", T0)).isEqualTo(1);
         assertThat(dayExcl(ViewKind.WEB, PageUnit.ITEM, "t11", T0)).isZero();
@@ -126,7 +127,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     void uncounting_keeps_a_row_whose_cntAll_is_still_positive() {
         run(u -> u.countItem(tx("t1", "t11")));
 
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", T0));
+        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", TxTypes.PLAY, T0));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.ITEM, "t11", T0)).isEqualTo(1);
         assertThat(dayExcl(ViewKind.WEB, PageUnit.ITEM, "t11", T0)).isZero();
@@ -175,7 +176,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     void an_invisible_row_moves_only_cntAll() {
         run(u -> {
             u.countHighLevel(1L, ViewKind.WEB, "t11", T0);
-            u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0);
+            u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", (short) 0, T0);
         });
 
         run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, false));
@@ -242,10 +243,10 @@ class CounterUpdaterTest extends PostgresTestBase {
     @Test
     void uncounting_twice_throws_instead_of_clamping() {
         run(u -> u.countItem(tx("t1", "t11")));
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", T0));
+        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", TxTypes.PLAY, T0));
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", T0)))
+                run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, "t11", TxTypes.PLAY, T0)))
                 .isInstanceOf(RuntimeException.class);
         assertThat(dayCount(ViewKind.WEB, PageUnit.ITEM, "t11", T0)).isEqualTo(1);
     }
@@ -253,20 +254,20 @@ class CounterUpdaterTest extends PostgresTestBase {
     @Test
     void recounting_restores_only_the_excl_cancelled_tally_and_is_strict() {
         run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0));
+        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", (short) 0, T0));
 
-        run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0));
+        run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", (short) 0, T0));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isEqualTo(1);
         assertThat(dayExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isEqualTo(1);
         assertThat(monthExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isEqualTo(1);
         // Excl above cntAll: the CHECK rejects it.
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)))
+                run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", (short) 0, T0)))
                 .isInstanceOf(RuntimeException.class);
         // No row to restore: never created.
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                run(u -> u.recountExclCancelled(1L, ViewKind.CC, PageUnit.HIGH_LEVEL, "t11", T0)))
+                run(u -> u.recountExclCancelled(1L, ViewKind.CC, PageUnit.HIGH_LEVEL, "t11", (short) 0, T0)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("expected 1");
         assertThat(rows("wqCountDay")).isEqualTo(2);
@@ -286,25 +287,89 @@ class CounterUpdaterTest extends PostgresTestBase {
         }
     }
 
-    /**
-     * Ruling R1: until the per-type fan-out (plan Task 4) every key is written at the ALL-types
-     * sentinel, for items and page units alike, and per product type plus the ALL sentinel ''.
-     */
     @Test
-    void every_key_uses_the_all_types_sentinel_and_the_product_type() {
+    void item_fans_out_to_four_keys() {
+        run(u -> u.countItem(tx("t1", "instants")));
+
+        assertThat(dayKeys(ViewKind.WEB, PageUnit.ITEM)).containsExactlyInAnyOrder(
+                "instants/" + TxTypes.PLAY, "instants/0", "/" + TxTypes.PLAY, "/0");
+        assertThat(monthKeys(ViewKind.WEB, PageUnit.ITEM)).containsExactlyInAnyOrder(
+                "instants/" + TxTypes.PLAY, "instants/0", "/" + TxTypes.PLAY, "/0");
+    }
+
+    @Test
+    void null_product_type_fans_out_to_two_keys() {
+        run(u -> u.countItem(txOfType("t1", null, TxTypes.WIN)));
+
+        assertThat(dayKeys(ViewKind.WEB, PageUnit.ITEM))
+                .containsExactlyInAnyOrder("/" + TxTypes.WIN, "/0");
+        assertThat(monthKeys(ViewKind.WEB, PageUnit.ITEM))
+                .containsExactlyInAnyOrder("/" + TxTypes.WIN, "/0");
+    }
+
+    @Test
+    void high_level_row_uses_type_sentinel_only() {
         run(u -> {
-            u.countItem(tx("t1", "instants"));
             u.countHighLevel(1L, ViewKind.CC, "instants", T0);
+            u.countHighLevel(1L, ViewKind.CC, null, T0);
         });
 
-        List<String> keys = dsl().fetch("""
-                select "viewKind" || '/' || "pageUnit" || '/' || "productType" || '/' || "typeId"
-                from "wqCountDay" order by 1
-                """).getValues(0, String.class);
-        assertThat(keys).containsExactly(
-                "1/0//0", "1/0/instants/0", "2/0//0", "2/0/instants/0", "2/1//0", "2/1/instants/0");
-        assertThat(dsl().fetchOne("select count(*)::int from \"wqCountMonth\" where \"typeId\" <> 0")
-                .get(0, Integer.class)).isZero();
+        assertThat(dayKeys(ViewKind.CC, PageUnit.HIGH_LEVEL))
+                .containsExactlyInAnyOrder("instants/0", "/0");
+        assertThat(monthKeys(ViewKind.CC, PageUnit.HIGH_LEVEL))
+                .containsExactlyInAnyOrder("instants/0", "/0");
+    }
+
+    @Test
+    void cancel_moves_excl_counts_on_all_four_keys() {
+        run(u -> u.countItem(tx("t1", "instants")));
+
+        run(u -> u.uncountExclCancelled(
+                1L, ViewKind.WEB, PageUnit.ITEM, "instants", TxTypes.PLAY, T0));
+
+        for (String table : new String[] {"wqCountDay", "wqCountMonth"}) {
+            var rows = dsl().fetch("select \"cntAll\", \"cntExclCancelled\" from \"" + table
+                    + "\" where \"viewKind\" = 1 and \"pageUnit\" = 0");
+            assertThat(rows).hasSize(4);
+            assertThat(rows.getValues(0, Long.class)).containsOnly(1L);
+            assertThat(rows.getValues(1, Long.class)).containsOnly(0L);
+        }
+
+        run(u -> u.recountExclCancelled(
+                1L, ViewKind.WEB, PageUnit.ITEM, "instants", TxTypes.PLAY, T0));
+        assertThat(dsl().fetch("select 1 from \"wqCountDay\" where \"cntExclCancelled\" = 0"))
+                .isEmpty();
+    }
+
+    @Test
+    void high_level_cancel_moves_excl_on_both_type_sentinel_keys() {
+        run(u -> u.countHighLevel(1L, ViewKind.WEB, "instants", T0));
+
+        run(u -> u.uncountExclCancelled(
+                1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "instants", (short) 0, T0));
+
+        assertThat(dsl().fetch("select 1 from \"wqCountDay\" where \"cntExclCancelled\" = 0"))
+                .hasSize(2);
+    }
+
+    private List<String> dayKeys(ViewKind v, PageUnit u) {
+        return keys("wqCountDay", v, u);
+    }
+
+    private List<String> monthKeys(ViewKind v, PageUnit u) {
+        return keys("wqCountMonth", v, u);
+    }
+
+    private List<String> keys(String table, ViewKind v, PageUnit u) {
+        return dsl().fetch("select \"productType\" || '/' || \"typeId\" from \"" + table
+                + "\" where \"viewKind\" = ? and \"pageUnit\" = ?", (short) v.code(), u.code())
+                .getValues(0, String.class);
+    }
+
+    private ProjectionItem txOfType(String id, String productType, short type) {
+        return new ProjectionItem(
+                1L, SourceKind.TRANSACTION, id, T0, "P1", productType, "b1", "p1",
+                type, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private ProjectionItem tx(String id, String productType) {

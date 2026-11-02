@@ -317,15 +317,18 @@ class ProjectionReaderTest extends ReadPropertyBase {
                 readerDsl, counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()));
     }
 
-    /** Records every day row {@link CounterReader#days} returns, without a mocking framework. */
+    /** Records every day row {@link CounterReader#dayCounts} returns, without a mocking framework. */
     static final class RowCountingCounterReader extends CounterReader {
         final List<LocalDate> dayKeys = new ArrayList<>();
         int dayCalls;
 
         @Override
-        public Map<LocalDate, Long> days(
-                DSLContext tx, ViewKind v, Level0Filter f, LocalDate firstPeriod, LocalDate lastPeriod) {
-            Map<LocalDate, Long> rows = super.days(tx, v, f, firstPeriod, lastPeriod);
+        public Map<LocalDate, Long> dayCounts(
+                DSLContext tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
+                java.util.Set<String> productTypes, java.util.Set<Short> typeIds,
+                boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
+            Map<LocalDate, Long> rows = super.dayCounts(tx, userId, v, unit, productTypes, typeIds,
+                    excludeCancelled, firstPeriod, lastPeriod);
             dayKeys.addAll(rows.keySet());
             dayCalls++;
             return rows;
