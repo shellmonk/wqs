@@ -38,6 +38,7 @@ dependencies {
     testImplementation(libs.jqwik)
     testImplementation(libs.archunit.junit5)
     testImplementation(libs.assertj)
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 tasks.withType<JavaCompile>().configureEach {
