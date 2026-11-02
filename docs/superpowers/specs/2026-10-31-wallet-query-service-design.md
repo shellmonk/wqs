@@ -669,6 +669,10 @@ As implemented:
   still cannot be stored, a fallback row is written in its own transaction with null `sourceId`,
   `{"rawBase64": …}` of the serialised item and NUL-free error text — a dead-letter write cannot
   be defeated by the data it quarantines.
+- **Start failure self-heals (phase 4).** The stream `Environment` is created lazily, so an
+  unreachable broker at startup does not fail the context: a subscribe failure enters the same
+  recovery/backoff loop as a mid-run failure. The app starts and serves reads throughout. A
+  rethrown `Error` still installs the poller.
 
 ### 6.5 Scheduled jobs (Quartz)
 
@@ -790,7 +794,15 @@ off-by-one defects:
 - `page` is **1-based**. Page 1 is the first page. `totalPages == ceil(totalItems / pageSize)`,
   and `totalPages == 0` when `totalItems == 0`.
 
-Sort order is **fixed newest-first** (`"occurredAt" desc`). Not client-configurable.
+Sort order is **fixed newest-first**: total order (`"occurredAt" desc`, `"itemId" desc`), so
+ties on timestamp page deterministically. Not client-configurable.
+
+**Validation (phase 4).** `productId` must be >= 1 (`0` is the counter sentinel); `page` and
+`pageSize` must be >= 1; `from > to` is 400, while `from == to` is an empty 200 (half-open empty
+interval, totals 0). Levels 1 and 2 are valid but return **501** until phase 5. The optional
+`wqs.read.max-page-size` clamps `pageSize`, and the response reports the effective value (§7.9).
+Error bodies are `ProblemDetail` with fixed text; `instance` is the endpoint template, never the
+request URI.
 
 ### 7.2 View selection
 
@@ -890,23 +902,30 @@ a million transactions.
 Keyset pagination is excluded by requirement: the UI must show "page X of Y". Naive offset
 pagination would mean `OFFSET 75000` for page 1500, walking 75,000 index entries to discard them.
 
-Instead, the monthly counters are walked to locate which month contains the requested offset, and
-the real query runs against that partition with the small residual:
+Instead, the counters are walked to locate which segment contains the requested offset, and
+the real query runs against that segment with the small residual:
 
 ```
 remaining = (page - 1) * pageSize
-for each month in range, newest first:
-    if remaining < counter[month]:
-        target = month; residualOffset = remaining; break
-    remaining -= counter[month]
+for each segment in range, newest first:
+    if remaining < counter[segment]:
+        target = segment; residualOffset = remaining; break
+    remaining -= counter[segment]
 
-query target partition with OFFSET = residualOffset,
-continuing into the next older month if the page straddles a boundary
+one key query from `from` up to the target segment's end, OFFSET = residualOffset
 ```
 
 Deep pagination becomes a handful of narrow counter reads plus a partition-local scan of at most a
 few thousand index entries. This delivers roughly keyset-like cost while preserving exact page
 numbers, and is the payoff that makes the uncapped date range acceptable.
+
+**As implemented (phase 4).** The walk covers **every decomposition segment** (§7.5) — month, day
+and live — not months only, giving finer residuals. Day counters are read once per contiguous DAY
+run (at most two: the leading and trailing partial months). After the walk, **one** ordered key
+query runs from `from` up to the target segment's end with the residual offset, in total order
+(`"occurredAt" desc`, `"itemId" desc`); partition pruning and Merge Append handle a page that
+straddles into older months. The payload is then fetched by key (`"itemId" = any(array)`, within
+the `"occurredAt"` bounds). Each request runs in one reader transaction (§7.10).
 
 Correctness is guarded by property P-6 (§8), which asserts equivalence against a naive `OFFSET`
 reference implementation.
@@ -928,6 +947,11 @@ wider" is bounded to one user-month.
 
 Crucially, the index never has to serve a `COUNT`; counters do that. Totals and slicing being
 served by **different structures** is what lets each stay simple.
+
+**As created (phase 4, V9).** Item tables:
+`("userId", "occurredAt" desc, "itemId" desc) include ("cancelled", "productId")` — only the
+columns level 0 filters by; the `"itemId"` key column makes the tie-break index-ordered. The
+high-level tables follow §5.6. A test asserts the level-0 key query is an index-only scan on it.
 
 Additional indexes are added only when the benchmark harness (§8) shows a measured need.
 
@@ -999,6 +1023,13 @@ horizontally without touching the write path.
 **Accepted property:** Aurora replica lag (typically tens of milliseconds) means a committed
 transaction may briefly not be visible to a query. For a retrospective history view this is
 acceptable, and it is recorded here so it is not later triaged as a bug.
+
+**As implemented (phase 4).** The writer is the `@Primary` `DataSource` and `DSLContext` (built over
+Boot's jOOQ configuration, so Spring-managed transactions are unchanged); the reader has its own
+Hikari pool. Pools are named `writer` and `reader`. The reader pool is **read-only, REPEATABLE
+READ**, and each request runs in a **single reader transaction**, so counters and items come from
+one snapshot. Every `DSLContext` injected into `wqs.read..` must be `@ReaderDsl` (§8.5), so a read
+cannot silently land on the writer.
 
 Connection pools are sized separately — a small writer pool (≈10–16) and a larger reader pool — so
 a burst of operator queries cannot starve ingestion.
@@ -1129,12 +1160,14 @@ them from prose into build failures.
 | `api/web` and web query classes must not depend on `WqCcItem` | §9 control 3 — security by schema |
 | Nothing depends on `org.springframework.data.jpa..` | Prevents regression to the superseded pattern |
 | Layering: `api` → `read`/`projection` → `domain`; `ingest` → `projection`; nothing depends on `api` | §10 |
-| Production code must not depend on the naive-`OFFSET` oracle | §8.1 — the oracle is test-only by design |
-| Only `projection/` may inject the writer-qualified `DSLContext` | §10 — explicit datasource routing |
+| ~~Production code must not depend on the naive-`OFFSET` oracle~~ — **not added (phase 4)** | the oracle lives in test sources, which main cannot compile against; the rule could never fail |
+| Every `DSLContext` injection point in `wqs.read..` is `@ReaderDsl` (constructor, `@Autowired`/`@Inject`/`@Bean` parameters and fields; plain methods taking a `DSLContext tx` are exempt) | §10 — a read never silently lands on the writer. Replaces "only `projection/` may inject the writer" (the writer is the unqualified primary and ingest, db and jobs also write) |
+| `wqs.api..` other than `wqs.api.cc..` must not call `ServletRequest`/`WebRequest` `getParameter*`/`getQueryString` or use `ServletUriComponentsBuilder` | §9 control 1 |
 | MapStruct mappers must not reside in `api/` | §2.3 rule 1 |
 | `jobs/` classes must not be depended on by anything else | §10 — jobs are entry points, never collaborators |
 
-The third rule is the most valuable: §9 claims `/web` cannot leak operator data because it queries
+As of phase 4 the web/cc table rule runs on real classes, and each rule has a fixture proving it can
+fail. The third rule is the most valuable: §9 claims `/web` cannot leak operator data because it queries
 a table that structurally cannot contain it. This makes that claim checkable, so reusing a
 `"wqCcItem"` query in the web path fails the build rather than becoming an incident.
 
@@ -1166,6 +1199,9 @@ Two standing rules:
    distributions).
 
 Properties are introduced one phase at a time per §15, rather than all six at once.
+
+Test-suite practice (phase 4): `jqwik.shrinking.default = FULL` is set globally, because BOUNDED
+shrinking abandons in-flight database-writing tries on the shared container.
 
 ### 8.7 Production invariant checking
 
@@ -1213,6 +1249,16 @@ Controls:
 
 Authentication mechanism is open (O-2). A `PrincipalResolver` abstraction isolates it so the
 mechanism can change without touching the query pipeline.
+
+**As implemented (phase 4).** `wqs.web.principal.mode` is `none` (default: every `/web` request is
+401) or `trusted-header` (the gateway-injected option of O-2). The header defaults to
+`X-Authenticated-User-Id` only when unset; a blank or non-token name fails startup rather than
+falling back. Exactly one header value is accepted and it must be a positive decimal long;
+anything else is 401. Control 2's test exists.
+
+`/cc` has no authentication (O-14), so it is **deny-by-default**: `wqs.cc.access: deny|open`
+defaults to `deny` and answers 403 on every `/cc` request before binding; `open` logs a startup
+WARN and must be used only on a trusted network.
 
 ---
 
@@ -1286,9 +1332,10 @@ failure in the design, so it gets a first-class signal.
 **Implementation status after phases 1–3.** Implemented: every ingestion metric below except the
 `wqs.delta.*` family (phase 6, with the pollers); `wqs.deadletter.depth`;
 `wqs.partition.runway.months`; `wqs.job.duration` / `wqs.job.outcome` / `wqs.job.misfires`.
-Deferred, each marked in its table: the read-path metrics (phases 4–5, with the endpoints), the
-`wqs.reconcile.*` drift gauges (phase 7, with the reconciliation jobs), HikariCP pool tagging by
-`writer` | `reader` (phase 4, with the reader/writer datasource split) and Aurora replica lag
+**(phase 4)** The level-0 read-path metrics below are implemented with every meter pre-registered,
+and Hikari pool tagging (`pool=writer|reader`) is done; levels 1–2 read metrics follow in phase 5.
+Tracing (§11.3) is still not implemented. Deferred, each marked in its table: the
+`wqs.reconcile.*` drift gauges (phase 7, with the reconciliation jobs) and Aurora replica lag
 (phase 7). Query-backed gauges are computed on scrape and cached (~60s, ~15s for offset lag), so
 none can freeze when the code that would have "set" it stops running.
 
@@ -1428,6 +1475,7 @@ anything is broken, and it is the only failure whose impact is total.
 | O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
 | O-10 | How does a client select the eInstant view — explicit product ids, or a category parameter? | Required before the API contract is frozen |
 | O-11 | Gradle DSL: Kotlin or Groovy | Assumed Kotlin DSL |
+| O-14 | How is `/cc` authenticated/authorized? Today it is deny-by-default (`wqs.cc.access`, §9) | **Blocking before `/cc` is opened beyond a trusted network** |
 | O-12 | Do claimable prizes carry a `"batchId"`? Determines whether `/web` has a non-empty unsessioned set at all (§7.4) | Not for phase 1; required before level 1/2 on `/web` is correct |
 
 ---
@@ -1486,7 +1534,7 @@ Each phase ends with its named properties passing — not with code merely compi
 | 1 | Gradle two-module skeleton; Flyway + Testcontainers-backed jOOQ codegen incl. **generator strategy and exclusions**; Lombok + MapStruct processor chain; **Quartz schema and config-driven job registration**; item tables, partitions, partition rollover job; `"wqProduct"`, `"wqItemLocator"`; **ArchUnit rule set** | Partition rollover tests; trigger reconciliation tests; codegen reproducibility; architecture tests |
 | 2 | Stream consumer, `ProjectionWriter`, idempotency gate, offset store in Postgres | **P-1** |
 | 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
-| 4 | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (stubbed pending O-2) | **P-3**, **P-5**, **P-6**, security test (§9) |
+| 4 *(done)* | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (`none` / `trusted-header`, pending O-2); covering indexes; reader/writer datasources; consumer start self-heal; broker end-to-end test | **P-3**, **P-5**, **P-6**, security test (§9) |
 | 5 | Levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | P-3 extended to the high-level page unit; **P-7** |
 | 6 | Delta pollers for the four polled sources; watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
 | 7 | Reconciliation jobs, SLO dashboards and alarms, benchmark harness and recorded baselines | Drift metrics at zero; alarms firing on injected faults; baseline capture |
