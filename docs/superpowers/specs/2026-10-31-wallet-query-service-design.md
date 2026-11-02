@@ -300,7 +300,7 @@ Two hazards follow from a timestamp-only cursor:
 | `"wqDeadLetter"` | Events that repeatedly failed to project | not partitioned |
 | `"wqIngestWatermark"` | Delta cursor per source | not partitioned |
 | `"wqStreamOffset"` | RabbitMQ stream offset | not partitioned |
-| `"wqProduct"` | Product dimension and category | not partitioned |
+| `"wqTxType"` | Transaction-type code table (code → id, PLAY/WIN/NEUTRAL); `"wqProduct"` was dropped in V10 | not partitioned |
 
 Monthly partitions are named from the parent with a period suffix: `"wqWebItem_2026_10"`.
 Partition names are generated programmatically, so consistency matters more than aesthetics.
@@ -523,11 +523,12 @@ create table "wqCountMonth" (
   "userId"            bigint   not null,
   "viewKind"          smallint not null,  -- 1=WEB, 2=CC
   "pageUnit"          smallint not null,  -- 0=ITEM (L0), 1=HIGH_LEVEL (L1/L2)
-  "productId"         int      not null,  -- 0 = ALL-PRODUCTS sentinel
+  "productType"       text     not null,  -- '' = ALL product types (unreachable from input)
+  "typeId"            smallint not null,  -- 0 = ALL transaction types ("wqTxType" ids start at 1)
   "period"            date     not null,  -- first day of month, UTC
   "cntAll"            bigint   not null,
   "cntExclCancelled"  bigint   not null,
-  primary key ("userId", "viewKind", "pageUnit", "productId", "period")
+  primary key ("userId", "viewKind", "pageUnit", "productType", "typeId", "period")
 );
 ```
 
@@ -545,8 +546,12 @@ Design notes:
   session inserts no row and so increments nothing — which is the correct behaviour, and getting
   it wrong would inflate page counts by the number of transactions per session.
 - **Two count columns, not two rows**, because `excludeCancelledTransactions` is boolean.
-- **`"productId" = 0` is an all-products sentinel**, so the common unfiltered case reads one row
-  rather than summing across products.
+- **Two dimensions, each with an ALL sentinel (phase 5, V10).** An `ITEM` row is counted under
+  four keys — `(pt,t)`, `(pt,ALL)`, `(ALL,t)`, `(ALL,ALL)`; a null product type only under the two
+  ALL-product keys. `HIGH_LEVEL` rows use `typeId = 0` only — `(pt,0)`, `('',0)` — because
+  `transactionTypes` never changes level-1/2 page counts (§4.1). A total for request lists `P`, `T`
+  is `Σ_{p∈P'} Σ_{t∈T'}` with `P' = P or {''}`, `T' = T or {0}`; exact because each item has one
+  product type and one type. Filter sets never contain a sentinel (enforced by the filter records).
 - **Rows are sparse.** They exist only for periods where the user had activity. A user active
   twenty days a year generates hundreds of counter rows, not thousands.
 - **Counters are mutable in place.** A cancel arriving today can decrement a counter for a
@@ -557,7 +562,7 @@ Design notes:
   fails the transaction rather than being clamped, and a CHECK
   (`"cntAll" >= 0 and 0 <= "cntExclCancelled" <= "cntAll"`) backs this in the schema.
 - **`HIGH_LEVEL` counters follow the row's current key.** They count page-index rows at the row's
-  own (`"occurredAt"`, `"productId"`) — a session's start and LEAST product — so when a session
+  own (`"occurredAt"`, `"productType"`) — a session's start and its first item's product type — so when a session
   re-anchors or its product changes, its counters move from the old key to the new one.
 
 ### 5.8 Partition lifecycle
@@ -831,8 +836,8 @@ is load on the writer rather than a reader, and so is sized accordingly in the w
 ## 7. Read path
 
 ```
-GET /web/v1/projection  ──> userId from auth principal ──> "wqWebItem" / "wqSession"
-GET /cc/v1/projection   ──> userId from query parameter ──> "wqCcItem"  / "wqSession"
+GET /web/wallet-data/rest/v1/projection            ──> player from auth principal ──> "wqWebItem" / "wqSession"
+GET /cc/wallet-data/rest/v1/projection/{playerId} ──> player from path variable  ──> "wqCcItem"  / "wqSession"
                                       │
                        ┌──────────────┴──────────────┐
                        ▼                             ▼
@@ -849,13 +854,17 @@ item table they target.
 
 | Parameter | `/web` | `/cc` | Notes |
 |---|---|---|---|
-| `userId` | **from principal** | **required** | `/web` must never read this from the request (§9) |
-| `from` | required | required | arbitrary UTC timestamp |
-| `to` | required | required | arbitrary UTC timestamp |
+| player | **from principal** | **path variable `{playerId}`** | `/web` must never read it from the request (§9) |
+| `from` | required | required | ISO-8601 with offset |
+| `to` | required | required | ISO-8601 with offset |
 | `aggregationLevel` | required | required | 0, 1 or 2 |
-| `productId` | optional | optional | also selects the view (§7.2) |
-| `excludeCancelledTransactions` | optional | optional | boolean |
-| `page`, `pageSize` | required | required | see §7.6 |
+| `productTypes` | optional list | optional list | exact match on the item's product type (§7.2) |
+| `transactionTypes` | optional list | optional list | level 0: filters items; levels 1–2: filters nested `txs` only (§4.1) |
+| `excludeCancelledTransactions` | optional | optional | boolean, default false |
+| `pageNumber`, `pageSize` | required | required | see §7.6 |
+
+Paths (phase 5): `GET /web/wallet-data/rest/v1/projection` and
+`GET /cc/wallet-data/rest/v1/projection/{playerId}`.
 
 There is **no cap on the `from`/`to` span**. A request may cover the user's entire history, which
 is what makes precomputed counters load-bearing rather than merely an optimization.
@@ -868,36 +877,31 @@ off-by-one defects:
 - The range is **half-open: `[from, to)`** — `from` inclusive, `to` exclusive. This avoids the
   `23:59:59.999` boundary problem entirely and makes adjacent ranges tile without overlap or gap,
   which the counter decomposition in §7.5 depends on.
-- `page` is **1-based**. Page 1 is the first page. `totalPages == ceil(totalItems / pageSize)`,
-  and `totalPages == 0` when `totalItems == 0`.
+- `pageNumber` is **1-based**. Page 1 is the first page. `pagesAvailable == ceil(totalRowCount / pageSize)`,
+  and `pagesAvailable == 0` when `totalRowCount == 0`.
 
 Sort order is **fixed newest-first**: total order (`"occurredAt" desc`, `"itemId" desc`), so
 ties on timestamp page deterministically. Not client-configurable.
 
-**Validation (phase 4).** `productId` must be >= 1 (`0` is the counter sentinel); `page` and
-`pageSize` must be >= 1; `from > to` is 400, while `from == to` is an empty 200 (half-open empty
-interval, totals 0). Levels 1 and 2 are valid but return **501** until phase 5. The optional
+**Validation.** `pageNumber` and `pageSize` must be >= 1; `{playerId}` is a positive decimal long;
+each list takes at most 50 values (repeated or comma-separated, trimmed, blanks dropped); `from > to`
+is 400, while `from == to` is an empty 200 (half-open empty interval, totals 0). A non-empty
+`transactionTypes` list naming no known type yields an empty, correct page without running SQL. The optional
 `wqs.read.max-page-size` clamps `pageSize`, and the response reports the effective value (§7.9).
 Error bodies are `ProblemDetail` with fixed text; `instance` is the endpoint template, never the
 request URI.
 
 ### 7.2 View selection
 
-The three logical views resolve as follows:
-
-- **Transactions history** and **eInstant games** are both served from `"wqWebItem"`; they are
-  distinguished by `productId`. `"wqProduct"."category"` identifies which products are eInstant, so
-  this stays data-driven rather than a hardcoded id list in Java.
+- **Transactions history** and **eInstant games** are both served from `"wqWebItem"`, distinguished
+  by product type: the client passes `productTypes` (e.g. `instants`). Which product types are
+  eInstant is configuration (`wqs.einstant.product-types`, default `[instants]`), used by the ingest
+  invariant of §7.4.
 - **Unified data** is served from `"wqCcItem"`.
 
-**Counter implication of product-derived views.** Counters are keyed by a single `"productId"`,
-with `0` meaning all products. If the eInstant view spans **several** product ids, an eInstant
-total is the sum of one counter row per product rather than a single row read. That is acceptable
-(the product count is small and the rows are narrow), but it must be explicit, because the
-counter-assisted offset walk in §7.6 then accumulates a *summed* per-month counter rather than a
-single value. If eInstant product ids prove numerous or volatile, the remedy is a category-level
-sentinel in the `"productId"` column — reserving negative values for categories — which can be
-added without schema change. Resolution depends on O-10.
+`"wqProduct"` and the integer product id were dropped in phase 5 (V10); product id and type are
+stored as text on every row (§4.1). Counter totals for a list of product types sum one counter row
+per listed type (§5.7).
 
 ### 7.3 Aggregation levels
 
@@ -943,9 +947,10 @@ eInstant product. Consequences:
 - The unsessioned set is therefore non-empty only for non-eInstant products on `/web`, and for the
   operator-only sources on `/cc`.
 - This is a **data invariant, not merely an observation**: a non-null `"batchId"` on every
-  eInstant-product item is asserted at ingest and guarded by property P-7 (§8.1). It cannot be a
-  database check constraint, because classifying a product as eInstant requires a lookup into
-  `"wqProduct"`.
+  eInstant-product item is asserted at ingest (an unsessioned eInstant item is dead-lettered as
+  `einstant-unsessioned`; cancellations are exempt, since they never enter the page index) and
+  guarded by P-7 (§8.1). It is not a check constraint because the eInstant product types are
+  configuration (`wqs.einstant.product-types`).
 
 Whether claimable prizes carry a `"batchId"` remains open (O-12); it determines how large `/web`'s
 unsessioned contribution is, but no longer whether the response is bounded.
@@ -1031,58 +1036,40 @@ columns level 0 filters by; the `"itemId"` key column makes the tie-break index-
 high-level tables follow §5.6: `("userId", "occurredAt" desc, "kind" desc, "refId" desc) include
 ("productId", "visibleExclCancelled")`, the key columns again giving a total order. A test asserts the level-0 key query is an index-only scan on it.
 
+**Rebuilt in phase 5 (V10).** Items: `("userId", "occurredAt" desc, "itemId" desc) include
+("cancelled", "productType", "type")`; high-level: same key, `include ("productType",
+"visibleExclCancelled")`.
+
 Additional indexes are added only when the benchmark harness (§8) shows a measured need.
 
 ### 7.8 Response shape
 
-A **uniform pagination envelope** wraps a single `items` array at every level. Entries are
-discriminated by `kind`; only the entry shape varies by aggregation level.
+Per the API contract (`docs/reference/api-contract.md`, §4.1), every level uses one envelope:
 
 ```jsonc
 {
-  "page": 2,
-  "pageSize": 50,
-  "totalItems": 4870,     // high-level items: sessions + unsessioned items
-  "totalPages": 98,
-  "aggregationLevel": 1,
-
-  "items": [
-    // L1 / L2: a session, with its children nested
-    { "kind": "SESSION",
-      "batchId": "b-77",
-      "occurredAt": "2026-09-14T10:02:11Z",
-      "totals": {                      // precomputed; never computed on read
-        "totalPlays": 40.00,           //   amount wagered
-        "totalWins":  12.50,           //   amount won
-        "net":       -27.50,
-        "playCount":  8                //   number of plays
-      },
-      "transactions": [ /* L1 */ ],
-      "plays": [
-        { "subBatchId": "...",
-          "totals": { "totalPlays": 5.00, "totalWins": 0.00,
-                      "net": -5.00, "txCount": 2 },   // txCount = plays, at play level
-          "transactions": [ /* L2 */ ] }
-      ] },
-
-    // L1 / L2: an unsessioned item, a peer of sessions
-    { "kind": "PAYMENT",
-      "sourceId": "p-91",
-      "occurredAt": "2026-09-14T09:55:00Z",
-      "amount": 100.00 }
-  ]
+  "pageNumber": 2,          // 1-based
+  "pagesAvailable": 98,
+  "pageSize": 50,           // effective (clamped) size
+  "totalRowCount": 4870,    // L0: items; L1/L2: sessions + unsessioned items
+  "data": [ ... ]
 }
 ```
 
-At **level 0** the same `items` array carries flat items only — `kind` is the source type and
-`SESSION` never appears, since nothing is aggregated.
+- **Level 0:** `data` holds transaction objects (`txId`, `kind`, `created`, `productId`,
+  `productType`, `transactionType`, `amount`, `currency`, `balanceAfter`, `cancelled`, `batchId`,
+  `subBatchId`, `detail`); null fields are omitted; `status` is deferred.
+- **Level 1:** `data` holds sessions (`kind: "SESSION"`, `batchId`, `created`, `endedAt`,
+  `productId`, `productType`, `currency`, `totalPlay`, `totalWin`, `amount` = `totalWin` −
+  `totalPlay`, `playCount`, `txs: [transaction…]`) interleaved by time with unsessioned items,
+  which are plain transaction objects.
+- **Level 2:** as level 1, but a session nests `subitems: [{subBatchId, playTimestamp,
+  playAmount, winAmount, amount, txs: [transaction…]}]`.
+- Totals are the stored rollup values — the excl-cancelled variants when
+  `excludeCancelledTransactions` is set — never recomputed on read. `transactionTypes` filters only
+  the nested `txs`; sessions and their totals are unaffected.
 
-At **levels 1 and 2** entries are **high-level items**: either a `SESSION` (with children nested
-one level deep at L1, two at L2) or an unsessioned item. The array is a single chronological
-sequence, newest first, interleaving both kinds.
-
-There is no separate unsessioned array and no truncation flag. Because unsessioned items are page
-units (§7.4), nothing in the response is unbounded.
+There is no separate unsessioned array and no truncation flag: unsessioned items are page units (§7.4).
 
 ### 7.9 Pagination policy
 
@@ -1117,6 +1104,13 @@ a burst of operator queries cannot starve ingestion.
 ## 8. Testing
 
 ### 8.1 Properties (Jqwik)
+
+**Opt-in since phase 5.** Property classes carry `@Tag("property")`; `./gradlew build` excludes
+them and `./gradlew propertyTest` runs them (60-minute timeout). By decision of the project owner
+they are kept but not run routinely — the build-time cost was too high — so CI correctness rests on
+deterministic fixed-dataset tests that reuse the same oracles (`ProjectionInvariants`,
+`NaiveOffsetOracle`, live COUNT). Run `propertyTest` before a release that touches ingest,
+counters or paging.
 
 | # | Property | Guards |
 |---|---|---|
@@ -1318,7 +1312,7 @@ Controls:
 
 1. The shared query pipeline accepts `userId` only as an **already-resolved value**. `/web`'s
    request binding has no path to request parameters for it.
-2. An explicit test asserts that `/web/v1/projection?userId=<other>` ignores the parameter
+2. An explicit test asserts that `/web/wallet-data/rest/v1/projection?userId=<other>` ignores the parameter
    entirely. This is obvious now and is exactly the kind of property that regresses quietly during
    a later refactor.
 3. Operator-only sources are excluded from `/web` **by table choice**, not by a `WHERE` clause.
@@ -1616,7 +1610,7 @@ Each phase ends with its named properties passing — not with code merely compi
 | 2 | Stream consumer, `ProjectionWriter`, idempotency gate, offset store in Postgres | **P-1** |
 | 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
 | 4 *(done)* | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (`none` / `trusted-header`, pending O-2); covering indexes; reader/writer datasources; consumer start self-heal; broker end-to-end test | **P-3**, **P-5**, **P-6**, security test (§9) |
-| 5 | Levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | P-3 extended to the high-level page unit; **P-7** |
+| 5 *(done)* | Source contract (§4.1): real stream decoder, V10/V11 string product dimensions and `"wqTxType"`, product-type × type counters, ingest rules; API reshaped to the contract with list filters; levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | Fixed-dataset tests for P-3/P-5/P-6 at both page units, P-4 at the response, P-7; property tests made opt-in |
 | 6 | Delta pollers for the four polled sources (mutable: versioned upsert that retracts the old version's counter/rollup contributions, §4); watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
 | 7 | Reconciliation jobs, SLO dashboards and alarms, benchmark harness and recorded baselines | Drift metrics at zero; alarms firing on injected faults; baseline capture |
 
