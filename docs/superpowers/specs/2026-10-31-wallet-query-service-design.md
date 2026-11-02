@@ -186,8 +186,31 @@ Five sources feed WQS.
 | 4 | Payments | `/wallet/delta` (poll) | `/cc` only |
 | 5 | Limits | `/wallet/delta` (poll) | `/cc` only |
 
-All sources are append-only in the wallet. Cancellation arrives as a **new event referencing the
-original transaction**, which makes WQS projections mutable even though sources are immutable.
+**Transactions** (`walAccountTransactions`, via the RabbitMQ stream) are **immutable**: a row is
+written once and never updated. Cancellation arrives as a **new transaction referencing the
+original** (`transactionReference`), which makes the projection mutable even though the source is
+not.
+
+**The four polled sources are mutable** (`walManualAdjustmentRequests`, `walClaimablePrizes`,
+`walPayments`, `walLimits`). Their rows have lifecycles — payments move PENDING → APPROVED →
+VERIFIED / CANCELLED / REJECTED / EXPIRED, claims UNCLAIMED → CLAIMED → COMPLETED / REJECTED /
+EXPIRED, adjustment requests PENDING → APPROVED / REJECTED, limits are requested then approved —
+and `/wallet/delta` returns the **current version** of every row changed since the cursor. A
+periodic Quartz job per source (§6.5) polls it and applies each row as an **upsert of a newer
+version**, not an insert. Consequences:
+
+- The idempotency gate cannot be "seen this sourceId → drop": a re-read of the same version (the
+  overlap window) must be a no-op, but a newer version must replace the stored one. The row's own
+  change timestamp (`updated` / `statusDate`) is its version: apply when strictly newer, treat as
+  duplicate when equal, ignore (and count) when older.
+- Any field a counter, a rollup or `"visibleExclCancelled"` depends on can change on an update.
+  Applying a new version therefore retracts the old version's contributions and adds the new
+  one's, in the same transaction — the same mechanism cancellation already uses.
+- `"occurredAt"` is the source's `created`, which never changes, so a new version never moves
+  partitions.
+
+**Grouping.** Sessions are keyed by `batchId` and plays by `subBatchId` (§5.5). The source column
+`aggregationId` is **obsolete** and is not used.
 
 ### Delta endpoint contract
 
@@ -197,7 +220,8 @@ Two hazards follow from a timestamp-only cursor:
 
 1. **Late commits.** A row stamped `T` may commit after WQS has polled past `T`. Mitigated by
    always polling from `lastTs − overlapWindow`, where the overlap safely exceeds the longest
-   wallet write transaction. Re-reads are absorbed at zero cost by the idempotency gate (§6.2).
+   wallet write transaction. Re-reads of an unchanged version are absorbed by the version check
+   (above); only a strictly newer version writes.
 2. **Timestamp cliff.** If more than 1000 rows share one timestamp, advancing the watermark to
    `max(ts)` re-fetches the same page indefinitely. WQS **detects this condition and alarms
    loudly**; it must not silently stall or skip. A tiebreaker field on the delta response is
@@ -1478,7 +1502,10 @@ anything is broken, and it is the only failure whose impact is total.
 | O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
 | O-10 | How does a client select the eInstant view — explicit product ids, or a category parameter? | Required before the API contract is frozen |
 | O-11 | Gradle DSL: Kotlin or Groovy | Assumed Kotlin DSL |
-| O-12 | Do claimable prizes carry a `"batchId"`? Determines whether `/web` has a non-empty unsessioned set at all (§7.4) | Not for phase 1; required before level 1/2 on `/web` is correct |
+| O-12 | ~~Do claimable prizes carry a `"batchId"`?~~ **Answered:** `walClaimablePrizes` has nullable `batchId` / `subBatchId`, so prizes may be sessioned or not (§7.4) | — |
+| O-15 | Which fields of each polled source can change between versions — status only, or also amount, product, type? And is a `walPayments` row with status CANCELLED / REJECTED / EXPIRED "cancelled" for `excludeCancelledTransactions`? | Required before phase 6 |
+| O-16 | Source user ids are `varchar(64)`; WQS uses `bigint`. Are player ids always numeric? Should rows with `userType` ≠ 1 (non-players) be projected? | Required before phase 5 |
+| O-17 | Source `created` is `timestamp` without zone — which zone does the wallet write? (assumed UTC) | Required before phase 5 |
 | O-14 | How is `/cc` authenticated/authorized? Today it is deny-by-default (`wqs.cc.access`, §9) | **Blocking before `/cc` is opened beyond a trusted network** |
 
 ---
@@ -1539,7 +1566,7 @@ Each phase ends with its named properties passing — not with code merely compi
 | 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
 | 4 *(done)* | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (`none` / `trusted-header`, pending O-2); covering indexes; reader/writer datasources; consumer start self-heal; broker end-to-end test | **P-3**, **P-5**, **P-6**, security test (§9) |
 | 5 | Levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | P-3 extended to the high-level page unit; **P-7** |
-| 6 | Delta pollers for the four polled sources; watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
+| 6 | Delta pollers for the four polled sources (mutable: versioned upsert that retracts the old version's counter/rollup contributions, §4); watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
 | 7 | Reconciliation jobs, SLO dashboards and alarms, benchmark harness and recorded baselines | Drift metrics at zero; alarms firing on injected faults; baseline capture |
 
 **Observability is not phase 7.** Each phase ships the metrics for what it builds — ingest lag and
