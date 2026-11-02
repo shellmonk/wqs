@@ -9,7 +9,7 @@ import org.mapstruct.Named;
 import org.mapstruct.ReportingPolicy;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
-import wqs.ingest.stream.StreamPayload;
+import wqs.projection.source.StreamPayload;
 
 /**
  * Lives in the projection package, never api -- a mapper touches both wire and persistence

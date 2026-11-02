@@ -7,6 +7,7 @@ import java.time.ZoneOffset;
 import java.util.Optional;
 import org.jooq.DSLContext;
 import org.springframework.stereotype.Component;
+import wqs.projection.OffsetSink;
 
 /**
  * Reads and writes the consumer position. Deliberately in Postgres rather than the broker: the
@@ -14,7 +15,7 @@ import org.springframework.stereotype.Component;
  * effectively-once rather than at-least-once plus reconciliation (spec 6.2).
  */
 @Component
-public class StreamOffsetStore {
+public class StreamOffsetStore implements OffsetSink {
 
     private final DSLContext dsl;
 
@@ -29,6 +30,7 @@ public class StreamOffsetStore {
                 .fetchOptional(WQ_STREAM_OFFSET.offsetVal);
     }
 
+    @Override
     public void write(String stream, long offset) {
         dsl.insertInto(WQ_STREAM_OFFSET)
                 .set(WQ_STREAM_OFFSET.stream, stream)

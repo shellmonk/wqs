@@ -16,7 +16,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
-import wqs.ingest.stream.StreamPayload;
+import wqs.projection.source.StreamPayload;
 import wqs.projection.DrainedCancelDeadLetters;
 
 /**

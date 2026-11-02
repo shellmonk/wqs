@@ -20,7 +20,7 @@ import wqs.db.PostgresTestBase;
 import wqs.ingest.stream.FakeStreamSource;
 import wqs.ingest.stream.StreamConsumer;
 import wqs.ingest.stream.StreamOffsetStore;
-import wqs.ingest.stream.StreamPayload;
+import wqs.projection.source.StreamPayload;
 import wqs.ingest.stream.StreamProperties;
 import wqs.projection.ProjectionWriter;
 import wqs.projection.StreamPayloadMapper;

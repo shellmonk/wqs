@@ -14,7 +14,6 @@ import wqs.db.PartitionProvisioner;
 import wqs.domain.PageUnit;
 import wqs.domain.ProjectionItem;
 import wqs.domain.ViewKind;
-import wqs.ingest.stream.StreamOffsetStore;
 
 /**
  * The single write choke point. Nothing else in WQS holds a write connection (spec section 6).
@@ -35,7 +34,7 @@ public class ProjectionWriter {
     private final CounterUpdater counterUpdater;
     private final CancellationApplier cancellationApplier;
     private final PendingCancelStore pendingCancelStore;
-    private final StreamOffsetStore offsetStore;
+    private final OffsetSink offsetStore;
     private final PartitionProvisioner partitionProvisioner;
     private final DrainedCancelApplier drainedCancelApplier;
     private final DrainedCancelDeadLetters drainedCancelDeadLetters;
@@ -47,7 +46,7 @@ public class ProjectionWriter {
             CounterUpdater counterUpdater,
             CancellationApplier cancellationApplier,
             PendingCancelStore pendingCancelStore,
-            StreamOffsetStore offsetStore,
+            OffsetSink offsetStore,
             PartitionProvisioner partitionProvisioner,
             DrainedCancelApplier drainedCancelApplier,
             DrainedCancelDeadLetters drainedCancelDeadLetters) {

@@ -1,5 +1,7 @@
 package wqs.ingest.stream;
 
+import wqs.projection.source.StreamPayload;
+
 import java.util.ArrayList;
 import java.util.List;
 

@@ -1,5 +1,7 @@
 package wqs.ingest.stream;
 
+import wqs.projection.source.StreamPayload;
+
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;

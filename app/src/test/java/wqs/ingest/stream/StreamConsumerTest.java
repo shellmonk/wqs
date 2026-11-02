@@ -1,5 +1,7 @@
 package wqs.ingest.stream;
 
+import wqs.projection.source.StreamPayload;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;

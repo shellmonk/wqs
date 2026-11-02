@@ -2,6 +2,7 @@ package wqs.arch;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
+import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.slices;
 
 import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
@@ -60,6 +61,49 @@ class ArchitectureTest {
                 .that().resideInAnyPackage("wqs.api.web..", "wqs.read.web..")
                 .should().dependOnClassesThat().haveSimpleNameStartingWith("WqCcItem")
                 .allowEmptyShould(true);
+        rule.check(classes);
+    }
+
+    /**
+     * Spec 8.5 layering rule / spec 10: {@code api -> read/projection -> domain} and
+     * {@code ingest -> projection}. The query and write layers never reach back up into the
+     * drivers (ingest) or the edge (api).
+     */
+    @Test
+    void read_and_projection_depend_on_neither_ingest_nor_api() {
+        ArchRule rule = noClasses()
+                .that().resideInAnyPackage("wqs.projection..", "wqs.read..")
+                .should().dependOnClassesThat().resideInAnyPackage("wqs.ingest..", "wqs.api..");
+        rule.check(classes);
+    }
+
+    /** Spec 8.5 layering rule: domain is the bottom layer and depends on no other WQS package. */
+    @Test
+    void domain_depends_on_no_other_wqs_package() {
+        ArchRule rule = noClasses()
+                .that().resideInAPackage("wqs.domain..")
+                .should().dependOnClassesThat().resideInAnyPackage(
+                        "wqs.api..", "wqs.read..", "wqs.projection..", "wqs.ingest..", "wqs.jobs..",
+                        "wqs.db..", "wqs.config..", "wqs.metrics..");
+        rule.check(classes);
+    }
+
+    /** Spec 8.5 layering rule: nothing depends on api. */
+    @Test
+    void nothing_depends_on_api() {
+        ArchRule rule = noClasses()
+                .that().resideOutsideOfPackage("wqs.api..")
+                .should().dependOnClassesThat().resideInAPackage("wqs.api..");
+        rule.check(classes);
+    }
+
+    /**
+     * Spec 8.5 layering rule: a layering is only a layering without cycles. Checked over the
+     * top-level WQS packages, so any new package is covered without editing this rule.
+     */
+    @Test
+    void top_level_packages_are_free_of_cycles() {
+        ArchRule rule = slices().matching("wqs.(*)..").should().beFreeOfCycles();
         rule.check(classes);
     }
 

@@ -1,5 +1,7 @@
 package wqs.ingest.stream;
 
+import wqs.projection.source.StreamPayload;
+
 import java.util.OptionalLong;
 
 /** The stream, behind an interface so the consumer can be tested without a broker. */

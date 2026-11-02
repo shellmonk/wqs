@@ -8,7 +8,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
-import wqs.ingest.stream.StreamPayload;
+import wqs.projection.source.StreamPayload;
 
 class StreamPayloadMapperTest {
 
