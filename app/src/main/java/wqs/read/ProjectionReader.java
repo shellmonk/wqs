@@ -3,6 +3,8 @@ package wqs.read;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.jooq.DSLContext;
@@ -30,14 +32,25 @@ public class ProjectionReader {
 
     /**
      * Counts each segment of {@link RangeDecomposition#newestFirst}: whole months and days from
-     * the counters (one query per tier over that tier's span; absent row = 0), sub-day
-     * remainders by a live count.
+     * the counters (absent row = 0), sub-day remainders by a live count. Months are read in one
+     * query over their (contiguous) span; days in one query per contiguous run of DAY segments --
+     * at most two, the partial months at either end -- so a multi-year range never fetches the
+     * daily rows of the whole months in between (spec 7.5 bounded cost).
      */
     public SegmentCounts segmentCounts(
             DSLContext tx, Level0Query q, Level0Filter f, Instant from, Instant to) {
         List<Segment> segments = RangeDecomposition.newestFirst(from, to);
-        Map<LocalDate, Long> months = counterSpan(tx, q, f, segments, Tier.MONTH);
-        Map<LocalDate, Long> days = counterSpan(tx, q, f, segments, Tier.DAY);
+        Map<LocalDate, Long> months = new HashMap<>();
+        Map<LocalDate, Long> days = new HashMap<>();
+        for (List<Segment> run : runs(segments)) {
+            LocalDate newest = period(run.get(0));
+            LocalDate oldest = period(run.get(run.size() - 1));
+            if (run.get(0).tier() == Tier.MONTH) {
+                months.putAll(counters.months(tx, q.view(), f, oldest, newest));
+            } else {
+                days.putAll(counters.days(tx, q.view(), f, oldest, newest));
+            }
+        }
         long[] counts = new long[segments.size()];
         int counterRows = 0;
         for (int i = 0; i < segments.size(); i++) {
@@ -55,28 +68,22 @@ public class ProjectionReader {
         return new SegmentCounts(segments, counts, counterRows);
     }
 
-    /**
-     * One counter query spanning every segment of {@code tier}; empty when there is none. The
-     * span may include periods covered by another tier -- callers pick only their segments.
-     */
-    private Map<LocalDate, Long> counterSpan(
-            DSLContext tx, Level0Query q, Level0Filter f, List<Segment> segments, Tier tier) {
-        LocalDate first = null;
-        LocalDate last = null;
+    /** Maximal runs of adjacent MONTH or DAY segments (same tier), in list order; LIVE skipped. */
+    private static List<List<Segment>> runs(List<Segment> segments) {
+        List<List<Segment>> out = new ArrayList<>();
+        List<Segment> current = null;
         for (Segment s : segments) {
-            if (s.tier() != tier) {
+            if (s.tier() == Tier.LIVE) {
+                current = null;
                 continue;
             }
-            LocalDate p = period(s);
-            first = first == null || p.isBefore(first) ? p : first;
-            last = last == null || p.isAfter(last) ? p : last;
+            if (current == null || current.get(0).tier() != s.tier()) {
+                current = new ArrayList<>();
+                out.add(current);
+            }
+            current.add(s);
         }
-        if (first == null) {
-            return Map.of();
-        }
-        return tier == Tier.MONTH
-                ? counters.months(tx, q.view(), f, first, last)
-                : counters.days(tx, q.view(), f, first, last);
+        return out;
     }
 
     private static LocalDate period(Segment s) {
