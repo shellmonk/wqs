@@ -7,6 +7,23 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  quartz:
+    job-store-type: jdbc
+    # Flyway owns all DDL, including Quartz's.
+    jdbc:
+      initialize-schema: never
+    overwrite-existing-jobs: true
+    properties:
+      org.quartz.scheduler.instanceName: wqs
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.jobStore.tablePrefix: quartz.QRTZ_
+      org.quartz.jobStore.isClustered: true
+      org.quartz.jobStore.clusterCheckinInterval: 10000
+      org.quartz.jobStore.driverDelegateClass: org.quartz.impl.jdbcjobstore.PostgreSQLDelegate
+      org.quartz.threadPool.threadCount: 4
+  # Clustered Quartz coordinates through database locks and compares node clocks.
+  # Nodes MUST have synchronised time (NTP) and distinct instance ids; clock skew
+  # produces duplicate or missed fires (spec section 6.5).
 
 management:
   endpoints:
