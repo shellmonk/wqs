@@ -113,6 +113,41 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(gauge.value()).isEqualTo(90.0);
     }
 
+    /** I5: head minus committed; NaN when the source cannot report a head. */
+    @Test
+    void publishes_stream_offset_lag_from_the_head_and_the_committed_offset() {
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        new StreamConsumer(
+                source, new StreamProperties(true, "wallet-transactions", 10, Duration.ofMillis(200), 3, null, null),
+                payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
+        var gauge = registry.find("wqs.ingest.stream.offset.lag").gauge();
+        assertThat(gauge.value()).isNaN(); // fake source: head unknown
+
+        source.head(120L);
+        offsetStore.write("wallet-transactions", 100L);
+        clock.advance(Duration.ofSeconds(16)); // past the cache
+        assertThat(gauge.value()).isEqualTo(20.0);
+
+        offsetStore.write("wallet-transactions", 125L); // committed past the chunk-id head
+        clock.advance(Duration.ofSeconds(16));
+        assertThat(gauge.value()).isZero();
+    }
+
+    @Test
+    void records_batch_size_and_duration() {
+        StreamConsumer consumer = consumer(2, Duration.ofMillis(200));
+        consumer.start();
+
+        source.queue(payload("tx-1"), 1);
+        source.queue(payload("tx-2"), 2);
+        source.deliverAll();
+
+        var size = registry.find("wqs.ingest.batch.size").summary();
+        assertThat(size.count()).isEqualTo(1);
+        assertThat(size.totalAmount()).isEqualTo(2.0);
+        assertThat(registry.find("wqs.ingest.batch.duration").timer().count()).isEqualTo(1);
+    }
+
     @Test
     void counts_duplicates_separately() {
         StreamConsumer consumer = consumer(1, Duration.ofMillis(200));

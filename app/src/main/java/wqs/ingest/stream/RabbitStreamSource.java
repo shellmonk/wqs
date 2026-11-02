@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.Message;
+import com.rabbitmq.stream.NoOffsetException;
 import java.nio.charset.StandardCharsets;
 import com.rabbitmq.stream.OffsetSpecification;
 import java.math.BigDecimal;
@@ -14,6 +15,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 
 /**
@@ -84,6 +86,22 @@ public class RabbitStreamSource implements StreamSource {
             return raw == null ? new byte[0] : String.valueOf(raw).getBytes(StandardCharsets.UTF_8);
         } catch (Exception | LinkageError e) {
             return new byte[0];
+        }
+    }
+
+    /**
+     * The broker's {@code committedChunkId}: the offset of the FIRST message of the last committed
+     * chunk -- the closest head the client exposes (0.18 has no "last offset"). The lag computed
+     * from it is therefore a lower bound, short by at most one chunk.
+     */
+    @Override
+    public OptionalLong headOffset() {
+        try {
+            return OptionalLong.of(environment.queryStreamStats(properties.name()).committedChunkId());
+        } catch (NoOffsetException e) {
+            return OptionalLong.of(-1); // the stream is empty
+        } catch (RuntimeException e) {
+            return OptionalLong.empty();
         }
     }
 

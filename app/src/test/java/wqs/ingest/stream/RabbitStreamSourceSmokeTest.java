@@ -89,6 +89,8 @@ class RabbitStreamSourceSmokeTest {
                 assertThat(received.amount()).isEqualTo(new BigDecimal("5.0000"));
                 assertThat(offsets.get(0)).isZero();
                 assertThat(received.extra()).containsEntry("channel", "web");
+                // I5: the head offset for wqs.ingest.stream.offset.lag comes from the broker.
+                assertThat(source.headOffset()).hasValue(0L);
             }
         }
     }

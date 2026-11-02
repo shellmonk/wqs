@@ -1,9 +1,20 @@
 package wqs.ingest.stream;
 
+import java.util.OptionalLong;
+
 /** The stream, behind an interface so the consumer can be tested without a broker. */
 public interface StreamSource {
 
     void subscribe(long fromOffset, StreamHandler handler);
+
+    /**
+     * The stream's head offset as the broker reports it, for {@code wqs.ingest.stream.offset.lag};
+     * empty when unknown (no broker behind this source, or the query failed). An empty stream
+     * reports -1.
+     */
+    default OptionalLong headOffset() {
+        return OptionalLong.empty();
+    }
 
     void close();
 

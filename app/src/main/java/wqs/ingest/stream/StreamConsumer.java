@@ -1,8 +1,10 @@
 package wqs.ingest.stream;
 
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -12,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import wqs.domain.ProjectionItem;
 import wqs.ingest.DeadLetterStore;
+import wqs.metrics.CachedGaugeValue;
 import wqs.projection.ProjectionBatch;
 import wqs.projection.ProjectionWriter;
 import wqs.projection.StreamPayloadMapper;
@@ -37,6 +40,7 @@ import wqs.projection.WriteResult;
 public class StreamConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(StreamConsumer.class);
+    private static final Duration OFFSET_LAG_TTL = Duration.ofSeconds(15);
 
     private final StreamSource source;
     private final StreamProperties properties;
@@ -54,6 +58,8 @@ public class StreamConsumer {
     private final Counter projectedCounter;
     private final Counter duplicateCounter;
     private final Counter deadLetteredCounter;
+    private final DistributionSummary batchSize;
+    private final Timer batchDuration;
 
     /** True after an unrecoverable failure until poll() has re-subscribed from the stored offset. */
     private boolean recovering;
@@ -89,6 +95,21 @@ public class StreamConsumer {
                 .tag("source", "stream").tag("outcome", "duplicate").register(registry);
         this.deadLetteredCounter = Counter.builder("wqs.ingest.events")
                 .tag("source", "stream").tag("outcome", "deadlettered").register(registry);
+
+        this.batchSize = DistributionSummary.builder("wqs.ingest.batch.size")
+                .description("Events per applied stream batch")
+                .register(registry);
+        this.batchDuration = Timer.builder("wqs.ingest.batch.duration")
+                .description("Time to apply one stream batch, including any per-item fallback")
+                .register(registry);
+
+        // Head minus committed. Cached: each scrape costs a broker round trip and a DB read. NaN
+        // when the source cannot report a head (a test fake), never a reassuring 0.
+        CachedGaugeValue offsetLag = new CachedGaugeValue(this::offsetLag, clock, OFFSET_LAG_TTL);
+        Gauge.builder("wqs.ingest.stream.offset.lag", offsetLag, CachedGaugeValue::get)
+                .description("Stream head offset minus the committed offset (a lower bound: the "
+                        + "head is the broker's last committed chunk id)")
+                .register(registry);
 
         Gauge.builder("wqs.ingest.lag.seconds", this, StreamConsumer::lagSeconds)
                 .tag("source", "stream")
@@ -296,6 +317,16 @@ public class StreamConsumer {
      * untouched, and the caller enters recovery.
      */
     private void applyBatch(ProjectionBatch batch) {
+        batchSize.record(batch.items().size());
+        Timer.Sample sample = Timer.start(registry);
+        try {
+            applyBatchTimed(batch);
+        } finally {
+            sample.stop(batchDuration);
+        }
+    }
+
+    private void applyBatchTimed(ProjectionBatch batch) {
         RuntimeException batchError = null;
         for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
             try {
@@ -356,6 +387,16 @@ public class StreamConsumer {
             reference = startedAt.get();
         }
         return reference == null ? Double.NaN : Duration.between(reference, clock.instant()).toMillis() / 1000d;
+    }
+
+    /** Clamped at 0: the head is a chunk's FIRST offset, so the committed offset may pass it. */
+    double offsetLag() {
+        java.util.OptionalLong head = source.headOffset();
+        if (head.isEmpty()) {
+            return Double.NaN;
+        }
+        long committed = offsetStore.read(properties.name()).orElse(-1L);
+        return Math.max(0, head.getAsLong() - committed);
     }
 
     private void count(WriteResult result) {

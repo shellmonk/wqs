@@ -15,6 +15,7 @@ public class FakeStreamSource implements StreamSource {
     private int closeCount;
     private int subscribeCount;
     private Runnable onClose = () -> {};
+    private Long head;
 
     public void queue(StreamPayload payload, long offset) {
         queued.add(new Object[] {payload, offset});
@@ -74,6 +75,16 @@ public class FakeStreamSource implements StreamSource {
 
     public int subscribeCount() {
         return subscribeCount;
+    }
+
+    /** What headOffset() reports; null (the default) means "unknown", as with no broker. */
+    public void head(Long offset) {
+        this.head = offset;
+    }
+
+    @Override
+    public java.util.OptionalLong headOffset() {
+        return head == null ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(head);
     }
 
     public Long subscribedFrom() {
