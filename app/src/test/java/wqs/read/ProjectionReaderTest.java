@@ -152,6 +152,19 @@ class ProjectionReaderTest extends ReadPropertyBase {
             assertThat(clamped.readLevel0(webQuery, new Level0Request(ALL, from, to, 1, 2)).pageSize())
                     .isEqualTo(2);
         }
+
+        @Test
+        void page_size_ceiling_clamps_high_level_pages_too() {
+            applyBatches(fiveItems());
+            Instant from = Instant.parse("2034-01-01T00:00:00Z");
+            Instant to = Instant.parse("2034-03-01T00:00:00Z");
+            assertThat(clamped.effectivePageSize(10)).isEqualTo(3);
+            assertThat(clamped.effectivePageSize(2)).isEqualTo(2);
+            assertThat(clamped.readHighLevel(hlRequest(ViewKind.WEB, from, to, 1, 10), (tx, k) -> k).entries())
+                    .isEqualTo(oracle.highLevelPage(ViewKind.WEB, HL_ALL, from, to, 0, 3));
+            assertThat(clamped.readHighLevel(hlRequest(ViewKind.WEB, from, to, 2, 10), (tx, k) -> k).entries())
+                    .isEqualTo(oracle.highLevelPage(ViewKind.WEB, HL_ALL, from, to, 3, 3)).hasSize(2);
+        }
     }
 
     /**
@@ -163,7 +176,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveItems());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry));
+                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
 
@@ -195,7 +208,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveItems());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry));
+                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
@@ -364,13 +377,176 @@ class ProjectionReaderTest extends ReadPropertyBase {
                 org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class));
         WebLevel0Query web = new WebLevel0Query(webMapper, isolated);
         ProjectionReader probe = new ProjectionReader(readerDsl, isolated, new CounterReader(),
-                new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()));
+                new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
 
         ProjectionPage page = probe.readLevel0(web, new Level0Request(ALL, java.util.Set.of("TT_BUY"),
                 Instant.parse("2034-01-01T00:00:00Z"), Instant.parse("2034-03-01T00:00:00Z"), 1, 10));
 
         assertThat(page.totalItems()).isEqualTo(5);
         assertThat(page.items()).hasSize(5).allSatisfy(e -> assertThat(e.transactionType()).isEqualTo("TT_BUY"));
+    }
+
+    // ------------------------------------------------------------------ readHighLevel (levels 1-2)
+
+    private static final HighLevelFilter HL_ALL = new HighLevelFilter(1L, false);
+
+    /**
+     * Five page-index rows: Feb holds f1, f2, f3; Jan holds session "jb" (items j1 and j1b, one
+     * row) and j2. Seven items, five rows -- an ITEM-unit walk would land elsewhere.
+     */
+    private static List<ProjectionItem> fiveHighLevelRows() {
+        return List.of(
+                sessioned("j1", "2034-01-05T10:00:00Z", "jb"),
+                sessioned("j1b", "2034-01-06T10:00:00Z", "jb"),
+                item("j2", "2034-01-25T10:00:00Z"),
+                item("f1", "2034-02-02T10:00:00Z"),
+                sessioned("f2", "2034-02-14T10:00:00Z", "fb"),
+                sessioned("f2b", "2034-02-14T11:00:00Z", "fb"),
+                item("f3", "2034-02-27T10:00:00Z"));
+    }
+
+    private static HighLevelRequest hlRequest(ViewKind v, Instant from, Instant to, long page, long size) {
+        return new HighLevelRequest(v, wqs.domain.AggregationLevel.L1, HL_ALL, from, to, page, size);
+    }
+
+    /**
+     * Spec 7.6 at HIGH_LEVEL: page 3 of size 2 is offset 4; Feb holds 3 rows, so the walk lands
+     * in Jan with residual 1 and asks for one key -- naive OFFSET would query [from, to) with
+     * offset 4. Metrics carry the request's aggregation level.
+     */
+    @Test
+    void high_level_walk_lands_in_the_target_segment_with_a_small_residual() {
+        applyBatches(fiveHighLevelRows());
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        ProjectionReader probe = new ProjectionReader(
+                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
+        RecordingHighLevelQuery recording = new RecordingHighLevelQuery(webHighLevelQuery);
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-03-01T00:00:00Z");
+
+        HighLevelPage<HighLevelKey> page = probe.readHighLevel(recording,
+                new HighLevelRequest(ViewKind.WEB, wqs.domain.AggregationLevel.L2, HL_ALL, from, to, 3, 2),
+                (tx, keys) -> keys);
+
+        assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
+                from, Instant.parse("2034-02-01T00:00:00Z"), 1, 1));
+        assertThat(recording.countCalls).as("whole months need no live count").isZero();
+        assertThat(page.totalRowCount()).isEqualTo(5);
+        assertThat(page.entries()).extracting(HighLevelKey::refId).containsExactly("jb");
+        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isEqualTo(1);
+        assertThat(registry.get("wqs.read.counter.rows").summary().max()).isEqualTo(2);
+        assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "2").summary().count())
+                .isEqualTo(1);
+        assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "0").summary().count())
+                .isZero();
+        assertThat(registry.get("wqs.read.totalitems").tag("endpoint", "web").summary().max()).isEqualTo(5);
+    }
+
+    /** Ruling R4's public signature picks the view's query from the request. */
+    @Test
+    void read_high_level_selects_the_requested_views_index() {
+        applyBatches(fiveHighLevelRows());
+        applyBatches(List.of(new ProjectionItem(1L, SourceKind.PAYMENT, "pay", Instant.parse("2034-02-20T10:00:00Z"),
+                null, null, null, null, TxTypes.NEUTRAL, new BigDecimal("3.0000"), "EUR", null, null, null)));
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-03-01T00:00:00Z");
+        for (ViewKind v : ViewKind.values()) {
+            HighLevelPage<HighLevelKey> page = reader.readHighLevel(hlRequest(v, from, to, 1, 10), (tx, keys) -> keys);
+            assertThat(page.totalRowCount()).as(v.name()).isEqualTo(v == ViewKind.CC ? 6 : 5)
+                    .isEqualTo(oracle.highLevelCount(v, HL_ALL, from, to));
+            assertThat(page.entries()).as(v.name()).isEqualTo(oracle.highLevelPage(v, HL_ALL, from, to, 0, 10));
+        }
+    }
+
+    @Test
+    void reader_needs_exactly_one_high_level_query_per_view() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerDsl, txTypes(),
+                        new CounterReader(), new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()),
+                        List.of(webHighLevelQuery)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("CC");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerDsl, txTypes(),
+                        new CounterReader(), new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()),
+                        List.of(webHighLevelQuery, ccHighLevelQuery, webHighLevelQuery)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("WEB");
+    }
+
+    /**
+     * Ruling R4 / phase-4 snapshot rule: the total, the key walk and the assembly run in ONE
+     * reader transaction. A writer commit lands inside the read -- on the first key query, after
+     * the counters were read, and again inside the assembler -- with a row newer than every other
+     * in the range. The page and the assembler's own reads through {@code tx} see neither.
+     */
+    @Test
+    void total_walk_and_assembly_share_one_snapshot() {
+        applyBatches(fiveHighLevelRows());
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-03-01T12:00:00Z");
+        Runnable[] commits = {
+            () -> applyBatches(List.of(item("late1", "2034-03-01T06:00:00Z"))),
+            () -> applyBatches(List.of(item("late2", "2034-03-01T07:00:00Z"))),
+        };
+        HighLevelQuery commitOnKeys = new HighLevelQuery() {
+            boolean fired;
+
+            @Override
+            public ViewKind view() {
+                return ViewKind.WEB;
+            }
+
+            @Override
+            public long count(DSLContext tx, HighLevelFilter f, Instant lo, Instant hi) {
+                return webHighLevelQuery.count(tx, f, lo, hi);
+            }
+
+            @Override
+            public List<HighLevelKey> keys(DSLContext tx, HighLevelFilter f, Instant lo, Instant hi, long o, int l) {
+                if (!fired) {
+                    fired = true;
+                    commits[0].run();
+                }
+                return webHighLevelQuery.keys(tx, f, lo, hi, o, l);
+            }
+        };
+        long[] seenByAssembler = {-1};
+
+        HighLevelPage<HighLevelKey> during = reader.readHighLevel(commitOnKeys,
+                hlRequest(ViewKind.WEB, from, to, 1, 10), (tx, keys) -> {
+                    commits[1].run();
+                    seenByAssembler[0] = webHighLevelQuery.count(tx, HL_ALL, from, to);
+                    return keys;
+                });
+
+        assertThat(during.totalRowCount()).isEqualTo(5);
+        assertThat(during.entries()).extracting(HighLevelKey::refId).containsExactly("f3", "fb", "f1", "j2", "jb");
+        assertThat(seenByAssembler[0]).as("assembler reads the same snapshot").isEqualTo(5);
+        HighLevelPage<HighLevelKey> after = reader.readHighLevel(hlRequest(ViewKind.WEB, from, to, 1, 10), (tx, k) -> k);
+        assertThat(after.totalRowCount()).isEqualTo(7);
+        assertThat(after.entries()).extracting(HighLevelKey::refId).startsWith("late2", "late1");
+    }
+
+    /** Spec 7.9 at HIGH_LEVEL: past the end (overflow included) is empty with the right total, and nothing is assembled. */
+    @Test
+    void high_level_beyond_last_page_is_empty_and_never_assembles() {
+        applyBatches(fiveHighLevelRows());
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-03-01T00:00:00Z");
+        long[][] beyond = {{4, 2}, {Long.MAX_VALUE / 2, Integer.MAX_VALUE}, {3, Long.MAX_VALUE}, {Long.MAX_VALUE, Long.MAX_VALUE}};
+        for (long[] pp : beyond) {
+            HighLevelPage<HighLevelKey> page = reader.readHighLevel(hlRequest(ViewKind.WEB, from, to, pp[0], pp[1]),
+                    (tx, keys) -> {
+                        throw new AssertionError("assembled an empty page " + pp[0] + "/" + pp[1]);
+                    });
+            assertThat(page.entries()).isEmpty();
+            assertThat(page.totalRowCount()).isEqualTo(5);
+        }
+        assertThat(reader.readHighLevel(hlRequest(ViewKind.WEB, from, to, 1, Long.MAX_VALUE), (tx, k) -> k).entries())
+                .hasSize(5);
+        assertThat(reader.effectivePageSize(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
+    }
+
+    static ProjectionItem sessioned(String id, String at, String batchId) {
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "keno", batchId,
+                batchId + "-p0", TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 
     /** 3 items in Feb 2034, 2 in Jan 2034, all user 1. */
@@ -386,7 +562,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     /** Builds a reader around a test counter reader, with no ceiling and a private registry. */
     private ProjectionReader probeReader(CounterReader counters) {
         return new ProjectionReader(
-                readerDsl, txTypes(), counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()));
+                readerDsl, txTypes(), counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
     }
 
     /** Records every day row {@link CounterReader#dayCounts} returns, without a mocking framework. */

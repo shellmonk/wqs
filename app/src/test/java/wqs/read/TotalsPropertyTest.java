@@ -15,6 +15,7 @@ import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.jooq.impl.DSL;
 import org.springframework.boot.test.context.SpringBootTest;
+import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
@@ -51,6 +52,30 @@ class TotalsPropertyTest extends ReadPropertyBase {
                 assertThat(reader.total(queryFor(q.view()), f, q.from(), q.to()))
                         .as(q.toString()).isEqualTo(expected);
             }
+        }
+    }
+
+    /**
+     * P-5 at the HIGH_LEVEL page unit (levels 1-2): the total assembled from HIGH_LEVEL counters
+     * -- keyed (productType, ALL types) and (ALL, ALL), never by transaction type -- and live
+     * counts of the sub-day remainders equals a live COUNT over the page index, for product-type
+     * subsets that include an absent value and with or without excludeCancelled
+     * ("visibleExclCancelled").
+     */
+    @Property(tries = 30)
+    void high_level_counter_total_equals_live_count(
+            @ForAll("highLevelHistory") List<ProjectionItem> items,
+            @ForAll("queries") List<ReadQuery> queries) {
+        reset();
+        applyBatches(items);
+        for (ReadQuery q : queries) {
+            HighLevelFilter f = q.highLevelFilter();
+            long expected = oracle.highLevelCount(q.view(), f, q.from(), q.to());
+            assertThat(reader.readHighLevel(highLevelQueryFor(q.view()),
+                            q.highLevelRequest(AggregationLevel.L2, 1, 1), (tx, keys) -> keys).totalRowCount())
+                    .as(q.toString()).isEqualTo(expected);
+            assertThat(reader.total(highLevelQueryFor(q.view()), f, q.from(), q.to()))
+                    .as(q.toString()).isEqualTo(expected);
         }
     }
 
@@ -128,6 +153,11 @@ class TotalsPropertyTest extends ReadPropertyBase {
     @Provide
     Arbitrary<List<ReadQuery>> queries() {
         return ReadGenerators.queries().list().ofSize(10);
+    }
+
+    @Provide
+    Arbitrary<List<ProjectionItem>> highLevelHistory() {
+        return ReadGenerators.highLevelHistory();
     }
 
     private static ProjectionItem item(String id, String at) {

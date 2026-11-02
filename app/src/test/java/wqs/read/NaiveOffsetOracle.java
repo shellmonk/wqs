@@ -12,8 +12,8 @@ import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 
 /**
- * The permanent naive-OFFSET oracle (spec 8.1): straight SQL against the view's item table,
- * no counters, no decomposition. Deliberately obvious and never optimised -- it is what the
+ * The permanent naive-OFFSET oracle (spec 8.1): straight SQL against the view's item table (level
+ * 0) or high-level page index (levels 1-2), no counters, no decomposition. Deliberately obvious and never optimised -- it is what the
  * production reader is compared to.
  */
 public final class NaiveOffsetOracle {
@@ -73,6 +73,52 @@ public final class NaiveOffsetOracle {
         if (!typeCodes.isEmpty()) {
             w.append(" and \"type\" in (select \"typeId\" from \"wqTxType\" where \"code\" = any(?))");
             binds.add(typeCodes.toArray(String[]::new));
+        }
+        return w.toString();
+    }
+
+    // ------------------------------------------------------------------ high-level (levels 1-2)
+
+    /** Live count of the view's page-index rows; no counters, no decomposition. */
+    public long highLevelCount(ViewKind v, HighLevelFilter f, Instant from, Instant to) {
+        List<Object> binds = new ArrayList<>();
+        String sql = "select count(*) from \"" + highLevelTable(v) + "\" where " + highLevelWhere(f, from, to, binds);
+        return ((Number) dsl.fetchValue(sql, binds.toArray())).longValue();
+    }
+
+    /** Plain {@code order by ... offset ... limit} over the page index, in the level-1/2 total order. */
+    public List<HighLevelKey> highLevelPage(
+            ViewKind v, HighLevelFilter f, Instant from, Instant to, long offset, int limit) {
+        List<Object> binds = new ArrayList<>();
+        String sql = "select \"occurredAt\", \"kind\", \"refId\" from \"" + highLevelTable(v) + "\" where "
+                + highLevelWhere(f, from, to, binds)
+                + " order by \"occurredAt\" desc, \"kind\" desc, \"refId\" desc offset ? limit ?";
+        binds.add(offset);
+        binds.add(limit);
+        return dsl.fetch(sql, binds.toArray()).map(r -> new HighLevelKey(
+                r.get("occurredAt", OffsetDateTime.class).toInstant(),
+                r.get("kind", Short.class),
+                r.get("refId", String.class)));
+    }
+
+    private static String highLevelTable(ViewKind v) {
+        return switch (v) {
+            case WEB -> "wqWebHighLevel";
+            case CC -> "wqCcHighLevel";
+        };
+    }
+
+    private static String highLevelWhere(HighLevelFilter f, Instant from, Instant to, List<Object> binds) {
+        StringBuilder w = new StringBuilder("\"userId\" = ? and \"occurredAt\" >= ?::timestamptz and \"occurredAt\" < ?::timestamptz");
+        binds.add(f.userId());
+        binds.add(from.toString());
+        binds.add(to.toString());
+        if (f.excludeCancelled()) {
+            w.append(" and \"visibleExclCancelled\"");
+        }
+        if (!f.productTypes().isEmpty()) {
+            w.append(" and \"productType\" = any(?)");
+            binds.add(f.productTypes().toArray(String[]::new));
         }
         return w.toString();
     }

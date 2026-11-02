@@ -13,6 +13,7 @@ import net.jqwik.api.Provide;
 import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
+import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionItem;
 import wqs.gen.ReadGenerators;
 import wqs.gen.ReadGenerators.ReadQuery;
@@ -59,6 +60,48 @@ class PaginationPropertyTest extends ReadPropertyBase {
             assertThat(beyond.totalItems()).as(sq + " beyond").isEqualTo(full.size());
             assertThat(beyond.totalPages()).as(sq + " beyond").isEqualTo(totalPages);
         }
+    }
+
+    /**
+     * P-3 at the HIGH_LEVEL page unit: pages 1..ceil(total / pageSize) of the page index
+     * concatenate to its full ordered key list, and the page after the last is empty with the
+     * same total. Ties on "occurredAt" (sessions beside unsessioned items) cross page boundaries,
+     * so a page-local or flipped tie-break duplicates or drops a row here.
+     */
+    @Property(tries = 30)
+    void all_high_level_pages_concatenate_to_the_full_result(
+            @ForAll("highLevelHistory") List<ProjectionItem> items,
+            @ForAll("sizedQueries") List<SizedQuery> queries) {
+        reset();
+        applyBatches(items);
+        for (SizedQuery sq : queries) {
+            ReadQuery q = sq.query();
+            HighLevelQuery hq = highLevelQueryFor(q.view());
+            List<HighLevelKey> full = oracle.highLevelPage(q.view(), q.highLevelFilter(), q.from(), q.to(), 0, Integer.MAX_VALUE);
+            long totalPages = Math.ceilDiv(full.size(), sq.pageSize());
+
+            List<HighLevelKey> all = new ArrayList<>();
+            for (long p = 1; p <= totalPages; p++) {
+                HighLevelPage<HighLevelKey> page = readHighLevel(hq, q, p, sq.pageSize());
+                assertThat(page.totalRowCount()).as(sq + " page=" + p).isEqualTo(full.size());
+                assertThat(page.entries()).as(sq + " page=" + p).isNotEmpty().hasSizeLessThanOrEqualTo(sq.pageSize());
+                all.addAll(page.entries());
+            }
+            assertThat(all).as(sq.toString()).doesNotHaveDuplicates().isEqualTo(full);
+
+            HighLevelPage<HighLevelKey> beyond = readHighLevel(hq, q, totalPages + 1, sq.pageSize());
+            assertThat(beyond.entries()).as(sq + " beyond").isEmpty();
+            assertThat(beyond.totalRowCount()).as(sq + " beyond").isEqualTo(full.size());
+        }
+    }
+
+    private HighLevelPage<HighLevelKey> readHighLevel(HighLevelQuery hq, ReadQuery q, long page, int pageSize) {
+        return reader.readHighLevel(hq, q.highLevelRequest(AggregationLevel.L1, page, pageSize), (tx, keys) -> keys);
+    }
+
+    @Provide
+    Arbitrary<List<ProjectionItem>> highLevelHistory() {
+        return ReadGenerators.highLevelHistory();
     }
 
     private ProjectionPage read(Level0Query lq, ReadQuery q, long page, int pageSize) {

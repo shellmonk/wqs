@@ -14,9 +14,12 @@ import net.jqwik.api.Arbitraries;
 import net.jqwik.api.Arbitrary;
 import net.jqwik.api.Combinators;
 import net.jqwik.api.Tuple;
+import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
+import wqs.read.HighLevelFilter;
+import wqs.read.HighLevelRequest;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Request;
 
@@ -70,6 +73,15 @@ public final class ReadGenerators {
         public Level0Request request(long page, long pageSize) {
             return new Level0Request(filter(), transactionTypes, from, to, page, pageSize);
         }
+
+        /** The level-1/2 filter: product list and excludeCancelled; types never page at L1/L2 (spec 4.1 (b)). */
+        public HighLevelFilter highLevelFilter() {
+            return new HighLevelFilter(userId, productTypes, excludeCancelled);
+        }
+
+        public HighLevelRequest highLevelRequest(AggregationLevel level, long page, long pageSize) {
+            return new HighLevelRequest(view, level, highLevelFilter(), from, to, page, pageSize);
+        }
     }
 
     /** Product types the histories use, and one no item has. */
@@ -94,22 +106,23 @@ public final class ReadGenerators {
     /** A cancel of the item: its delay after the original and its place in arrival order. */
     private record CancelSpec(long delaySeconds, boolean beforeOriginal, int positionPick) {}
 
+    /** {@code session < 0}: unsessioned; otherwise the slot of the user's session it joins. */
     private record ItemSpec(
             long userId, TimeSpec time, SourceKind source, String[] product, CancelSpec cancel,
-            String detail, long amountCents) {}
+            String detail, long amountCents, int session) {}
 
     /** Users skewed {1: 60%, 2: 30%, 3: 10%}; user 4 never has data. */
     private static Arbitrary<Long> historyUsers() {
         return Arbitraries.frequency(Tuple.of(6, 1L), Tuple.of(3, 2L), Tuple.of(1, 3L));
     }
 
-    private static Arbitrary<TimeSpec> timeSpecs() {
+    private static Arbitrary<TimeSpec> timeSpecs(int boundary, int tie, int cluster) {
         Arbitrary<Integer> picks = Arbitraries.integers().between(0, 10_000);
         Arbitrary<Integer> seconds = Arbitraries.integers().between(0, 86_399);
         return Arbitraries.frequencyOf(
-                Tuple.of(15, picks.map(p -> new TimeSpec(TimeKind.BOUNDARY, p, 0))),
-                Tuple.of(15, picks.map(p -> new TimeSpec(TimeKind.TIE, p, 0))),
-                Tuple.of(70, Combinators.combine(picks, seconds)
+                Tuple.of(boundary, picks.map(p -> new TimeSpec(TimeKind.BOUNDARY, p, 0))),
+                Tuple.of(tie, picks.map(p -> new TimeSpec(TimeKind.TIE, p, 0))),
+                Tuple.of(cluster, Combinators.combine(picks, seconds)
                         .as((p, s) -> new TimeSpec(TimeKind.CLUSTER, p, s))));
     }
 
@@ -130,10 +143,10 @@ public final class ReadGenerators {
                 .as(CancelSpec::new);
     }
 
-    private static Arbitrary<ItemSpec> itemSpecs() {
+    private static Arbitrary<ItemSpec> itemSpecs(Arbitrary<TimeSpec> times, Arbitrary<Integer> sessions) {
         return Combinators.combine(
                         historyUsers(),
-                        timeSpecs(),
+                        times,
                         Arbitraries.frequency(
                                 Tuple.of(5, SourceKind.TRANSACTION),
                                 Tuple.of(2, SourceKind.CLAIMABLE_PRIZE),
@@ -145,7 +158,8 @@ public final class ReadGenerators {
                         Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(4)
                                 .map(c -> "{\"gameCode\": \"" + c + "\"}").injectNull(0.5),
                         // Never zero: a zero-amount item is locator-only (spec 4.1) and in no view.
-                        Arbitraries.longs().between(-50_000, 50_000).filter(cents -> cents != 0))
+                        Arbitraries.longs().between(-50_000, 50_000).filter(cents -> cents != 0),
+                        sessions)
                 .as(ItemSpec::new);
     }
 
@@ -164,7 +178,29 @@ public final class ReadGenerators {
     public static Arbitrary<List<ProjectionItem>> history() {
         return Combinators.combine(
                         denseDays(), denseDays(), denseDays(),
-                        itemSpecs().list().ofMinSize(20).ofMaxSize(125))
+                        itemSpecs(timeSpecs(15, 15, 70), Arbitraries.just(-1)).list().ofMinSize(20).ofMaxSize(125))
+                .as((d1, d2, d3, specs) -> build(Map.of(1L, d1, 2L, d2, 3L, d3), specs));
+    }
+
+    /** Session slots per user in {@link #highLevelHistory()}. */
+    private static final int SESSION_SLOTS = 10;
+
+    /**
+     * 20-150 items for level-1/2 paging: like {@link #history()}, but about half the
+     * transactions and claimable prizes join one of each user's {@value #SESSION_SLOTS} sessions
+     * ("u{user}-b{slot}"; payments never do), and times are tie-heavy -- month boundaries and
+     * reused instants -- so page-index rows share "occurredAt" across kinds (a session, kind 0,
+     * beside unsessioned items of kinds 1, 3 and 4) and within one kind, and the "kind" and
+     * "refId" tie-breaks decide page boundaries. Cancels carry no "batchId"; cancelling every
+     * live item of a session hides its row, so excludeCancelled filters sessions too.
+     */
+    public static Arbitrary<List<ProjectionItem>> highLevelHistory() {
+        Arbitrary<Integer> sessions = Arbitraries.frequencyOf(
+                Tuple.of(1, Arbitraries.just(-1)),
+                Tuple.of(1, Arbitraries.integers().between(0, SESSION_SLOTS - 1)));
+        return Combinators.combine(
+                        denseDays(), denseDays(), denseDays(),
+                        itemSpecs(timeSpecs(30, 35, 35), sessions).list().ofMinSize(20).ofMaxSize(125))
                 .as((d1, d2, d3, specs) -> build(Map.of(1L, d1, 2L, d2, 3L, d3), specs));
     }
 
@@ -175,10 +211,14 @@ public final class ReadGenerators {
         for (int i = 0; i < specs.size(); i++) {
             ItemSpec s = specs.get(i);
             Instant at = resolveTime(s, dense.get(s.userId()), originals);
+            // Payments are never sessioned (spec 7.4: an operator-only, unsessioned source).
+            String batchId = s.session() < 0 || s.source() == SourceKind.PAYMENT
+                    ? null : "u" + s.userId() + "-b" + s.session();
             originals.add(new ProjectionItem(
                     s.userId(), s.source(), "h" + i, at,
                     s.product() == null ? null : s.product()[0],
-                    s.product() == null ? null : s.product()[1], null, null,
+                    s.product() == null ? null : s.product()[1],
+                    batchId, batchId == null ? null : batchId + "-p" + (i % 2),
                     typeOf(s.source()), BigDecimal.valueOf(s.amountCents(), 4), "EUR", null, null,
                     s.detail()));
         }
