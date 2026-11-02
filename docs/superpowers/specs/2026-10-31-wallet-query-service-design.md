@@ -1475,8 +1475,8 @@ anything is broken, and it is the only failure whose impact is total.
 | O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
 | O-10 | How does a client select the eInstant view — explicit product ids, or a category parameter? | Required before the API contract is frozen |
 | O-11 | Gradle DSL: Kotlin or Groovy | Assumed Kotlin DSL |
-| O-14 | How is `/cc` authenticated/authorized? Today it is deny-by-default (`wqs.cc.access`, §9) | **Blocking before `/cc` is opened beyond a trusted network** |
 | O-12 | Do claimable prizes carry a `"batchId"`? Determines whether `/web` has a non-empty unsessioned set at all (§7.4) | Not for phase 1; required before level 1/2 on `/web` is correct |
+| O-14 | How is `/cc` authenticated/authorized? Today it is deny-by-default (`wqs.cc.access`, §9) | **Blocking before `/cc` is opened beyond a trusted network** |
 
 ---
 

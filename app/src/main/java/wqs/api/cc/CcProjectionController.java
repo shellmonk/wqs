@@ -14,7 +14,8 @@ import wqs.read.cc.CcProjectionService;
 
 /**
  * {@code GET /cc/v1/projection} (spec 7.1): the operator view, with {@code userId} a required
- * parameter. No authentication in this phase (D12, recorded as an open question).
+ * parameter. Deny-by-default: every request is 403 unless {@code wqs.cc.access=open} (spec 9);
+ * real authentication/authorization is open question O-14.
  */
 @RestController
 public class CcProjectionController {

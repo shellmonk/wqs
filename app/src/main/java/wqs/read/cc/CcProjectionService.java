@@ -9,8 +9,8 @@ import wqs.read.ProjectionReader;
 
 /**
  * The /cc read entry point. Composes the reader with {@link CcLevel0Query} only. {@code userId}
- * is the operator-supplied request parameter (spec 7.1); /cc has no authentication in this phase
- * (D12).
+ * is the operator-supplied request parameter (spec 7.1). /cc is deny-by-default via
+ * {@code wqs.cc.access} (spec 9); real authentication/authorization is open question O-14.
  */
 @Service
 public class CcProjectionService {
