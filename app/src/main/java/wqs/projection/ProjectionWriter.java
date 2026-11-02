@@ -75,6 +75,10 @@ public class ProjectionWriter {
 
         // Cancels that arrived before their original: the original is now projected (by this
         // batch), so they resolve. This is what makes ingestion order-independent (spec 6.3).
+        // A drained cancel that fails here fails the whole batch, and the consumer's per-item
+        // fallback then dead-letters the item that triggered the drain -- the ORIGINAL, not the
+        // cancel. That is why every expected mismatch (wrong source, wrong user) keeps a cancel
+        // parked rather than throwing.
         for (ProjectionItem parked : pendingCancelStore.drainFor(inserted)) {
             cancellationApplier.apply(parked);
         }

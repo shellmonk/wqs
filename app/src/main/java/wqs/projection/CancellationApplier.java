@@ -139,13 +139,21 @@ public class CancellationApplier {
         return true;
     }
 
-    /** The original, read from "wqCcItem" -- every source feeds /cc -- or null if not yet seen. */
+    /**
+     * The original, read from "wqCcItem" -- every source feeds /cc -- or null if not yet seen.
+     *
+     * The cancel's userId must match the original's: an item of another user is treated as not
+     * seen, so the cancel parks (and, since {@link PendingCancelStore#drainFor} matches on userId
+     * too, stays parked, surfacing through the oldest-age gauge). Throwing instead would fail the
+     * batch, and on the drain path dead-letter the innocent original.
+     */
     private WqCcItemRecord findOriginal(ProjectionItem cancel) {
         Record2<Long, OffsetDateTime> located = dsl
                 .select(WQ_ITEM_LOCATOR.userId, WQ_ITEM_LOCATOR.occurredAt)
                 .from(WQ_ITEM_LOCATOR)
                 .where(WQ_ITEM_LOCATOR.source.eq((short) cancel.source().code()),
-                       WQ_ITEM_LOCATOR.sourceId.eq(cancel.cancels()))
+                       WQ_ITEM_LOCATOR.sourceId.eq(cancel.cancels()),
+                       WQ_ITEM_LOCATOR.userId.eq(cancel.userId()))
                 .fetchOne();
         if (located == null) {
             return null;
@@ -173,10 +181,11 @@ public class CancellationApplier {
     private void lowerCancelledBy(ProjectionItem cancel, WqCcItemRecord original, SourceKind source) {
         for (ViewKind view : source.views()) {
             ItemTable t = ItemTable.of(view);
-            dsl.update(t.table())
+            int rows = dsl.update(t.table())
                     .set(t.cancelledBy(), DSL.least(t.cancelledBy(), DSL.val(cancel.sourceId())))
                     .where(t.identifies(original))
                     .execute();
+            requireOne(rows, "item row in " + view, original);
         }
     }
 

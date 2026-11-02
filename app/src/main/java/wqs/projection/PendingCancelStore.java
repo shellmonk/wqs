@@ -10,9 +10,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import org.jooq.DSLContext;
-import org.jooq.Row2;
+import org.jooq.Row3;
 import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import wqs.db.generated.tables.records.WqPendingCancelRecord;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
@@ -20,9 +22,11 @@ import wqs.domain.SourceKind;
 /**
  * Parks cancels whose target has not arrived, and hands them back when it does (spec 6.3).
  *
- * A cancel targets an item of its own source, so a parked cancel waits for
- * (cancel.source, cancel.cancels) -- never for the sourceId alone, which different sources may
- * share. Every field of the cancel is stored, so a drained cancel is the cancel that arrived.
+ * A cancel targets an item of its own source and its own user, so a parked cancel waits for
+ * (cancel.userId, cancel.source, cancel.cancels) -- never for the sourceId alone, which different
+ * sources may share. A cancel naming another user's item therefore never drains: it stays parked,
+ * visible through the oldest-age gauge, rather than failing the batch that delivers the original.
+ * Every field of the cancel is stored, so a drained cancel is the cancel that arrived.
  *
  * {@link #park} and {@link #drainFor} run inside the projection transaction (the writer supplies
  * it); the gauges' {@link #depth} and {@link #oldestParkedAt} read committed state.
@@ -37,6 +41,7 @@ public class PendingCancelStore {
     }
 
     /** Parks a cancel; parking the same cancel again is a no-op. */
+    @Transactional(propagation = Propagation.MANDATORY)
     public void park(ProjectionItem cancel) {
         if (!cancel.isCancellation()) {
             throw new IllegalArgumentException("not a cancellation: " + cancel.sourceId());
@@ -62,16 +67,19 @@ public class PendingCancelStore {
     /**
      * Removes and returns the parked cancels targeting any of {@code targets}, ordered by
      * (source, cancel sourceId) so the order they are applied in does not depend on storage.
+     * A cancel matches a target only when source, cancelled sourceId AND userId all agree.
      */
+    @Transactional(propagation = Propagation.MANDATORY)
     public List<ProjectionItem> drainFor(Set<ItemRef> targets) {
         if (targets.isEmpty()) {
             return List.of();
         }
-        List<Row2<Short, String>> keys = targets.stream()
-                .map(t -> DSL.row((short) t.source().code(), t.sourceId()))
+        List<Row3<Short, String, Long>> keys = targets.stream()
+                .map(t -> DSL.row((short) t.source().code(), t.sourceId(), t.userId()))
                 .toList();
         return dsl.deleteFrom(WQ_PENDING_CANCEL)
-                .where(DSL.row(WQ_PENDING_CANCEL.source, WQ_PENDING_CANCEL.cancelsSourceId)
+                .where(DSL.row(WQ_PENDING_CANCEL.source, WQ_PENDING_CANCEL.cancelsSourceId,
+                                WQ_PENDING_CANCEL.userId)
                         .in(keys))
                 .returning()
                 .fetch()

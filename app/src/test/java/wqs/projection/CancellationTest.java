@@ -15,6 +15,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
@@ -43,6 +44,7 @@ class CancellationTest extends PostgresTestBase {
     @Autowired private ProjectionWriter writer;
     @Autowired private PendingCancelStore pendingCancelStore;
     @Autowired private PartitionManager partitionManager;
+    @Autowired private TransactionTemplate transactionTemplate;
 
     private long offset;
 
@@ -198,6 +200,55 @@ class CancellationTest extends PostgresTestBase {
         ProjectionOracle.assertConsistent(dsl(), 1L);
     }
 
+    @Test
+    void two_cancels_in_either_order_record_the_smallest_cancel_id() {
+        apply(tx("t1", "b1", "p1"), tx("t2", "b1", "p2"));
+
+        apply(cancelOf("c1", "t1"));
+        apply(cancelOf("c2", "t1"));
+
+        // LEAST, not last-wins: c2 arrived last yet c1 is kept.
+        assertThat(cancelledBy("t1")).isEqualTo("c1");
+        assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
+        ProjectionOracle.assertConsistent(dsl(), 1L);
+    }
+
+    // --- R96: a cancel only resolves an original of its own user ---------------------------------
+
+    @Test
+    void a_cancel_from_another_user_stays_parked_and_changes_nothing() {
+        apply(tx("t1", "b1", "p1"));
+        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+
+        apply(cancelOfUser(2L, "c1", "t1"));
+
+        assertThat(pendingCancelStore.depth()).isEqualTo(1);
+        assertThat(pendingCancelStore.oldestParkedAt()).isPresent();
+        assertThat(cancelled(WEB, "t1")).isFalse();
+        ProjectionSnapshot after = ProjectionSnapshot.of(dsl());
+        // User 1's projection is untouched: rollups and page index are identical.
+        assertThat(after.sessions()).isEqualTo(before.sessions());
+        assertThat(after.plays()).isEqualTo(before.plays());
+        assertThat(after.webHighLevel()).isEqualTo(before.webHighLevel());
+        assertThat(after.ccHighLevel()).isEqualTo(before.ccHighLevel());
+        assertThat(cancelledBy("t1")).isNull();
+        ProjectionOracle.assertConsistent(dsl(), 1L);
+        ProjectionOracle.assertConsistent(dsl(), 2L);
+    }
+
+    @Test
+    void a_parked_cancel_from_another_user_is_not_drained_by_the_original() {
+        apply(cancelOfUser(2L, "c1", "t1"));
+
+        apply(tx("t1", "b1", "p1"));
+
+        assertThat(pendingCancelStore.depth()).isEqualTo(1);
+        assertThat(cancelled(WEB, "t1")).isFalse();
+        assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
+        assertThat(sessionVisible(WEB)).isTrue();
+        ProjectionOracle.assertConsistent(dsl(), 1L);
+    }
+
     // --- R86: resolution by (source, sourceId) ---------------------------------------------------
 
     @Test
@@ -240,8 +291,10 @@ class CancellationTest extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(cancel), 1L));
 
         // Same sourceId, wrong source: not a match.
-        assertThat(drain(SourceKind.TRANSACTION, "pay9")).isEmpty();
-        assertThat(drain(SourceKind.PAYMENT, "pay9")).containsExactly(cancel);
+        assertThat(drain(7L, SourceKind.TRANSACTION, "pay9")).isEmpty();
+        // Right source, wrong user: not a match either.
+        assertThat(drain(8L, SourceKind.PAYMENT, "pay9")).isEmpty();
+        assertThat(drain(7L, SourceKind.PAYMENT, "pay9")).containsExactly(cancel);
         assertThat(pendingCancelStore.depth()).isZero();
     }
 
@@ -425,8 +478,10 @@ class CancellationTest extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(items), ++offset));
     }
 
-    private List<ProjectionItem> drain(SourceKind source, String sourceId) {
-        return pendingCancelStore.drainFor(Set.of(new ItemRef(source, sourceId)));
+    private List<ProjectionItem> drain(long userId, SourceKind source, String sourceId) {
+        // drainFor joins the projection transaction (MANDATORY); supply one, as the writer does.
+        return transactionTemplate.execute(status ->
+                pendingCancelStore.drainFor(Set.of(new ItemRef(userId, source, sourceId))));
     }
 
     private ProjectionItem tx(String id, String batchId, String subBatchId) {
@@ -452,8 +507,12 @@ class CancellationTest extends PostgresTestBase {
     }
 
     private ProjectionItem cancelOf(String id, String cancels) {
+        return cancelOfUser(1L, id, cancels);
+    }
+
+    private ProjectionItem cancelOfUser(long userId, String id, String cancels) {
         return new ProjectionItem(
-                1L, SourceKind.TRANSACTION, id, T0.plusSeconds(120), 11, null, null,
+                userId, SourceKind.TRANSACTION, id, T0.plusSeconds(120), 11, null, null,
                 (short) 2, new BigDecimal("-5.0000"), "EUR", null, cancels, null);
     }
 
