@@ -32,6 +32,7 @@ dependencies {
     testAnnotationProcessor(libs.mapstruct.processor)
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation(libs.postgresql)
     testImplementation(libs.testcontainers.postgresql)
     testImplementation(libs.testcontainers.rabbitmq)
     testImplementation(libs.testcontainers.junit)
