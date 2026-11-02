@@ -52,6 +52,7 @@ class DeadLetterTest extends PostgresTestBase {
     @Autowired private DeadLetterStore deadLetterStore;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private StreamPayloadMapper payloadMapper;
+    @Autowired private wqs.db.TxTypeRegistry txTypes;
     @Autowired private ProjectionWriter writer;
     @Autowired private PartitionManager partitionManager;
     @Autowired private PlatformTransactionManager transactionManager;
@@ -119,7 +120,7 @@ class DeadLetterTest extends PostgresTestBase {
 
     @Test
     void the_dead_letter_row_survives_the_rolled_back_projection_transaction() {
-        ProjectionItem item = payloadMapper.toItem(payload("tx-x", WHEN));
+        ProjectionItem item = payloadMapper.toItem(payload("tx-x", WHEN), txTypes);
 
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             deadLetterStore.record(STREAM, 9L, item, new IllegalStateException("boom"), 3);
@@ -139,9 +140,7 @@ class DeadLetterTest extends PostgresTestBase {
         consumer.start();
 
         // A null amount cannot be mapped to a ProjectionItem.
-        StreamPayload unmappable = new StreamPayload(
-                "tx-unmappable", 7L, WHEN, 11, "b", "p", (short) 1,
-                null, "EUR", null, null, Map.of());
+        StreamPayload unmappable = new StreamPayload("tx-unmappable", 1, 7L, WHEN, "TT_BUY", "11", null, "b", "p", null, "EUR", null, null, java.util.Map.of());
         source.queue(unmappable, 1);
         source.queue(payload("tx-2", WHEN), 2);
         source.deliverAll(); // must not throw
@@ -442,8 +441,7 @@ class DeadLetterTest extends PostgresTestBase {
 
     @Test
     void a_nul_in_an_unmappable_payload_or_its_error_text_still_yields_a_row() {
-        StreamPayload unmappable = new StreamPayload(
-                "tx\u0000x", 7L, WHEN, 11, null, null, (short) 1, null, "EUR", null, null, Map.of());
+        StreamPayload unmappable = new StreamPayload("tx\u0000x", 1, 7L, WHEN, "TT_BUY", "11", null, null, null, null, "EUR", null, null, java.util.Map.of());
 
         deadLetterStore.record(STREAM, 3L, unmappable, new IllegalArgumentException("bad \u0000 text"), 1);
 
@@ -465,7 +463,7 @@ class DeadLetterTest extends PostgresTestBase {
         return new StreamConsumer(
                 source,
                 new StreamProperties(true, STREAM, batchSize, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
-                payloadMapper, w, offsetStore, registry, clock, store);
+                payloadMapper, txTypes, w, offsetStore, registry, clock, store);
     }
 
     private static Clock fixedClock() {
@@ -473,9 +471,7 @@ class DeadLetterTest extends PostgresTestBase {
     }
 
     private static StreamPayload payload(String id, Instant at) {
-        return new StreamPayload(
-                id, 7L, at, 11, "b", "p", (short) 1,
-                new BigDecimal("5.0000"), "EUR", null, null, Map.of());
+        return new StreamPayload(id, 1, 7L, at, "TT_BUY", "11", null, "b", "p", new BigDecimal("5.0000"), "EUR", null, null, java.util.Map.of());
     }
 
     private int count() {

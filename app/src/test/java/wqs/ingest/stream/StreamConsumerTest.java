@@ -37,6 +37,7 @@ class StreamConsumerTest extends PostgresTestBase {
     @Autowired private ProjectionWriter writer;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private StreamPayloadMapper payloadMapper;
+    @Autowired private wqs.db.TxTypeRegistry txTypes;
     @Autowired private PartitionManager partitionManager;
     @Autowired private wqs.ingest.DeadLetterStore deadLetterStore;
 
@@ -105,7 +106,7 @@ class StreamConsumerTest extends PostgresTestBase {
         MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
         StreamConsumer consumer = new StreamConsumer(
                 source, new StreamProperties(true, "wallet-transactions", 10, Duration.ofMillis(200), 3, null, null),
-                payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
+                payloadMapper, txTypes, writer, offsetStore, registry, clock, deadLetterStore);
         var gauge = registry.find("wqs.ingest.lag.seconds").gauge();
         assertThat(gauge.value()).isNaN();
 
@@ -121,7 +122,7 @@ class StreamConsumerTest extends PostgresTestBase {
         MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
         new StreamConsumer(
                 source, new StreamProperties(true, "wallet-transactions", 10, Duration.ofMillis(200), 3, null, null),
-                payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
+                payloadMapper, txTypes, writer, offsetStore, registry, clock, deadLetterStore);
         var gauge = registry.find("wqs.ingest.stream.offset.lag").gauge();
         assertThat(gauge.value()).isNaN(); // fake source: head unknown
 
@@ -226,21 +227,19 @@ class StreamConsumerTest extends PostgresTestBase {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);
         return new StreamConsumer(
-                source, properties, payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
+                source, properties, payloadMapper, txTypes, writer, offsetStore, registry, clock, deadLetterStore);
     }
 
     private StreamConsumer consumer(int batchSize, Duration maxWait) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, maxWait, 3, null, null);
         return new StreamConsumer(
-                source, properties, payloadMapper, writer, offsetStore, registry,
+                source, properties, payloadMapper, txTypes, writer, offsetStore, registry,
                 Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
     }
 
     private StreamPayload payload(String id) {
-        return new StreamPayload(
-                id, 7L, WHEN, 11, "b-1", "p-1", (short) 1,
-                new BigDecimal("5.0000"), "EUR", null, null, java.util.Map.of());
+        return new StreamPayload(id, 1, 7L, WHEN, "TT_BUY", "11", null, "b-1", "p-1", new BigDecimal("5.0000"), "EUR", null, null, java.util.Map.of());
     }
 
     private int count(String table) {

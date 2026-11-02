@@ -5,25 +5,36 @@ import java.time.Instant;
 import java.util.Map;
 
 /**
- * Wire shape of a stream message, limited to the fields known today. The full list is open
- * (O-13); everything not yet enumerated arrives in {@code extra} and is projected into
- * "detail" jsonb, to be promoted to real columns only if it needs indexing or filtering.
+ * A decoded {@code walAccountTransactions} stream message (spec 4.1). Only the fields the
+ * projection uses are kept; the rest of the wire message is dropped, never carried along.
+ *
+ * <p>{@code userType} and {@code userId} come from {@code userContext.ownerId} =
+ * {@code "{userType}-{userId}"}; deciding what to do with a non-player owner is the projection's
+ * job, not the decoder's. {@code type} is the wire code ({@code TT_BUY}); the mapper turns it
+ * into a "wqTxType" id. {@code transactionReference} is the raw {@code references.transactionReference}
+ * -- the producer self-references when there is no link, so it is only a cancel target per the
+ * mapper's rule.
+ *
+ * <p>{@code detail} holds only the allowlisted fields (plan D9), under dotted keys such as
+ * {@code accountContext.accountType}. It is never "the rest of the message".
  */
 public record StreamPayload(
-        String transactionId,
+        String id,
+        int userType,
         long userId,
-        Instant occurredAt,
-        Integer productId,
+        Instant created,
+        String type,
+        String productId,
+        String productType,
         String batchId,
         String subBatchId,
-        short type,
         BigDecimal amount,
         String currency,
-        BigDecimal balanceAfter,
-        String cancelsTransactionId,
-        Map<String, String> extra) {
+        BigDecimal totalPostBalance,
+        String transactionReference,
+        Map<String, String> detail) {
 
     public StreamPayload {
-        extra = extra == null ? Map.of() : Map.copyOf(extra);
+        detail = detail == null ? Map.of() : Map.copyOf(detail);
     }
 }

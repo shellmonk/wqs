@@ -19,6 +19,7 @@ import wqs.ingest.DeadLetterStore;
 import wqs.metrics.CachedGaugeValue;
 import wqs.projection.ProjectionBatch;
 import wqs.projection.ProjectionWriter;
+import wqs.db.TxTypeRegistry;
 import wqs.projection.StreamPayloadMapper;
 import wqs.projection.WriteResult;
 
@@ -47,6 +48,7 @@ public class StreamConsumer {
     private final StreamSource source;
     private final StreamProperties properties;
     private final StreamPayloadMapper payloadMapper;
+    private final TxTypeRegistry txTypes;
     private final ProjectionWriter writer;
     private final StreamOffsetStore offsetStore;
     private final MeterRegistry registry;
@@ -75,6 +77,7 @@ public class StreamConsumer {
             StreamSource source,
             StreamProperties properties,
             StreamPayloadMapper payloadMapper,
+            TxTypeRegistry txTypes,
             ProjectionWriter writer,
             StreamOffsetStore offsetStore,
             MeterRegistry registry,
@@ -83,6 +86,7 @@ public class StreamConsumer {
         this.source = source;
         this.properties = properties;
         this.payloadMapper = payloadMapper;
+        this.txTypes = txTypes;
         this.writer = writer;
         this.offsetStore = offsetStore;
         this.registry = registry;
@@ -192,7 +196,7 @@ public class StreamConsumer {
         try {
             ProjectionItem item;
             try {
-                item = payloadMapper.toItem(payload);
+                item = payloadMapper.toItem(payload, txTypes);
             } catch (RuntimeException e) {
                 deadLetterUnmappable(payload, offset, e);
                 return;
@@ -218,7 +222,7 @@ public class StreamConsumer {
      */
     private void deadLetterUnmappable(StreamPayload payload, long offset, RuntimeException cause) {
         log.error("Cannot map event {} at offset {}; dead-lettering it",
-                payload.transactionId(), offset, cause);
+                payload.id(), offset, cause);
         deadLetterStore.record(properties.name(), offset, payload, cause, 1);
         afterDeadLetter(offset);
     }

@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.core.type.AnnotationMetadata;
 import wqs.ingest.DeadLetterStore;
 import wqs.projection.ProjectionWriter;
+import wqs.db.TxTypeRegistry;
 import wqs.projection.StreamPayloadMapper;
 
 /**
@@ -42,13 +43,14 @@ public class StreamConfig {
             StreamSource source,
             StreamProperties properties,
             StreamPayloadMapper payloadMapper,
+            TxTypeRegistry txTypes,
             ProjectionWriter writer,
             StreamOffsetStore offsetStore,
             MeterRegistry registry,
             Clock clock,
             DeadLetterStore deadLetterStore) {
         return new StreamConsumer(
-                source, properties, payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
+                source, properties, payloadMapper, txTypes, writer, offsetStore, registry, clock, deadLetterStore);
     }
 
     @Bean

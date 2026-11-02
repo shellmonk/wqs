@@ -45,8 +45,8 @@ import wqs.db.PostgresTestBase;
  * offset 0 and the 4th is offset 3. The producer confirmation does not expose the offset, so the
  * test asserts the stored offset equals 3.
  *
- * The stream protocol has no claimable-prize wire type: StreamPayloadMapper always maps to
- * TRANSACTION, so the three valid events are transactions (two in one session, one outside).
+ * Events use the real walAccountTransactions format (spec 4.1); one is the recorded PRIZE sample
+ * with a non-zero amount. The three valid events are transactions (two in one session, one outside).
  */
 @Tag("broker")
 @SpringBootTest
@@ -115,11 +115,31 @@ class StreamEndToEndTest extends PostgresTestBase {
         assertThat(confirmed.await(10, TimeUnit.SECONDS)).as("broker confirm").isTrue();
     }
 
-    private static String event(String id, String at, int type, String amount, String batch) {
-        return "{\"transactionId\":\"" + id + "\",\"userId\":" + USER + ",\"occurredAt\":\"" + at
-                + "\",\"productId\":11,"
-                + (batch == null ? "" : "\"batchId\":\"" + batch + "\",")
-                + "\"type\":" + type + ",\"amount\":" + amount + ",\"currency\":\"EUR\"}";
+    /** A real-format TT_BUY event (nested walAccountTransactions shape), optionally in a session. */
+    private static String event(String id, String at, String type, String amount, String batch) {
+        return "{\"id\":\"" + id + "\",\"type\":\"" + type + "\","
+                + "\"amount\":{\"amount\":" + amount + ",\"currency\":\"EUR\"},"
+                + "\"productId\":\"TIKIKALACABANA\",\"productType\":\"instants\","
+                + "\"userContext\":{\"ownerId\":\"1-" + USER + "\"},"
+                + "\"batchContext\":{\"batchId\":\"" + (batch == null ? "" : batch) + "\"},"
+                + "\"createdContext\":{\"created\":\"" + at + "\"}}";
+    }
+
+    /** The recorded PRIZE sample, with a non-zero amount (a zero-amount item is not projected), our user and an in-range date. */
+    private static String prizeSample(String id, String batch, String amount) throws java.io.IOException {
+        try (var in = StreamEndToEndTest.class.getResourceAsStream("/stream/prize-zero.json")) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8)
+                    .replace("\"id\": \"5922\"", "\"id\": \"" + id + "\"")
+                    .replace("\"amount\": 0,", "\"amount\": " + amount + ",")
+                    .replace("\"ownerId\": \"1-1945\"", "\"ownerId\": \"1-" + USER + "\"")
+                    .replace("GS-ur5z5sgfr5de5flhjd6ycryf6u", batch)
+                    .replace("\"created\": \"2026-10-26T11:36:23.049062Z\"", "\"created\": \"2033-09-02T12:05:00Z\"");
+        }
+    }
+
+    private static short typeId(String code) {
+        return dsl().fetchOne("select \"typeId\" from \"wqTxType\" where \"code\" = '" + code + "'")
+                .get(0, Short.class);
     }
 
     private static long count(String sql) {
@@ -129,10 +149,10 @@ class StreamEndToEndTest extends PostgresTestBase {
     @Test
     @Order(1)
     void published_events_reach_tables_and_offset() throws Exception {
-        publish(event("e2e-1", "2033-09-02T12:00:00Z", 1, "5.0000", "e2e-s1"));
-        publish(event("e2e-2", "2033-09-02T12:05:00Z", 2, "8.0000", "e2e-s1"));
+        publish(event("e2e-1", "2033-09-02T12:00:00Z", "TT_BUY", "5.0000", "e2e-s1"));
+        publish(prizeSample("e2e-2", "e2e-s1", "8"));
         publish("not json");
-        publish(event("e2e-3", "2033-09-03T09:00:00Z", 1, "2.0000", null));
+        publish(event("e2e-3", "2033-09-03T09:00:00Z", "TT_BUY", "2.0000", null));
 
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             assertThat(count("select count(*) from \"wqWebItem\" where \"userId\" = " + USER))
@@ -143,6 +163,15 @@ class StreamEndToEndTest extends PostgresTestBase {
             assertThat(count("select \"offsetVal\" from \"wqStreamOffset\" where \"stream\" = '"
                     + STREAM + "'")).isEqualTo(3);
         });
+
+        // The real PRIZE sample landed as a row of the right type, product and session.
+        var prize = dsl().fetchOne("select \"type\", \"productId\", \"productType\", \"batchId\", \"amount\""
+                + " from \"wqWebItem\" where \"sourceId\" = 'e2e-2'");
+        assertThat(prize.get("type", Short.class)).isEqualTo(typeId("PRIZE"));
+        assertThat(prize.get("productId", String.class)).isEqualTo("TIKIKALACABANA");
+        assertThat(prize.get("productType", String.class)).isEqualTo("instants");
+        assertThat(prize.get("batchId", String.class)).isEqualTo("e2e-s1");
+        assertThat(prize.get("amount", java.math.BigDecimal.class)).isEqualByComparingTo("8");
 
         mvc.perform(get("/cc/v1/projection").param("userId", String.valueOf(USER))
                         .param("from", "2033-01-01T00:00:00Z").param("to", "2034-01-01T00:00:00Z")
@@ -157,7 +186,7 @@ class StreamEndToEndTest extends PostgresTestBase {
     void restart_resumes_after_the_stored_offset() throws Exception {
         double duplicatesBefore = duplicates();
         lifecycle.stop();
-        publish(event("e2e-4", "2033-09-04T10:00:00Z", 1, "1.0000", null));
+        publish(event("e2e-4", "2033-09-04T10:00:00Z", "TT_BUY", "1.0000", null));
         lifecycle.start();
 
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->

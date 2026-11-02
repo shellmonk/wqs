@@ -77,9 +77,7 @@ class StreamWiringTest extends PostgresTestBase {
         assertThat(source.subscribedFrom()).isZero();
 
         // One event never reaches the size threshold; only the scheduled poll can flush it.
-        source.queue(new StreamPayload(
-                "tx-wired", 7L, WHEN, 11, "b", "p", (short) 1,
-                new BigDecimal("5.0000"), "EUR", null, null, Map.of()), 0);
+        source.queue(new StreamPayload("tx-wired", 1, 7L, WHEN, "TT_BUY", "11", null, "b", "p", new BigDecimal("5.0000"), "EUR", null, null, java.util.Map.of()), 0);
         source.deliverAll();
 
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {

@@ -1,0 +1,43 @@
+{
+    "id": "5962",
+    "type": "TT_TRANSFER_OUT",
+    "amount": {
+        "amount": -12,
+        "currency": "EUR",
+        "reservedAmount": 0,
+        "nonWithdrawableAmount": 0
+    },
+    "account": "AT_MAIN-0",
+    "subtype": "",
+    "monetary": true,
+    "productId": "",
+    "references": {
+        "claimId": "",
+        "extTrxId": "",
+        "paymentId": "6429",
+        "extSystemId": "",
+        "transactionReference": "5962"
+    },
+    "description": "",
+    "userContext": {
+        "ownerId": "1-1717",
+        "issuerId": "1-1717"
+    },
+    "batchContext": {
+        "batchId": "",
+        "batchEnded": false,
+        "subBatchId": ""
+    },
+    "toDescription": "WITHDRAWAL*5208",
+    "accountContext": {
+        "accountType": "AT_MAIN",
+        "accountNumber": "0"
+    },
+    "createdContext": {
+        "issued": "2026-10-29T11:22:04.465648Z",
+        "channel": "WEB",
+        "created": "2026-10-29T11:22:04.465648Z"
+    },
+    "fromDescription": "AT_MAIN",
+    "totalPostBalance": 178
+}

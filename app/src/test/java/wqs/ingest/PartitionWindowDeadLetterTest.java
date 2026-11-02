@@ -46,6 +46,7 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
     @Autowired private DeadLetterStore deadLetterStore;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private StreamPayloadMapper payloadMapper;
+    @Autowired private wqs.db.TxTypeRegistry txTypes;
     @Autowired private ProjectionWriter writer;
 
     @BeforeEach
@@ -60,14 +61,13 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
         StreamConsumer consumer = new StreamConsumer(
                 source,
                 new StreamProperties(true, STREAM, 1, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
-                payloadMapper, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
+                payloadMapper, txTypes, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
                 deadLetterStore);
         consumer.start();
         // +14 rather than +13 so a month boundary passing mid-test cannot bring it into the window.
         Instant farAhead = YearMonth.now(ZoneOffset.UTC).plusMonths(14).atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
 
-        source.queue(new StreamPayload("tx-garbage-date", 7L, farAhead, 11, null, null, (short) 1,
-                new BigDecimal("1.0000"), "EUR", null, null, Map.of()), 4);
+        source.queue(new StreamPayload("tx-garbage-date", 1, 7L, farAhead, "TT_BUY", "11", null, null, null, new BigDecimal("1.0000"), "EUR", null, null, java.util.Map.of()), 4);
         source.deliverAll();
 
         assertThat(dsl().fetchOne("select \"sourceId\", \"error\" from \"wqDeadLetter\"").intoMap())
@@ -83,13 +83,12 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
         StreamConsumer consumer = new StreamConsumer(
                 source,
                 new StreamProperties(true, STREAM, 1, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
-                payloadMapper, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
+                payloadMapper, txTypes, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
                 deadLetterStore);
         consumer.start();
         int partitionsBefore = partitionCount();
 
-        source.queue(new StreamPayload("tx-before-floor", 7L, Instant.parse("2015-05-20T00:00:00Z"), 11,
-                null, null, (short) 1, new BigDecimal("1.0000"), "EUR", null, null, Map.of()), 9);
+        source.queue(new StreamPayload("tx-before-floor", 1, 7L, Instant.parse("2015-05-20T00:00:00Z"), "TT_BUY", "11", null, null, null, new BigDecimal("1.0000"), "EUR", null, null, java.util.Map.of()), 9);
         source.deliverAll();
 
         assertThat(dsl().fetchOne("select \"sourceId\", \"error\" from \"wqDeadLetter\"").intoMap())

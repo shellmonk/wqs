@@ -1,21 +1,22 @@
 package wqs.ingest.stream;
 
-import wqs.projection.source.StreamPayload;
-
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
+import wqs.projection.source.StreamPayload;
 
+/** The real walAccountTransactions format (spec 4.1): golden samples plus the strictness rules. */
 class StreamPayloadJsonTest {
-
-    private static final String BASE =
-            "\"transactionId\":\"tx-1\",\"userId\":7,\"occurredAt\":\"2033-09-02T12:00:00Z\","
-                    + "\"type\":1,\"amount\":0.1000,\"currency\":\"EUR\"";
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -23,203 +24,255 @@ class StreamPayloadJsonTest {
         return RabbitStreamSource.parse(mapper, json.getBytes(StandardCharsets.UTF_8));
     }
 
-    @Test
-    void parses_known_fields_with_iso_instant_and_exact_decimal() {
-        StreamPayload p = parse("{" + BASE + ",\"productId\":11,\"balanceAfter\":12.50}");
-
-        assertThat(p.transactionId()).isEqualTo("tx-1");
-        assertThat(p.userId()).isEqualTo(7L);
-        assertThat(p.occurredAt()).isEqualTo(Instant.parse("2033-09-02T12:00:00Z"));
-        assertThat(p.type()).isEqualTo((short) 1);
-        assertThat(p.amount()).isEqualTo(new BigDecimal("0.1000"));
-        assertThat(p.amount().scale()).isEqualTo(4);
-        assertThat(p.balanceAfter()).isEqualTo(new BigDecimal("12.50"));
-        assertThat(p.productId()).isEqualTo(11);
-        assertThat(p.extra()).isEmpty();
+    private static String resource(String name) {
+        try (var in = StreamPayloadJsonTest.class.getResourceAsStream("/stream/" + name)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Test
-    void unknown_scalar_and_object_fields_land_in_extra() {
-        StreamPayload p = parse("{" + BASE + ",\"channel\":\"web\",\"n\":5,\"meta\":{\"a\":1}}");
+    void tt_transfer_out_sample_decodes() {
+        StreamPayload p = parse(resource("tt-transfer-out.json"));
 
-        assertThat(p.extra())
-                .containsEntry("channel", "web")
-                .containsEntry("n", "5")
-                .containsEntry("meta", "{\"a\":1}")
-                .hasSize(3);
-    }
-
-    @Test
-    void null_unknown_fields_are_skipped() {
-        StreamPayload p = parse("{" + BASE + ",\"channel\":null}");
-
-        assertThat(p.extra()).isEmpty();
-    }
-
-    @Test
-    void missing_optional_fields_are_null() {
-        StreamPayload p = parse("{" + BASE + ",\"batchId\":null}");
-
+        assertThat(p.id()).isEqualTo("5962");
+        assertThat(p.userType()).isEqualTo(1);
+        assertThat(p.userId()).isEqualTo(1717L);
+        assertThat(p.created()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
+        assertThat(p.type()).isEqualTo("TT_TRANSFER_OUT");
+        assertThat(p.amount()).isEqualByComparingTo("-12");
+        assertThat(p.currency()).isEqualTo("EUR");
+        assertThat(p.totalPostBalance()).isEqualByComparingTo("178");
         assertThat(p.productId()).isNull();
+        assertThat(p.productType()).isNull();
         assertThat(p.batchId()).isNull();
         assertThat(p.subBatchId()).isNull();
-        assertThat(p.balanceAfter()).isNull();
-        assertThat(p.cancelsTransactionId()).isNull();
+        assertThat(p.transactionReference()).isEqualTo("5962");
+        assertThat(p.detail())
+                .containsEntry("references.paymentId", "6429")
+                .containsEntry("toDescription", "WITHDRAWAL*5208")
+                .containsEntry("fromDescription", "AT_MAIN")
+                .containsEntry("account", "AT_MAIN-0")
+                .containsEntry("accountContext.accountType", "AT_MAIN")
+                .containsEntry("accountContext.accountNumber", "0")
+                .containsEntry("monetary", "true")
+                .containsEntry("createdContext.channel", "WEB")
+                .containsEntry("createdContext.issued", "2026-10-29T11:22:04.465648Z")
+                .containsEntry("batchContext.batchEnded", "false")
+                .containsEntry("amount.reservedAmount", "0")
+                .containsEntry("amount.nonWithdrawableAmount", "0")
+                .doesNotContainKey("totalPostBalance")
+                .doesNotContainKey("references.claimId")   // empty strings are dropped
+                .doesNotContainKey("subtype");
+    }
+
+    @Test
+    void prize_zero_sample_decodes() {
+        StreamPayload p = parse(resource("prize-zero.json"));
+
+        assertThat(p.id()).isEqualTo("5922");
+        assertThat(p.userType()).isEqualTo(1);
+        assertThat(p.userId()).isEqualTo(1945L);
+        assertThat(p.type()).isEqualTo("PRIZE");
+        assertThat(p.productId()).isEqualTo("TIKIKALACABANA");
+        assertThat(p.productType()).isEqualTo("instants");
+        assertThat(p.batchId()).isEqualTo("GS-ur5z5sgfr5de5flhjd6ycryf6u");
+        assertThat(p.subBatchId()).isEqualTo("PS-62pflumf4bcz7jdtfc3wl5yqfm");
+        assertThat(p.amount()).isEqualByComparingTo("0");
+        assertThat(p.created()).isEqualTo(Instant.parse("2026-10-26T11:36:23.049062Z"));
+        assertThat(p.detail())
+                .containsEntry("description", "Payout Play Step")
+                .containsEntry("references.extTrxId", "PS-62pflumf4bcz7jdtfc3wl5yqfm-1-prize")
+                .containsEntry("references.extSystemId", "PDS")
+                .containsEntry("batchContext.batchEnded", "true")
+                .containsEntry("createdContext.issued", "2026-10-26T11:36:17.357Z");
+    }
+
+    @Test
+    void unknown_top_level_field_is_not_in_detail() {
+        StreamPayload p = parse(with("cardNumber", "\"4111111111111111\"", "nested", "{\"secret\":\"x\"}"));
+
+        assertThat(p.detail()).isEmpty();
+        assertThat(p.detail().toString()).doesNotContain("4111").doesNotContain("secret");
+    }
+
+    @Test
+    void an_unknown_field_inside_an_allowlisted_object_is_not_in_detail() {
+        StreamPayload p = parse(with("accountContext.iban", "\"DE00\"", "accountContext.accountType", "\"AT_MAIN\""));
+
+        assertThat(p.detail()).containsOnlyKeys("accountContext.accountType");
+    }
+
+    @Test
+    void owner_id_other_than_player_decodes() {
+        StreamPayload p = parse(with("userContext.ownerId", "\"3-77\""));
+
+        assertThat(p.userType()).isEqualTo(3);
+        assertThat(p.userId()).isEqualTo(77L);
+    }
+
+    @Test
+    void owner_id_without_dash_is_poison() {
+        assertThatThrownBy(() -> parse(with("userContext.ownerId", "\"1717\"")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ownerId");
+    }
+
+    @Test
+    void non_numeric_owner_is_poison() {
+        for (String bad : new String[] {"\"x-1\"", "\"1-y\"", "\"-1\"", "\"1-\"", "\"1--5\"", "\"1-+5\"",
+                "\"1-1.5\"", "\"1- 5\"", "\"\"", "\"1-9223372036854775808\"",
+                "\"2147483648-1\"", "\"1-" + "9".repeat(5000) + "\""}) {
+            assertThatThrownBy(() -> parse(with("userContext.ownerId", bad)))
+                    .as("ownerId=" + bad.substring(0, Math.min(30, bad.length())))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ownerId");
+        }
+        assertThat(parse(with("userContext.ownerId", "\"1-9223372036854775807\"")).userId())
+                .isEqualTo(Long.MAX_VALUE);
+    }
+
+    @Test
+    void non_string_owner_id_is_poison() {
+        for (String bad : new String[] {"1717", "{}", "true", "[]"}) {
+            assertThatThrownBy(() -> parse(with("userContext.ownerId", bad)))
+                    .as(bad).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ownerId");
+        }
     }
 
     @Test
     void missing_required_field_names_the_field() {
-        String json = "{\"transactionId\":\"tx-1\",\"userId\":7,"
-                + "\"occurredAt\":\"2033-09-02T12:00:00Z\",\"type\":1,\"currency\":\"EUR\"}";
-
-        assertThatThrownBy(() -> parse(json))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("amount");
-    }
-
-    /** The valid base message with the given fields (raw JSON values) overridden. */
-    private static String with(String field, String jsonValue, String... more) {
-        java.util.Map<String, String> fields = new java.util.LinkedHashMap<>();
-        fields.put("transactionId", "\"tx-1\"");
-        fields.put("userId", "7");
-        fields.put("occurredAt", "\"2033-09-02T12:00:00Z\"");
-        fields.put("type", "1");
-        fields.put("amount", "1.0000");
-        fields.put("currency", "\"EUR\"");
-        fields.put(field, jsonValue);
-        for (int k = 0; k < more.length; k += 2) {
-            fields.put(more[k], more[k + 1]);
+        for (String path : new String[] {
+                "id", "type", "userContext.ownerId", "createdContext.created", "amount.amount", "amount.currency",
+                "userContext", "createdContext", "amount"}) {
+            assertThatThrownBy(() -> parse(without(path)))
+                    .as(path).isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(path.substring(path.lastIndexOf('.') + 1));
         }
-        return fields.entrySet().stream()
-                .map(e -> "\"" + e.getKey() + "\":" + e.getValue())
-                .collect(java.util.stream.Collectors.joining(",", "{", "}"));
     }
 
     @Test
-    void integral_fields_accept_integral_numbers_and_integral_text() {
-        StreamPayload p = parse(with("userId", "\"42\"", "type", "\"3\""));
-
-        assertThat(p.userId()).isEqualTo(42L);
-        assertThat(p.type()).isEqualTo((short) 3);
-    }
-
-    @Test
-    void non_integral_or_non_numeric_integral_fields_are_rejected_naming_the_field() {
-        for (String bad : new String[] {"\"abc\"", "1.5", "true", "[]", "{}", "\"\"", "7.0"}) {
-            assertThatThrownBy(() -> parse(with("userId", bad)))
-                    .as("userId=" + bad)
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("userId");
+    void context_objects_must_be_objects() {
+        for (String path : new String[] {"userContext", "createdContext", "amount", "batchContext", "references"}) {
+            assertThatThrownBy(() -> parse(with(path, "\"x\"")))
+                    .as(path).isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(path);
         }
-        assertThatThrownBy(() -> parse(with("productId", "\"x\"")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("productId");
-        assertThatThrownBy(() -> parse(with("type", "false")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("type");
     }
 
     @Test
-    void integral_fields_out_of_range_are_rejected_never_truncated() {
-        assertThatThrownBy(() -> parse(with("type", "65536")))   // would wrap to 0 as a short
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("type");
-        assertThatThrownBy(() -> parse(with("type", "32768")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("type");
-        assertThatThrownBy(() -> parse(with("productId", "4294967296")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("productId");
-        assertThatThrownBy(() -> parse(with("userId", "9223372036854775808")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("userId");
-        assertThatThrownBy(() -> parse(with("userId", "\"" + "9".repeat(5000) + "\"")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("userId");
-        assertThat(parse(with("type", "32767")).type()).isEqualTo(Short.MAX_VALUE);
-        assertThat(parse(with("userId", "9223372036854775807")).userId()).isEqualTo(Long.MAX_VALUE);
+    void optional_fields_may_be_absent_or_null() {
+        StreamPayload p = parse(without("productId", "productType", "batchContext", "references", "totalPostBalance"));
+
+        assertThat(p.productId()).isNull();
+        assertThat(p.batchId()).isNull();
+        assertThat(p.subBatchId()).isNull();
+        assertThat(p.transactionReference()).isNull();
+        assertThat(p.totalPostBalance()).isNull();
+        StreamPayload n = parse(with("productId", "null", "batchContext.batchId", "null"));
+        assertThat(n.productId()).isNull();
+        assertThat(n.batchId()).isNull();
     }
 
     @Test
-    void occurred_at_parse_failures_name_the_field() {
-        assertThatThrownBy(() -> parse(with("occurredAt", "\"yesterday\"")))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("occurredAt");
-        assertThatThrownBy(() -> parse(with("occurredAt", "12345")))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("occurredAt");
+    void parses_iso_instant_and_exact_decimal() {
+        StreamPayload p = parse(with("amount.amount", "0.1000", "totalPostBalance", "12.50"));
+
+        assertThat(p.created()).isEqualTo(Instant.parse("2033-09-02T12:00:00Z"));
+        assertThat(p.amount()).isEqualTo(new BigDecimal("0.1000"));
+        assertThat(p.amount().scale()).isEqualTo(4);
+        assertThat(p.totalPostBalance()).isEqualTo(new BigDecimal("12.50"));
+    }
+
+    @Test
+    void created_parse_failures_name_the_field() {
+        assertThatThrownBy(() -> parse(with("createdContext.created", "\"yesterday\"")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("created");
+        assertThatThrownBy(() -> parse(with("createdContext.created", "12345")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("created");
     }
 
     @Test
     void money_within_numeric_20_4_is_accepted_at_the_edges() {
-        assertThat(parse(with("amount", "9999999999999999.9999")).amount())
+        assertThat(parse(with("amount.amount", "9999999999999999.9999")).amount())
                 .isEqualTo(new BigDecimal("9999999999999999.9999"));
-        assertThat(parse(with("amount", "\"-9999999999999999.9999\"")).amount())
+        assertThat(parse(with("amount.amount", "\"-9999999999999999.9999\"")).amount())
                 .isEqualTo(new BigDecimal("-9999999999999999.9999"));
-        // Trailing zeros beyond scale 4 are exactly representable, so not a violation.
-        assertThat(parse(with("amount", "\"1.50000\"")).amount()).isEqualByComparingTo("1.5");
+        assertThat(parse(with("amount.amount", "\"1.50000\"")).amount()).isEqualByComparingTo("1.5");
     }
 
     @Test
     void money_with_too_many_decimals_or_digits_is_rejected_naming_the_field() {
-        assertThatThrownBy(() -> parse(with("amount", "0.00001")))
+        assertThatThrownBy(() -> parse(with("amount.amount", "0.00001")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("amount");
-        assertThatThrownBy(() -> parse(with("amount", "\"1.23456\"")))
+        assertThatThrownBy(() -> parse(with("amount.amount", "\"1.23456\"")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("amount");
-        assertThatThrownBy(() -> parse(with("amount", "10000000000000000")))   // 17 integer digits
+        assertThatThrownBy(() -> parse(with("amount.amount", "10000000000000000")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("amount");
-        assertThatThrownBy(() -> parse(with("balanceAfter", "\"-10000000000000000.0\"")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("balanceAfter");
+        assertThatThrownBy(() -> parse(with("totalPostBalance", "\"-10000000000000000.0\"")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("totalPostBalance");
     }
 
     @Test
     void money_exponent_bombs_and_oversized_text_are_rejected_without_expanding() {
-        assertThatThrownBy(() -> parse(with("amount", "1e999999999")))
+        assertThatThrownBy(() -> parse(with("amount.amount", "1e999999999")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("amount");
-        assertThatThrownBy(() -> parse(with("amount", "\"1e999999999\"")))
+        assertThatThrownBy(() -> parse(with("amount.amount", "\"1e999999999\"")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("amount");
-        assertThatThrownBy(() -> parse(with("amount", "1e-999999999")))
+        assertThatThrownBy(() -> parse(with("amount.amount", "1e-999999999")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("amount");
-        assertThatThrownBy(() -> parse(with("balanceAfter", "\"" + "1".repeat(500) + "\"")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("balanceAfter");
+        assertThatThrownBy(() -> parse(with("totalPostBalance", "\"" + "1".repeat(500) + "\"")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("totalPostBalance");
     }
 
     @Test
     void money_that_is_neither_number_nor_numeric_text_is_rejected() {
         for (String bad : new String[] {"true", "[]", "{}", "\"abc\"", "\"\""}) {
-            assertThatThrownBy(() -> parse(with("amount", bad)))
+            assertThatThrownBy(() -> parse(with("amount.amount", bad)))
                     .as("amount=" + bad)
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("amount");
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("amount");
         }
     }
 
     @Test
     void text_fields_must_be_json_strings() {
         for (String bad : new String[] {"{}", "true", "5", "[]"}) {
-            assertThatThrownBy(() -> parse(with("currency", bad)))
+            assertThatThrownBy(() -> parse(with("amount.currency", bad)))
                     .as("currency=" + bad)
                     .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("currency");
-            assertThatThrownBy(() -> parse(with("transactionId", bad)))
-                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("transactionId");
+            assertThatThrownBy(() -> parse(with("id", bad)))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("id");
+            assertThatThrownBy(() -> parse(with("type", bad)))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("type");
         }
-        assertThatThrownBy(() -> parse(with("batchId", "5")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("batchId");
-        assertThatThrownBy(() -> parse(with("subBatchId", "{}")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("subBatchId");
-        assertThatThrownBy(() -> parse(with("cancelsTransactionId", "true")))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("cancelsTransactionId");
+        for (String path : new String[] {
+                "productId", "productType", "batchContext.batchId", "batchContext.subBatchId",
+                "references.transactionReference"}) {
+            assertThatThrownBy(() -> parse(with(path, "5")))
+                    .as(path).isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(path.substring(path.lastIndexOf('.') + 1));
+        }
     }
 
-    /** C1: a NUL in any known text field would be unstorable in Postgres (text and jsonb alike). */
+    /** A NUL in any text field would be unstorable in Postgres (text and jsonb alike). */
     @Test
-    void a_nul_in_any_known_text_field_is_rejected_naming_the_field() {
-        for (String field : new String[] {
-                "transactionId", "batchId", "subBatchId", "currency", "cancelsTransactionId"}) {
-            assertThatThrownBy(() -> parse(with(field, "\"a\\u0000b\"")))
-                    .as(field)
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining(field)
-                    .hasMessageContaining("U+0000");
+    void a_nul_in_any_text_field_is_rejected_naming_the_field() {
+        for (String path : new String[] {
+                "id", "type", "productId", "productType", "amount.currency", "userContext.ownerId",
+                "batchContext.batchId", "batchContext.subBatchId", "references.transactionReference",
+                "description", "accountContext.accountType", "references.paymentId"}) {
+            assertThatThrownBy(() -> parse(with(path, "\"1-a\\u0000b\"")))
+                    .as(path).isInstanceOf(IllegalArgumentException.class)
+                    .satisfiesAnyOf(
+                            e -> assertThat(e).hasMessageContaining("U+0000"),
+                            e -> assertThat(e).hasMessageContaining("ownerId"));
         }
+        assertThatThrownBy(() -> parse(with("id", "\"a\\u0000b\"")))
+                .hasMessageContaining("id").hasMessageContaining("U+0000");
     }
 
     @Test
     void the_raw_nul_handler_path_dead_letters_the_body_instead_of_delivering_it() {
-        byte[] body = with("transactionId", "\"tx\\u0000\"").getBytes(StandardCharsets.UTF_8);
+        byte[] body = with("id", "\"tx\\u0000\"").getBytes(StandardCharsets.UTF_8);
         com.rabbitmq.stream.Message message = org.mockito.Mockito.mock(com.rabbitmq.stream.Message.class);
         org.mockito.Mockito.when(message.getBodyAsBinary()).thenReturn(body);
         java.util.List<Object> seen = new java.util.ArrayList<>();
@@ -234,6 +287,66 @@ class StreamPayloadJsonTest {
                 seen.add(error.getMessage());
             }
         });
-        assertThat(seen).singleElement().asString().contains("transactionId").contains("U+0000");
+        assertThat(seen).singleElement().asString().contains("id").contains("U+0000");
+    }
+
+    // --- a valid base message built from raw JSON leaves, with path overrides ---
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> base() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", "\"tx-1\"");
+        m.put("type", "\"TT_BUY\"");
+        m.put("amount", new LinkedHashMap<>(Map.of("amount", "1.0000", "currency", "\"EUR\"")));
+        m.put("userContext", new LinkedHashMap<>(Map.of("ownerId", "\"1-7\"")));
+        m.put("createdContext", new LinkedHashMap<>(Map.of("created", "\"2033-09-02T12:00:00Z\"")));
+        m.put("productId", "\"p\"");
+        m.put("productType", "\"instants\"");
+        m.put("batchContext", new LinkedHashMap<>(Map.of("batchId", "\"b\"", "subBatchId", "\"s\"")));
+        m.put("references", new LinkedHashMap<>(Map.of("transactionReference", "\"tx-1\"")));
+        m.put("totalPostBalance", "5");
+        return m;
+    }
+
+    /** The base message with (path, rawJson) pairs overridden; a path may create nested keys. */
+    @SuppressWarnings("unchecked")
+    private static String with(String... pathsAndValues) {
+        Map<String, Object> m = base();
+        for (int k = 0; k < pathsAndValues.length; k += 2) {
+            Map<String, Object> at = m;
+            String[] steps = pathsAndValues[k].split("\\.");
+            for (int i = 0; i < steps.length - 1; i++) {
+                Object next = at.get(steps[i]);
+                if (!(next instanceof Map)) {
+                    next = new LinkedHashMap<String, Object>();
+                    at.put(steps[i], next);
+                }
+                at = (Map<String, Object>) next;
+            }
+            at.put(steps[steps.length - 1], pathsAndValues[k + 1]);
+        }
+        return json(m);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String without(String... paths) {
+        Map<String, Object> m = base();
+        for (String path : paths) {
+            Map<String, Object> at = m;
+            String[] steps = path.split("\\.");
+            for (int i = 0; i < steps.length - 1; i++) {
+                at = (Map<String, Object>) at.get(steps[i]);
+            }
+            at.remove(steps[steps.length - 1]);
+        }
+        return json(m);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String json(Map<String, Object> m) {
+        return m.entrySet().stream()
+                .map(e -> "\"" + e.getKey() + "\":"
+                        + (e.getValue() instanceof Map<?, ?> nested ? json((Map<String, Object>) nested) : e.getValue()))
+                .collect(Collectors.joining(",", "{", "}"));
     }
 }

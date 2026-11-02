@@ -69,7 +69,7 @@ public class DeadLetterStore implements DrainedCancelDeadLetters {
     /** Records an event that could not even be mapped to an item, using the raw wire payload. */
     public void record(String stream, Long offset, StreamPayload payload, Exception error, int attempts) {
         write(stream, offset, (short) SourceKind.TRANSACTION.code(),
-                payload.transactionId(), payload, error, attempts);
+                payload.id(), payload, error, attempts);
     }
 
     /**

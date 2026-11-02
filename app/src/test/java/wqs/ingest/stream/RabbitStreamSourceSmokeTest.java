@@ -73,9 +73,10 @@ class RabbitStreamSourceSmokeTest {
                     }
                 });
 
-                String json = "{\"transactionId\":\"tx-smoke\",\"userId\":7,"
-                        + "\"occurredAt\":\"2033-09-02T12:00:00Z\",\"type\":1,"
-                        + "\"amount\":5.0000,\"currency\":\"EUR\",\"channel\":\"web\"}";
+                String json = "{\"id\":\"tx-smoke\",\"type\":\"TT_BUY\","
+                        + "\"amount\":{\"amount\":5.0000,\"currency\":\"EUR\"},"
+                        + "\"userContext\":{\"ownerId\":\"1-7\"},"
+                        + "\"createdContext\":{\"created\":\"2033-09-02T12:00:00Z\",\"channel\":\"web\"}}";
                 try (Producer producer = environment.producerBuilder().stream("smoke").build()) {
                     producer.send(
                             producer.messageBuilder()
@@ -87,10 +88,10 @@ class RabbitStreamSourceSmokeTest {
                 source.close();
 
                 StreamPayload received = payloads.get(0);
-                assertThat(received.transactionId()).isEqualTo("tx-smoke");
+                assertThat(received.id()).isEqualTo("tx-smoke");
                 assertThat(received.amount()).isEqualTo(new BigDecimal("5.0000"));
                 assertThat(offsets.get(0)).isZero();
-                assertThat(received.extra()).containsEntry("channel", "web");
+                assertThat(received.detail()).containsEntry("createdContext.channel", "web");
                 // I5: the head offset for wqs.ingest.stream.offset.lag comes from the broker.
                 assertThat(source.headOffset()).hasValue(0L);
             }

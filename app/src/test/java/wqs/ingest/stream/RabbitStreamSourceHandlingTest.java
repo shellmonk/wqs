@@ -66,8 +66,10 @@ class RabbitStreamSourceHandlingTest {
 
     @Test
     void a_valid_body_is_delivered_and_malformed_json_is_poison_with_its_bytes() {
-        String json = "{\"transactionId\":\"t\",\"userId\":1,\"occurredAt\":\"2033-09-02T12:00:00Z\","
-                + "\"type\":1,\"amount\":1,\"currency\":\"EUR\"}";
+        String json = "{\"id\":\"t\",\"type\":\"TT_BUY\","
+                + "\"amount\":{\"amount\":1,\"currency\":\"EUR\"},"
+                + "\"userContext\":{\"ownerId\":\"1-1\"},"
+                + "\"createdContext\":{\"created\":\"2033-09-02T12:00:00Z\"}}";
         Message ok = mock(Message.class);
         when(ok.getBodyAsBinary()).thenReturn(json.getBytes(StandardCharsets.UTF_8));
         Message bad = mock(Message.class);

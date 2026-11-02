@@ -15,10 +15,8 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.Set;
 
 /**
  * Real stream subscription. Offset tracking is NOT delegated to the broker -- the offset is
@@ -27,16 +25,11 @@ import java.util.Set;
  *
  * <p>Not a Spring component itself: {@link StreamConfig} builds it (only when the stream is enabled).
  *
- * <p>O-13 assumption: wire field names equal the {@link StreamPayload} record-component names.
- * Every other field is preserved in {@code extra} (as text) so it reaches the "detail" jsonb.
- * Parsing goes through a JSON tree because binding straight to the record would silently drop
- * unknown fields.
+ * <p>Decodes the real {@code walAccountTransactions} format (spec 4.1, docs/reference/stream-message-samples.md):
+ * nested JSON, parsed through a tree so each field is checked strictly. Only the D9 allowlist
+ * reaches "detail". Any malformed message throws and is routed to the dead-letter path.
  */
 public class RabbitStreamSource implements StreamSource {
-
-    private static final Set<String> KNOWN = Set.of(
-            "transactionId", "userId", "occurredAt", "productId", "batchId", "subBatchId",
-            "type", "amount", "currency", "balanceAfter", "cancelsTransactionId");
 
     private final Environment environment;
     private final StreamProperties properties;
@@ -136,28 +129,87 @@ public class RabbitStreamSource implements StreamSource {
             throw new IllegalArgumentException("stream message is not a JSON object");
         }
 
-        Map<String, String> extra = new HashMap<>();
-        root.fields().forEachRemaining(entry -> {
-            JsonNode value = entry.getValue();
-            if (!KNOWN.contains(entry.getKey()) && !value.isNull()) {
-                extra.put(entry.getKey(), value.isContainerNode() ? value.toString() : value.asText());
-            }
-        });
+        JsonNode userContext = object(root, "userContext", true);
+        JsonNode createdContext = object(root, "createdContext", true);
+        JsonNode amount = object(root, "amount", true);
+        JsonNode batchContext = object(root, "batchContext", false);
+        JsonNode references = object(root, "references", false);
+
+        String ownerId = textual(required(userContext, "userContext.ownerId", "ownerId"), "userContext.ownerId");
+        int dash = ownerId.indexOf('-');
+        if (dash < 0) {
+            throw new IllegalArgumentException("userContext.ownerId must be \"{userType}-{userId}\"");
+        }
+        int userType = (int) digits(ownerId.substring(0, dash), "userContext.ownerId userType", Integer.MAX_VALUE);
+        long userId = digits(ownerId.substring(dash + 1), "userContext.ownerId userId", Long.MAX_VALUE);
 
         return new StreamPayload(
-                textual(required(root, "transactionId"), "transactionId"),
-                (long) integral(required(root, "userId"), "userId", Long.MIN_VALUE, Long.MAX_VALUE),
-                instant(required(root, "occurredAt")),
-                optional(root, "productId") == null ? null
-                        : (int) integral(root.get("productId"), "productId", Integer.MIN_VALUE, Integer.MAX_VALUE),
-                text(root, "batchId"),
-                text(root, "subBatchId"),
-                (short) integral(required(root, "type"), "type", Short.MIN_VALUE, Short.MAX_VALUE),
-                money(required(root, "amount"), "amount"),
-                textual(required(root, "currency"), "currency"),
-                optional(root, "balanceAfter") == null ? null : money(root.get("balanceAfter"), "balanceAfter"),
-                text(root, "cancelsTransactionId"),
-                extra);
+                textual(required(root, "id"), "id"),
+                userType,
+                userId,
+                instant(required(createdContext, "createdContext.created", "created"), "createdContext.created"),
+                textual(required(root, "type"), "type"),
+                text(root, "productId"),
+                text(root, "productType"),
+                batchContext == null ? null : text(batchContext, "batchContext.batchId", "batchId"),
+                batchContext == null ? null : text(batchContext, "batchContext.subBatchId", "subBatchId"),
+                money(required(amount, "amount.amount", "amount"), "amount.amount"),
+                textual(required(amount, "amount.currency", "currency"), "amount.currency"),
+                optional(root, "totalPostBalance") == null ? null
+                        : money(root.get("totalPostBalance"), "totalPostBalance"),
+                references == null ? null : text(references, "references.transactionReference", "transactionReference"),
+                detail(root));
+    }
+
+    /**
+     * The D9 allowlist: the only wire fields that reach "detail", under dotted keys. Anything
+     * else is dropped -- never "the rest of the row" (walPayments carries encrypted card data).
+     * Empty strings are dropped like every other blank; scalars are carried as their text.
+     */
+    private static final java.util.List<String> DETAIL_ALLOWLIST = java.util.List.of(
+            "subtype", "description", "fromDescription", "toDescription", "account",
+            "accountContext.accountType", "accountContext.accountNumber", "monetary",
+            "references.paymentId", "references.claimId", "references.extTrxId", "references.extSystemId",
+            "createdContext.issued", "createdContext.channel", "batchContext.batchEnded",
+            "amount.reservedAmount", "amount.nonWithdrawableAmount");
+
+    private static Map<String, String> detail(JsonNode root) {
+        Map<String, String> detail = new java.util.LinkedHashMap<>();
+        for (String path : DETAIL_ALLOWLIST) {
+            JsonNode node = root;
+            for (String step : path.split("\\.")) {
+                node = node == null || !node.isObject() ? null : node.get(step);
+            }
+            if (node == null || node.isNull() || node.isContainerNode()) {
+                continue;
+            }
+            String value = node.isTextual() ? textual(node, path) : node.asText();
+            if (!value.isEmpty()) {
+                detail.put(path, value);
+            }
+        }
+        return detail;
+    }
+
+    /** An object-valued field; absent/null is only allowed when not required. */
+    private static JsonNode object(JsonNode root, String field, boolean required) {
+        JsonNode node = required ? required(root, field) : optional(root, field);
+        if (node != null && !node.isObject()) {
+            throw new IllegalArgumentException(field + " must be an object");
+        }
+        return node;
+    }
+
+    /** Decimal digits only, within [0, max]: never asInt()/asLong(), never a sign or whitespace. */
+    private static long digits(String text, String field, long max) {
+        if (text.isEmpty() || text.length() > MAX_NUMERIC_TEXT || !text.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            throw new IllegalArgumentException(field + " is not a number");
+        }
+        BigInteger value = new BigInteger(text);
+        if (value.compareTo(BigInteger.valueOf(max)) > 0) {
+            throw new IllegalArgumentException(field + " is out of range");
+        }
+        return value.longValueExact();
     }
 
     private static JsonNode optional(JsonNode root, String field) {
@@ -166,16 +218,30 @@ public class RabbitStreamSource implements StreamSource {
     }
 
     private static JsonNode required(JsonNode root, String field) {
+        return required(root, field, field);
+    }
+
+    /** {@code label} is the full path used in the error message. */
+    private static JsonNode required(JsonNode root, String label, String field) {
         JsonNode node = optional(root, field);
         if (node == null) {
-            throw new IllegalArgumentException("stream message is missing required field: " + field);
+            throw new IllegalArgumentException("stream message is missing required field: " + label);
         }
         return node;
     }
 
     private static String text(JsonNode root, String field) {
+        return text(root, field, field);
+    }
+
+    /** Optional text; {@code label} is the full path used in error messages. Every empty string is null (spec 4.1). */
+    private static String text(JsonNode root, String label, String field) {
         JsonNode node = optional(root, field);
-        return node == null ? null : textual(node, field);
+        if (node == null) {
+            return null;
+        }
+        String value = textual(node, label);
+        return value.isEmpty() ? null : value;
     }
 
     /**
@@ -197,38 +263,15 @@ public class RabbitStreamSource implements StreamSource {
         return text;
     }
 
-    private static Instant instant(JsonNode node) {
+    private static Instant instant(JsonNode node, String field) {
         if (!node.isTextual()) {
-            throw new IllegalArgumentException("occurredAt must be an ISO-8601 instant string");
+            throw new IllegalArgumentException(field + " must be an ISO-8601 instant string");
         }
         try {
             return Instant.parse(node.asText());
         } catch (DateTimeParseException e) {
-            throw new IllegalArgumentException("occurredAt is not a valid ISO-8601 instant", e);
+            throw new IllegalArgumentException(field + " is not a valid ISO-8601 instant", e);
         }
-    }
-
-    /**
-     * An integral JSON number, or integral numeric text, within [min, max]. Never
-     * {@code asInt()}/{@code asLong()}, which silently turn garbage into 0 or truncate.
-     */
-    private static long integral(JsonNode node, String field, long min, long max) {
-        BigInteger value;
-        if (node.isIntegralNumber()) {
-            value = node.bigIntegerValue();
-        } else if (node.isTextual() && node.asText().length() <= MAX_NUMERIC_TEXT) {
-            try {
-                value = new BigInteger(node.asText());
-            } catch (NumberFormatException e) {
-                throw new IllegalArgumentException(field + " is not an integer", e);
-            }
-        } else {
-            throw new IllegalArgumentException(field + " must be an integral number");
-        }
-        if (value.compareTo(BigInteger.valueOf(min)) < 0 || value.compareTo(BigInteger.valueOf(max)) > 0) {
-            throw new IllegalArgumentException(field + " is out of range");
-        }
-        return value.longValueExact();
     }
 
     /**
