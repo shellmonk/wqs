@@ -254,6 +254,37 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     }
 
     /**
+     * Re-review regression: the range end bounds only late cancellations. A session starting in
+     * range but ending past {@code TO} lists every non-cancel transaction its totals count, while a
+     * cancel dated past {@code TO} (and past "endedAt") stays out. s6: s6-a TT_BUY 2 Feb 28 23:00,
+     * s6-b PRIZE 3 Mar 1 00:10 (endedAt, past TO); x-s6-a cancels s6-a Mar 1 00:40.
+     */
+    @Test
+    void session_straddling_the_range_end_lists_all_its_transactions() {
+        applyBatches(List.of(
+                item("s6-a", "2034-02-28T23:00:00Z", "s6", null, TxTypes.PLAY, "2", "keno"),
+                item("s6-b", "2034-03-01T00:10:00Z", "s6", null, TxTypes.WIN, "3", "keno"),
+                cancel("x-s6-a", "2034-03-01T00:40:00Z", "s6", null, "s6-a")));
+        for (ViewKind v : ViewKind.values()) {
+            for (AggregationLevel level : List.of(AggregationLevel.L1, AggregationLevel.L2)) {
+                SessionView s6 = session(read(v, level, false, Set.of(), 1, 10), "s6");
+                String as = v + " " + level;
+                assertThat(s6.endedAt()).isEqualTo("2034-03-01T00:10:00Z");
+                assertThat(s6.txs()).as(as).extracting(TxView::txId).containsExactly("s6-b", "s6-a");
+                assertThat(s6.totalPlay()).as(as).isEqualByComparingTo(sumOf(s6.txs(), "TT_BUY"));
+                assertThat(s6.totalWin()).as(as).isEqualByComparingTo(sumOf(s6.txs(), "PRIZE"));
+                assertThat(s6.totalPlay()).isEqualByComparingTo("2");
+                assertThat(s6.totalWin()).isEqualByComparingTo("3");
+            }
+        }
+    }
+
+    private static BigDecimal sumOf(List<TxView> txs, String type) {
+        return txs.stream().filter(t -> type.equals(t.transactionType()))
+                .map(t -> t.amount().abs()).reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /**
      * F1 (final review), spec 7.3 "each bounded by the page size": the item fetch reads only the
      * page's sessions' own rows, not every item in the time span the page's sessions cover. A
      * long-lived session (Feb 1 .. Feb 27) is on the last page with four newer entries; 3000

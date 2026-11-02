@@ -46,12 +46,13 @@ public class WebHighLevelAssembly implements HighLevelItemQuery {
         }
         Table<?> wanted = unnest(batchIds);
         // Per session: ("userId", "batchId", "occurredAt") probes of "wqWebItem_batch", each from
-        // the session's own start; the OR keeps only its window plus its late cancellations.
+        // the session's own start; the OR keeps its whole window (even past the range end, as its
+        // totals count it) plus its late cancellations before the range end.
         Condition member = WQ_WEB_ITEM.userId.eq(userId)
                 .and(WQ_WEB_ITEM.batchId.eq(WQ_SESSION.batchId))
                 .and(WQ_WEB_ITEM.occurredAt.ge(WQ_SESSION.startedAt))
-                .and(WQ_WEB_ITEM.occurredAt.lt(utc(to)))
-                .and(WQ_WEB_ITEM.occurredAt.le(WQ_SESSION.endedAt).or(WQ_WEB_ITEM.cancels.isNotNull()));
+                .and(WQ_WEB_ITEM.occurredAt.le(WQ_SESSION.endedAt)
+                        .or(WQ_WEB_ITEM.cancels.isNotNull().and(WQ_WEB_ITEM.occurredAt.lt(utc(to)))));
         if (excludeCancelled) {
             member = member.and(DSL.not(WQ_WEB_ITEM.cancelled));
         }
