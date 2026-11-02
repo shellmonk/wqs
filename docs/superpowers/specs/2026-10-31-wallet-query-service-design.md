@@ -1064,7 +1064,10 @@ Per the API contract (`docs/reference/api-contract.md`, §4.1), every level uses
   `totalPlay`, `playCount`, `txs: [transaction…]`) interleaved by time with unsessioned items,
   which are plain transaction objects.
 - **Level 2:** as level 1, but a session nests `subitems: [{subBatchId, playTimestamp,
-  playAmount, winAmount, amount, txs: [transaction…]}]`.
+  playAmount, winAmount, amount, txs: [transaction…]}]`. Session items with no `subBatchId`
+  stay in the session's own `txs` (omitted when empty).
+- With `excludeCancelledTransactions`, nested `txs` follow level-0 semantics exactly: cancelled
+  items are hidden, cancellation rows are not.
 - Totals are the stored rollup values — the excl-cancelled variants when
   `excludeCancelledTransactions` is set — never recomputed on read. `transactionTypes` filters only
   the nested `txs`; sessions and their totals are unaffected.
