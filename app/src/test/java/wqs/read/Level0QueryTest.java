@@ -83,22 +83,16 @@ class Level0QueryTest extends Level0TestSupport {
     @Test
     void fetch_handles_a_very_large_key_list() {
         partitionManager.ensurePartitionsAhead(java.time.YearMonth.of(2034, 5), 0);
-        var t = wqs.db.generated.Tables.WQ_WEB_ITEM;
         Instant base = t("2034-05-01T00:00:00Z");
-        var records = new java.util.ArrayList<wqs.db.generated.tables.records.WqWebItemRecord>();
-        for (int i = 0; i < 40_000; i++) {
-            var r = dsl().newRecord(t);
-            r.setUserId(USER);
-            r.setItemId(9_000_000_000L + i);            r.setSource((short) 1);
-            r.setSourceId("bulk" + i);
-            r.setOccurredAt(base.plusSeconds(i).atOffset(java.time.ZoneOffset.UTC));
-            r.setType((short) 1);
-            r.setAmount(java.math.BigDecimal.ONE);
-            r.setCurrency("EUR");
-            records.add(r);
-        }
         try {
-            dsl().batchInsert(records).execute();
+            // One set-based statement instead of a 40k-row batchInsert.
+            dsl().execute("""
+                    insert into "wqWebItem" ("userId", "itemId", "source", "sourceId", "occurredAt",
+                                             "type", "amount", "currency")
+                    select ?, 9000000000 + i, 1, 'bulk' || i,
+                           timestamptz '2034-05-01T00:00:00Z' + i * interval '1 second', 1, 1, 'EUR'
+                    from generate_series(0, 39999) as i
+                    """, USER);
             Level0Filter f = new Level0Filter(USER, null, false);
             List<ItemKey> keys = web.keys(readerDsl, f, base, base.plusSeconds(50_000), 0, 50_000);
             assertThat(keys).hasSize(40_000);
