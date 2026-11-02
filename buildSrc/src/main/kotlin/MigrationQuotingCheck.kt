@@ -5,30 +5,110 @@ import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.TaskAction
 
-private val LINE_COMMENT = Regex("--[^\n]*")
-private val BLOCK_COMMENT = Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL)
-private val QUOTED_SPAN = Regex("\"[^\"]*\"")
+// An identifier-shaped run in whatever's left once every comment, string literal,
+// dollar-quoted body and already-quoted identifier has been blanked out.
+private val IDENTIFIER_TOKEN = Regex("[A-Za-z_][A-Za-z0-9_]*")
 
-// Any camelCase identifier in our schema: wq-prefixed tables, or a column with an
-// internal capital. Both are only legal in SQL when double-quoted.
-private val CAMEL_IDENTIFIER = Regex("\\b(wq[A-Z]\\w*|[a-z]+[A-Z]\\w*)\\b")
-
-// Column-ish words that appear in DDL keywords rather than as identifiers.
-private val SQL_KEYWORDS = setOf("isClustered")
+private enum class ScanState { DEFAULT, LINE_COMMENT, BLOCK_COMMENT, SINGLE_QUOTED, DOUBLE_QUOTED, DOLLAR_QUOTED }
 
 /**
- * Finds camelCase identifiers that are NOT double-quoted. Strategy: remove comments,
- * then remove every quoted span, then anything camelCase that survives was unquoted.
+ * Strips every line comment, block comment, single-quoted string literal (with ''
+ * escaping), double-quoted identifier (with "" escaping) and dollar-quoted body
+ * ($tag$...$tag$) down to a single blank marker, leaving only bare, unquoted SQL text.
+ *
+ * This has to be one stateful pass rather than a sequence of independent regexes: a `--`
+ * inside a string literal is not a comment, and a `'` inside a comment does not open a
+ * string. Which construct is "live" at a given position depends entirely on what construct
+ * is already open, and only a single scan that tracks that can get every position right.
+ */
+private fun stripNonSqlRegions(sql: String): String {
+    val bare = StringBuilder()
+    var state = ScanState.DEFAULT
+    var dollarClose = ""
+    var i = 0
+
+    while (i < sql.length) {
+        when (state) {
+            ScanState.DEFAULT -> when {
+                sql.startsWith("--", i) -> { state = ScanState.LINE_COMMENT; i += 2 }
+                sql.startsWith("/*", i) -> { state = ScanState.BLOCK_COMMENT; i += 2 }
+                sql[i] == '\'' -> { state = ScanState.SINGLE_QUOTED; i += 1 }
+                sql[i] == '"' -> { state = ScanState.DOUBLE_QUOTED; i += 1 }
+                sql[i] == '$' -> {
+                    val close = matchDollarQuoteOpen(sql, i)
+                    if (close != null) {
+                        dollarClose = close
+                        state = ScanState.DOLLAR_QUOTED
+                        i += close.length
+                    } else {
+                        bare.append(sql[i]); i += 1
+                    }
+                }
+                else -> { bare.append(sql[i]); i += 1 }
+            }
+
+            ScanState.LINE_COMMENT ->
+                if (sql[i] == '\n') { bare.append(' '); state = ScanState.DEFAULT } else { i += 1 }
+
+            ScanState.BLOCK_COMMENT ->
+                if (sql.startsWith("*/", i)) { bare.append(' '); state = ScanState.DEFAULT; i += 2 } else { i += 1 }
+
+            ScanState.SINGLE_QUOTED -> when {
+                sql.startsWith("''", i) -> i += 2 // escaped quote: stays inside the literal
+                sql[i] == '\'' -> { bare.append(' '); state = ScanState.DEFAULT; i += 1 }
+                else -> i += 1
+            }
+
+            ScanState.DOUBLE_QUOTED -> when {
+                sql.startsWith("\"\"", i) -> i += 2 // escaped quote: stays inside the identifier
+                sql[i] == '"' -> { bare.append(' '); state = ScanState.DEFAULT; i += 1 }
+                else -> i += 1
+            }
+
+            ScanState.DOLLAR_QUOTED ->
+                if (sql.startsWith(dollarClose, i)) {
+                    bare.append(' '); state = ScanState.DEFAULT; i += dollarClose.length
+                } else {
+                    i += 1
+                }
+        }
+    }
+
+    return bare.toString()
+}
+
+/** Matches a dollar-quote opening delimiter ($$ or $tag$) starting exactly at `start`, if any. */
+private fun matchDollarQuoteOpen(sql: String, start: Int): String? {
+    var j = start + 1
+    while (j < sql.length && (sql[j].isLetterOrDigit() || sql[j] == '_')) j += 1
+    return if (j < sql.length && sql[j] == '$') sql.substring(start, j + 1) else null
+}
+
+/**
+ * A token is camelCase when an uppercase letter follows a lowercase one anywhere earlier
+ * in the token, letters or digits may sit between them (e.g. "item2Id" still counts: the
+ * 'm' is lowercase, the 'I' two characters later is upper, and that's enough).
+ */
+private fun isCamelCase(token: String): Boolean {
+    var sawLowercase = false
+    for (c in token) {
+        if (c.isUpperCase() && sawLowercase) return true
+        if (c.isLowerCase()) sawLowercase = true
+    }
+    return false
+}
+
+/**
+ * Finds camelCase identifiers that are NOT double-quoted. Strategy: strip every comment,
+ * string literal, dollar-quoted body and already-quoted identifier down to a blank marker,
+ * then tokenize what's left and flag any token with a camelCase shape.
  */
 fun findUnquotedIdentifiers(sql: String): List<String> {
-    val withoutComments = sql
-        .replace(BLOCK_COMMENT, " ")
-        .replace(LINE_COMMENT, " ")
-    val withoutQuoted = withoutComments.replace(QUOTED_SPAN, " ")
+    val bare = stripNonSqlRegions(sql)
 
-    return CAMEL_IDENTIFIER.findAll(withoutQuoted)
+    return IDENTIFIER_TOKEN.findAll(bare)
         .map { it.value }
-        .filterNot { it in SQL_KEYWORDS }
+        .filter { isCamelCase(it) }
         .distinct()
         .toList()
 }
