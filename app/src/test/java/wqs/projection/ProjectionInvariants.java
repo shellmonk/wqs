@@ -412,6 +412,41 @@ public final class ProjectionInvariants {
     }
 
     /**
+     * P-7 (spec 7.4), the stored half: every non-cancellation item whose product type is eInstant
+     * carries a non-null "batchId", in both item tables, and so neither view's page index holds an
+     * unsessioned eInstant row. {@code eInstantProductTypes} is {@code wqs.einstant.product-types}
+     * (plan D3); the classification is configuration, which is why this cannot be a check
+     * constraint. Cancellations are exempt, as at ingest (IngestRules): they never get a page row.
+     */
+    public List<String> eInstantDrift(java.util.Collection<String> eInstantProductTypes) {
+        List<String> drift = new ArrayList<>();
+        if (eInstantProductTypes.isEmpty()) {
+            return drift;
+        }
+        String[] types = eInstantProductTypes.toArray(String[]::new);
+        for (String[] view : new String[][] {
+                {"WEB", "wqWebItem", "wqWebHighLevel"}, {"CC", "wqCcItem", "wqCcHighLevel"}}) {
+            drift.addAll(dsl.fetch("""
+                    select 'unsessioned eInstant item' as problem, '%3$s' as view,
+                           i."userId", i."source", i."sourceId", i."productType"
+                    from "%1$s" i
+                    where i."batchId" is null and i."productType" = any(?::text[]) and %4$s
+                    order by 3, 4, 5
+                    """.formatted(view[1], view[2], view[0], NOT_A_CANCELLATION), (Object) types)
+                    .map(ProjectionInvariants::describe));
+            drift.addAll(dsl.fetch("""
+                    select 'unsessioned eInstant page row' as problem, '%2$s' as view,
+                           h."userId", h."kind", h."refId", h."productType"
+                    from "%1$s" h
+                    where h."kind" <> 0 and h."productType" = any(?::text[])
+                    order by 3, 4, 5
+                    """.formatted(view[2], view[0]), (Object) types)
+                    .map(ProjectionInvariants::describe));
+        }
+        return drift;
+    }
+
+    /**
      * abs(amount) for the item types whose "wqTxType" direction is {@code direction}, else 0.
      * The direction is read from the same table the write path's registry reads, so this can
      * never disagree with the write path's mapping.
