@@ -47,10 +47,11 @@ class DataSourceConfigTest extends PostgresTestBase {
     }
 
     @Test
-    void writer_dsl_is_the_primary_dsl_and_differs_from_the_reader() {
-        assertThat(writerDsl).isNotSameAs(readerDsl);
-        assertThat(writerDsl.configuration().connectionProvider())
-                .isNotEqualTo(readerDsl.configuration().connectionProvider());
+    void writer_dsl_uses_spring_transactions_and_the_reader_does_not() {
+        assertThat(writerDsl.configuration().transactionProvider())
+                .isInstanceOf(org.springframework.boot.autoconfigure.jooq.SpringTransactionProvider.class);
+        assertThat(readerDsl.configuration().transactionProvider())
+                .isNotInstanceOf(org.springframework.boot.autoconfigure.jooq.SpringTransactionProvider.class);
     }
 
     @Test
@@ -65,7 +66,11 @@ class DataSourceConfigTest extends PostgresTestBase {
     }
 
     @Test
-    void hikari_metrics_are_tagged_by_pool() {
+    void hikari_metrics_are_tagged_by_pool() throws Exception {
+        // The reader pool is lazy: its gauges exist only after the first connection.
+        try (var c = readerDataSource.getConnection()) {
+            assertThat(c.isReadOnly()).isTrue();
+        }
         assertThat(meterRegistry.find("hikaricp.connections.max").tag("pool", "writer").gauge()).isNotNull();
         assertThat(meterRegistry.find("hikaricp.connections.max").tag("pool", "reader").gauge()).isNotNull();
     }

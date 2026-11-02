@@ -20,7 +20,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import wqs.config.ReaderDsl;
 import wqs.db.RawSqlJustified;
-import wqs.read.archfixture.UnqualifiedReader;
+import wqs.read.archfixture.QualifiedReader;
+import wqs.read.archfixture.UnqualifiedCtorParamReader;
+import wqs.read.archfixture.UnqualifiedInjectedFieldReader;
+import wqs.read.archfixture.UnqualifiedMethodParamReader;
 
 /**
  * Each rule names the spec decision it enforces. Per spec section 8.5, a rule that cannot be
@@ -188,11 +191,25 @@ class ArchitectureTest {
         readerDslRule().check(classes);
     }
 
-    /** Proves the rule above can fail. */
+    /** Proves the rule above can fail, and that each branch of it does. */
     @Test
-    void read_layer_rule_rejects_an_unqualified_dsl() {
-        JavaClasses fixture = new ClassFileImporter().importClasses(UnqualifiedReader.class);
-        assertThatThrownBy(() -> readerDslRule().check(fixture)).isInstanceOf(AssertionError.class);
+    void read_layer_rule_rejects_each_kind_of_unqualified_dsl() {
+        assertRejected(UnqualifiedCtorParamReader.class, "ctorDsl", "UnqualifiedCtorParamReader");
+        assertRejected(UnqualifiedMethodParamReader.class, "methodDsl", "run");
+        assertRejected(UnqualifiedInjectedFieldReader.class, "injectedDsl", "injectedDsl");
+    }
+
+    @Test
+    void read_layer_rule_accepts_a_plain_field_assigned_from_a_qualified_constructor() {
+        readerDslRule().check(new ClassFileImporter().importClasses(QualifiedReader.class));
+    }
+
+    private static void assertRejected(Class<?> fixtureClass, String member, String memberName) {
+        JavaClasses fixture = new ClassFileImporter().importClasses(fixtureClass);
+        assertThatThrownBy(() -> readerDslRule().check(fixture))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining(memberName)
+                .hasMessageContaining(fixtureClass.getSimpleName());
     }
 
     private static ArchRule readerDslRule() {
@@ -205,23 +222,31 @@ class ArchitectureTest {
     }
 
     private static ArchCondition<JavaClass> injectOnlyQualifiedDsl() {
-        return new ArchCondition<>("inject org.jooq.DSLContext only with @ReaderDsl") {
+        return new ArchCondition<>("take org.jooq.DSLContext only as @ReaderDsl parameters, "
+                + "and never as an @Autowired/@Inject field without @ReaderDsl") {
             @Override
             public void check(JavaClass item, ConditionEvents events) {
+                // A plain field assigned from a @ReaderDsl constructor parameter is the normal
+                // pattern; only injected fields are checked.
                 item.getFields().stream()
                         .filter(f -> f.getRawType().isAssignableTo(org.jooq.DSLContext.class))
+                        .filter(f -> f.isAnnotatedWith("org.springframework.beans.factory.annotation.Autowired")
+                                || f.isAnnotatedWith("jakarta.inject.Inject"))
                         .filter(f -> !f.isAnnotatedWith(ReaderDsl.class))
                         .forEach(f -> events.add(SimpleConditionEvent.violated(
-                                f, f.getDescription() + " is an unqualified DSLContext")));
-                item.getConstructors().forEach(c -> {
-                    for (int i = 0; i < c.getRawParameterTypes().size(); i++) {
-                        if (c.getRawParameterTypes().get(i).isAssignableTo(org.jooq.DSLContext.class)
-                                && !c.getParameters().get(i).isAnnotatedWith(ReaderDsl.class)) {
-                            events.add(SimpleConditionEvent.violated(
-                                    c, c.getDescription() + " takes an unqualified DSLContext"));
-                        }
-                    }
-                });
+                                f, f.getDescription() + " is an injected DSLContext without @ReaderDsl")));
+                item.getCodeUnits().stream()
+                        .filter(u -> u instanceof com.tngtech.archunit.core.domain.JavaMethod
+                                || u instanceof com.tngtech.archunit.core.domain.JavaConstructor)
+                        .forEach(u -> {
+                            for (int i = 0; i < u.getRawParameterTypes().size(); i++) {
+                                if (u.getRawParameterTypes().get(i).isAssignableTo(org.jooq.DSLContext.class)
+                                        && !u.getParameters().get(i).isAnnotatedWith(ReaderDsl.class)) {
+                                    events.add(SimpleConditionEvent.violated(
+                                            u, u.getDescription() + " takes a DSLContext parameter without @ReaderDsl"));
+                                }
+                            }
+                        });
             }
         };
     }
