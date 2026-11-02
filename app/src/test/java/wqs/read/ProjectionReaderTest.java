@@ -70,7 +70,8 @@ class ProjectionReaderTest extends ReadPropertyBase {
         long[][] beyond = {
             {Long.MAX_VALUE / 2, Integer.MAX_VALUE},   // (page-1)*pageSize overflows a long
             {Integer.MAX_VALUE, Integer.MAX_VALUE},    // fits a long, far past the end
-            {2, Long.MAX_VALUE},                       // overflows at page 2
+            {2, Long.MAX_VALUE},                       // offset 1 * Long.MAX_VALUE fits, past the end
+            {3, Long.MAX_VALUE},                       // 2 * Long.MAX_VALUE overflows a long
             {Long.MAX_VALUE, Long.MAX_VALUE},
         };
         for (long[] pp : beyond) {
@@ -172,10 +173,54 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
         // An empty page touches no partitions and walks no segment.
         probe.readLevel0(ccQuery, new Level0Request(ALL, from, to, 9, 2));
-        assertThat(registry.get("wqs.read.partitions.touched").summary().count()).isEqualTo(2);
-        assertThat(registry.get("wqs.read.partitions.touched").summary().totalAmount()).isEqualTo(2);
+        assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "0").summary().count()).isEqualTo(2);
+        assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "0").summary().totalAmount()).isEqualTo(2);
         assertThat(registry.get("wqs.read.residual.offset").summary().count()).isEqualTo(1);
         assertThat(registry.get("wqs.read.totalitems").tag("endpoint", "cc").summary().max()).isEqualTo(5);
+    }
+
+    /**
+     * Spec 7.6: the walk skips whole segments by their counts, so the key query starts at the
+     * target segment's end with only the residual. Page 3 of size 2 is offset 4; Feb holds 3, so
+     * the walk lands in Jan with residual 1 -- naive OFFSET would query [from, to) with offset 4.
+     */
+    @Test
+    void walk_lands_in_the_target_segment_with_a_small_residual() {
+        applyBatches(fiveItems());
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        ProjectionReader probe = new ProjectionReader(
+                readerDsl, new CounterReader(), new ReadProperties(null), new ReadMetrics(registry));
+        RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-03-01T00:00:00Z");
+
+        ProjectionPage page = probe.readLevel0(recording, new Level0Request(ALL, from, to, 3, 2));
+
+        assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
+                from, Instant.parse("2034-02-01T00:00:00Z"), 1, 1));
+        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isEqualTo(1);
+        assertThat(page.items()).extracting(ItemEntry::sourceId).containsExactly("j1");
+    }
+
+    /** Zero-count segments are walked past: Feb is empty, so offset 3 skips Mar (3) and Feb (0). */
+    @Test
+    void walk_skips_an_empty_middle_segment() {
+        applyBatches(List.of(
+                item("j1", "2034-01-05T10:00:00Z"),
+                item("j2", "2034-01-25T10:00:00Z"),
+                item("m1", "2034-03-02T10:00:00Z"),
+                item("m2", "2034-03-14T10:00:00Z"),
+                item("m3", "2034-03-27T10:00:00Z")));
+        RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-04-01T00:00:00Z");
+
+        ProjectionPage page = reader.readLevel0(recording, new Level0Request(ALL, from, to, 2, 3));
+
+        assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
+                from, Instant.parse("2034-02-01T00:00:00Z"), 0, 2));
+        assertThat(page.items()).extracting(ItemEntry::sourceId).containsExactly("j2", "j1");
+        assertThat(page.items()).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3));
     }
 
     /** 3 items in Feb 2034, 2 in Jan 2034, all user 1. */

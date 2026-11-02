@@ -10,7 +10,6 @@ import net.jqwik.api.Combinators;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
-import net.jqwik.api.ShrinkingMode;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.ProjectionItem;
@@ -27,10 +26,7 @@ class PaginationPropertyTest extends ReadPropertyBase {
 
     record SizedQuery(ReadQuery query, int pageSize) {}
 
-    // FULL shrinking runs on the test thread. BOUNDED (the default) shrinks on an async thread
-    // and abandons it at the timeout while its in-flight try keeps writing to the shared
-    // database, racing whatever runs next (deadlocks, strict-updater failures, a wrong report).
-    @Property(tries = 30, shrinking = ShrinkingMode.FULL)
+    @Property(tries = 30)
     void all_pages_concatenate_to_the_full_result(
             @ForAll("history") List<ProjectionItem> items,
             @ForAll("sizedQueries") List<SizedQuery> queries) {

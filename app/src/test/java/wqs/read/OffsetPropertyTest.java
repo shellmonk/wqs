@@ -9,7 +9,6 @@ import net.jqwik.api.Combinators;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
-import net.jqwik.api.ShrinkingMode;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.ProjectionItem;
@@ -27,10 +26,7 @@ class OffsetPropertyTest extends ReadPropertyBase {
     /** A query plus its paging: pageSize in [1, 20]; pagePick resolved against the oracle count. */
     record PagedQuery(ReadQuery query, int pageSize, int pagePick) {}
 
-    // FULL shrinking runs on the test thread. BOUNDED (the default) shrinks on an async thread
-    // and abandons it at the timeout while its in-flight try keeps writing to the shared
-    // database, racing whatever runs next (deadlocks, strict-updater failures, a wrong report).
-    @Property(tries = 30, shrinking = ShrinkingMode.FULL)
+    @Property(tries = 30)
     void fast_page_equals_naive_offset(
             @ForAll("history") List<ProjectionItem> items,
             @ForAll("pagedQueries") List<PagedQuery> queries) {
@@ -41,13 +37,38 @@ class OffsetPropertyTest extends ReadPropertyBase {
             long count = oracle.count(q.view(), q.filter(), q.from(), q.to());
             // page in [1, ceil(count / pageSize) + 2]: inside, on the last page and beyond it.
             long page = 1 + pq.pagePick() % (Math.ceilDiv(count, pq.pageSize()) + 2);
-            ProjectionPage got = reader.readLevel0(queryFor(q.view()),
+            RecordingLevel0Query recording = new RecordingLevel0Query(queryFor(q.view()));
+            ProjectionPage got = reader.readLevel0(recording,
                     new Level0Request(q.filter(), q.from(), q.to(), page, pq.pageSize()));
             String as = pq + " page=" + page;
             assertThat(got.totalItems()).as(as).isEqualTo(count);
             assertThat(got.items()).as(as).isEqualTo(oracle.page(
                     q.view(), q.filter(), q.from(), q.to(), (page - 1) * pq.pageSize(), pq.pageSize()));
+            assertWalkLandsInsideOneSegment(q, got, recording, as);
         }
+    }
+
+    /**
+     * The optimisation itself (spec 7.6), not just its result: a non-empty page runs ONE key
+     * query from {@code from} to the end of a decomposition segment, and its offset is a residual
+     * strictly inside that segment -- checked against an independent oracle count of the segment.
+     * Naive OFFSET (key query over [from, to) with the full offset) fails this.
+     */
+    private void assertWalkLandsInsideOneSegment(
+            ReadQuery q, ProjectionPage got, RecordingLevel0Query recording, String as) {
+        if (got.items().isEmpty()) {
+            assertThat(recording.keysCalls).as(as + " empty page runs no key query").isEmpty();
+            return;
+        }
+        assertThat(recording.keysCalls).as(as).hasSize(1);
+        RecordingLevel0Query.KeysCall call = recording.keysCalls.get(0);
+        assertThat(call.lo()).as(as).isEqualTo(q.from());
+        Segment target = RangeDecomposition.newestFirst(q.from(), q.to()).stream()
+                .filter(s -> s.end().equals(call.hi()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(as + ": key query hi " + call.hi() + " is no segment end"));
+        long segmentCount = oracle.count(q.view(), q.filter(), target.start(), call.hi());
+        assertThat(call.offset()).as(as + " residual inside " + target).isGreaterThanOrEqualTo(0).isLessThan(segmentCount);
     }
 
     @Provide

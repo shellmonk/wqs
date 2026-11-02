@@ -8,7 +8,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import org.jooq.DSLContext;
@@ -68,14 +67,13 @@ public class ProjectionReader {
             return new Outcome(total, sc.counterRows(), residual, q.fetch(tx, f.userId(), keys), months(keys));
         });
 
-        String endpoint = q.view().name().toLowerCase(Locale.ROOT);
         metrics.counterRows(out.counterRows());
         if (out.residual() >= 0) {
             metrics.residualOffset(out.residual());
         }
         metrics.partitionsTouched(LEVEL_0, out.partitionsTouched());
-        metrics.pageSize(endpoint, effective);
-        metrics.totalItems(endpoint, out.total());
+        metrics.pageSize(q.view(), effective);
+        metrics.totalItems(q.view(), out.total());
         long totalPages = out.total() == 0 ? 0 : Math.ceilDiv(out.total(), effective);
         return new ProjectionPage(r.page(), effective, out.total(), totalPages, LEVEL_0, out.items());
     }

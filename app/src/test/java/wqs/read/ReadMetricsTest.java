@@ -35,6 +35,35 @@ class ReadMetricsTest {
         assertThat(t.count()).isEqualTo(1);
     }
 
+    /** Item 3 of the review: recording after a successful read must never hit a registration. */
+    @Test
+    void every_meter_is_registered_up_front() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        new ReadMetrics(registry);
+
+        assertThat(registry.find("wqs.read.residual.offset").summaries()).hasSize(1);
+        assertThat(registry.find("wqs.read.counter.rows").summaries()).hasSize(1);
+        for (int level = 0; level <= 2; level++) {
+            assertThat(registry.find("wqs.read.partitions.touched").tag("aggregationLevel", String.valueOf(level))
+                    .summary()).isNotNull();
+        }
+        for (String endpoint : new String[] {"web", "cc"}) {
+            assertThat(registry.find("wqs.read.pagesize").tag("endpoint", endpoint).summary()).isNotNull();
+            assertThat(registry.find("wqs.read.totalitems").tag("endpoint", endpoint).summary()).isNotNull();
+            assertThat(registry.find("wqs.read.duration").tag("endpoint", endpoint).timers()).hasSize(3 * 5);
+        }
+        assertThat(registry.find("wqs.read.duration").timers()).hasSize(2 * 3 * 5);
+    }
+
+    @Test
+    void time_request_rejects_an_unknown_endpoint_before_running_the_request() {
+        ReadMetrics metrics = new ReadMetrics(new SimpleMeterRegistry());
+        boolean[] ran = {false};
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> metrics.timeRequest("nope", 0, 1, () -> ran[0] = true))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(ran[0]).isFalse();
+    }
+
     @Test
     void time_request_records_even_when_the_request_throws() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
@@ -46,7 +75,7 @@ class ReadMetricsTest {
         } catch (IllegalStateException expected) {
             // timed regardless
         }
-        assertThat(registry.find("wqs.read.duration").tags("endpoint", "cc", "pageDepthBucket", "1").timer().count())
+        assertThat(registry.find("wqs.read.duration").tags("endpoint", "cc", "aggregationLevel", "0", "pageDepthBucket", "1").timer().count())
                 .isEqualTo(1);
     }
 }
