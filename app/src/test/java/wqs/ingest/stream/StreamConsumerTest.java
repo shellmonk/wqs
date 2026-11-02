@@ -97,6 +97,22 @@ class StreamConsumerTest extends PostgresTestBase {
                 .isEqualTo(1.0);
     }
 
+    /** C1: an idle-from-start or stuck-from-start consumer must not report a reassuring 0. */
+    @Test
+    void lag_is_nan_before_start_and_time_since_start_until_something_is_projected() {
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = new StreamConsumer(
+                source, new StreamProperties(true, "wallet-transactions", 10, Duration.ofMillis(200), 3, null, null),
+                payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
+        var gauge = registry.find("wqs.ingest.lag.seconds").gauge();
+        assertThat(gauge.value()).isNaN();
+
+        consumer.start();
+        clock.advance(Duration.ofSeconds(90));
+
+        assertThat(gauge.value()).isEqualTo(90.0);
+    }
+
     @Test
     void counts_duplicates_separately() {
         StreamConsumer consumer = consumer(1, Duration.ofMillis(200));
@@ -130,5 +146,32 @@ class StreamConsumerTest extends PostgresTestBase {
 
     private int count(String table) {
         return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void advance(Duration d) {
+            now = now.plus(d);
+        }
+
+        @Override
+        public java.time.ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
     }
 }

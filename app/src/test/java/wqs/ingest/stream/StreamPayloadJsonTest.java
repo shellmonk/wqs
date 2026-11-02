@@ -201,4 +201,37 @@ class StreamPayloadJsonTest {
         assertThatThrownBy(() -> parse(with("cancelsTransactionId", "true")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("cancelsTransactionId");
     }
+
+    /** C1: a NUL in any known text field would be unstorable in Postgres (text and jsonb alike). */
+    @Test
+    void a_nul_in_any_known_text_field_is_rejected_naming_the_field() {
+        for (String field : new String[] {
+                "transactionId", "batchId", "subBatchId", "currency", "cancelsTransactionId"}) {
+            assertThatThrownBy(() -> parse(with(field, "\"a\\u0000b\"")))
+                    .as(field)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(field)
+                    .hasMessageContaining("U+0000");
+        }
+    }
+
+    @Test
+    void the_raw_nul_handler_path_dead_letters_the_body_instead_of_delivering_it() {
+        byte[] body = with("transactionId", "\"tx\\u0000\"").getBytes(StandardCharsets.UTF_8);
+        com.rabbitmq.stream.Message message = org.mockito.Mockito.mock(com.rabbitmq.stream.Message.class);
+        org.mockito.Mockito.when(message.getBodyAsBinary()).thenReturn(body);
+        java.util.List<Object> seen = new java.util.ArrayList<>();
+        RabbitStreamSource.handleMessage(mapper, message, 3, new StreamSource.StreamHandler() {
+            @Override
+            public void onMessage(StreamPayload payload, long offset) {
+                seen.add(payload);
+            }
+
+            @Override
+            public void onUndeserializable(byte[] raw, long offset, Exception error) {
+                seen.add(error.getMessage());
+            }
+        });
+        assertThat(seen).singleElement().asString().contains("transactionId").contains("U+0000");
+    }
 }

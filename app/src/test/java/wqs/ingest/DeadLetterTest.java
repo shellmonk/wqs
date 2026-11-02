@@ -155,7 +155,7 @@ class DeadLetterTest extends PostgresTestBase {
     @Test
     void an_unrecoverable_failure_never_lets_the_offset_pass_an_unprojected_event() {
         FlakyWriter flaky = new FlakyWriter(writer, 2, 5); // calls 2..5 fail: event 11, all attempts
-        DeadLetterStore dbDown = new DeadLetterStore(null, null) {
+        DeadLetterStore dbDown = new DeadLetterStore(null, null, null) {
             @Override
             public void record(String s, Long o, ProjectionItem i, Exception e, int a) {
                 throw new IllegalStateException("database down");
@@ -352,7 +352,7 @@ class DeadLetterTest extends PostgresTestBase {
 
     @Test
     void a_failed_raw_dead_letter_write_moves_no_offset_and_enters_recovery() {
-        DeadLetterStore dbDown = new DeadLetterStore(null, null) {
+        DeadLetterStore dbDown = new DeadLetterStore(null, null, null) {
             @Override
             public void record(String s, Long o, byte[] b, Exception e, int a) {
                 throw new IllegalStateException("database down");
@@ -407,8 +407,51 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(count("wqWebItem")).isZero();
     }
 
+    /**
+     * C1: a U+0000 in the sourceId makes the item insert fail AND the normal dead-letter row fail
+     * (Postgres text cannot hold NUL). The store must fall back to a raw row in its own
+     * transaction, so the offset advances and ingestion continues -- no recovery loop.
+     */
+    @Test
+    void an_item_whose_source_id_contains_nul_is_dead_lettered_raw_and_ingestion_continues() {
+        StreamConsumer consumer = consumer(1, writer, deadLetterStore, fixedClock());
+        consumer.start();
+
+        source.queue(payload("tx\u0000bad", WHEN), 5);
+        source.queue(payload("tx-6", WHEN), 6);
+        source.deliverAll();
+        consumer.poll();
+
+        assertThat(count()).isEqualTo(1);
+        var row = dsl().fetchOne(
+                "select \"sourceId\", \"streamOffset\", \"error\", \"payload\"->>'rawBase64' as raw "
+                        + "from \"wqDeadLetter\"");
+        assertThat(row.get("sourceId", String.class)).isNull();
+        assertThat(row.get("streamOffset", Long.class)).isEqualTo(5L);
+        assertThat(row.get("error", String.class)).contains("dead-letter fallback").doesNotContain("\u0000");
+        String raw = new String(java.util.Base64.getDecoder().decode(row.get("raw", String.class)),
+                java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(raw).contains("\"sourceId\":\"tx\\u0000bad\"");
+        // Not stuck: the next event projected and the offset passed the poison.
+        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(offsetStore.read(STREAM)).contains(6L);
+        assertThat(source.subscribeCount()).isEqualTo(1);
+    }
+
+    @Test
+    void a_nul_in_an_unmappable_payload_or_its_error_text_still_yields_a_row() {
+        StreamPayload unmappable = new StreamPayload(
+                "tx\u0000x", 7L, WHEN, 11, null, null, (short) 1, null, "EUR", null, null, Map.of());
+
+        deadLetterStore.record(STREAM, 3L, unmappable, new IllegalArgumentException("bad \u0000 text"), 1);
+
+        assertThat(count()).isEqualTo(1);
+        assertThat(dsl().fetchOne("select \"error\" from \"wqDeadLetter\"").get(0, String.class))
+                .startsWith("java.lang.IllegalArgumentException: bad \uFFFD text");
+    }
+
     private static DeadLetterStore alwaysFailingStore() {
-        return new DeadLetterStore(null, null) {
+        return new DeadLetterStore(null, null, null) {
             @Override
             public void record(String s, Long o, ProjectionItem i, Exception e, int a) {
                 throw new IllegalStateException("database down");

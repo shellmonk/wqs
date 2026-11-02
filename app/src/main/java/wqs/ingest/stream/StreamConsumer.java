@@ -49,6 +49,8 @@ public class StreamConsumer {
 
     private final BatchAccumulator accumulator;
     private final AtomicReference<Instant> lastProjectedAt = new AtomicReference<>();
+    /** When start() first ran; the lag gauge's floor until the first event is projected. */
+    private final AtomicReference<Instant> startedAt = new AtomicReference<>();
     private final Counter projectedCounter;
     private final Counter duplicateCounter;
     private final Counter deadLetteredCounter;
@@ -88,12 +90,10 @@ public class StreamConsumer {
         this.deadLetteredCounter = Counter.builder("wqs.ingest.events")
                 .tag("source", "stream").tag("outcome", "deadlettered").register(registry);
 
-        Gauge.builder("wqs.ingest.lag.seconds", lastProjectedAt, ref -> {
-                    Instant last = ref.get();
-                    return last == null ? 0d : Duration.between(last, clock.instant()).toMillis() / 1000d;
-                })
+        Gauge.builder("wqs.ingest.lag.seconds", this, StreamConsumer::lagSeconds)
                 .tag("source", "stream")
-                .description("Seconds between the last projected event's occurredAt and now")
+                .description("Seconds between the last projected event's occurredAt and now; "
+                        + "until something is projected, seconds since the consumer started")
                 .register(registry);
     }
 
@@ -107,6 +107,7 @@ public class StreamConsumer {
      * scheduler exists.
      */
     public void start() {
+        startedAt.compareAndSet(null, clock.instant());
         synchronized (this) {
             // Start from a clean slate: no leftover subscription, buffer or recovering state.
             generation++;
@@ -344,6 +345,19 @@ public class StreamConsumer {
         log.error("Dead-lettered item {} (batch offset {}) on stream {}",
                 item.sourceId(), batch.committedOffset(), batch.stream());
         return false;
+    }
+
+    /**
+     * Never a reassuring 0 while nothing has been projected: a consumer stuck from the start (a
+     * poison loop, a dead broker) would otherwise look perfectly current. Until the first event
+     * is projected the gauge reports time since the consumer started; before start() it is NaN.
+     */
+    double lagSeconds() {
+        Instant reference = lastProjectedAt.get();
+        if (reference == null) {
+            reference = startedAt.get();
+        }
+        return reference == null ? Double.NaN : Duration.between(reference, clock.instant()).toMillis() / 1000d;
     }
 
     private void recordLag(List<ProjectionItem> items) {

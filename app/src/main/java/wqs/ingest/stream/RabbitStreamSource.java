@@ -158,12 +158,23 @@ public class RabbitStreamSource implements StreamSource {
         return node == null ? null : textual(node, field);
     }
 
-    /** Text fields must be JSON strings: asText() would silently turn true/numbers/objects into text. */
+    /**
+     * Text fields must be JSON strings: asText() would silently turn true/numbers/objects into text.
+     *
+     * <p>U+0000 is legal JSON but Postgres can store it neither in text nor in jsonb, so an
+     * accepted NUL would make the item insert AND its dead-letter row fail on every retry --
+     * halting ingestion for good. Rejected here it becomes an undeserializable body, recorded
+     * as {@code rawBase64}, which stores any byte sequence.
+     */
     private static String textual(JsonNode node, String field) {
         if (!node.isTextual()) {
             throw new IllegalArgumentException(field + " must be a string");
         }
-        return node.asText();
+        String text = node.asText();
+        if (text.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException(field + " contains U+0000, which Postgres cannot store");
+        }
+        return text;
     }
 
     private static Instant instant(JsonNode node) {
