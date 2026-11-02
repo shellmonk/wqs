@@ -9,6 +9,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -19,16 +20,19 @@ import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.springframework.stereotype.Component;
-import wqs.db.TxTypeRegistry;
 import wqs.db.generated.tables.records.WqPlayRecord;
 import wqs.db.generated.tables.records.WqSessionRecord;
 import wqs.domain.AggregationLevel;
 
 /**
  * Level-1/2 page assembly (spec 7.3, 7.4): turns a page's high-level keys into entries, in the
- * keys' (page-index) order. At most four queries whatever the page size -- the page's sessions,
- * their plays (level 2 only), the view's items of those sessions, and its unsessioned items -- each
- * an array-bound join on the page's keys, so none grows in binds or round trips with the page.
+ * keys' (page-index) order. At most four queries whatever the page size and whatever the type
+ * registry's cache holds -- the page's sessions, their plays (level 2 only), the view's items of
+ * those sessions, and its unsessioned items -- each an array-bound join on the page's keys, so none
+ * grows in binds or round trips with the page; each member probe is per session or per key, so
+ * none reads rows outside the page's own (final review F1). A session's rows include its
+ * cancellation rows dated after its "endedAt", up to the range end (F3); at level 2 a row whose
+ * play is not listed stays on the session (F2).
  *
  * <p>Session and play figures are the stored rollups, the excl-cancelled variant when {@code
  * excludeCancelled} (plan D11); nothing is summed on read. {@code transactionTypes} filters only the
@@ -40,18 +44,15 @@ import wqs.domain.AggregationLevel;
 @Component
 public class HighLevelAssembler {
 
-    private final TxTypeRegistry txTypes;
-
-    public HighLevelAssembler(TxTypeRegistry txTypes) {
-        this.txTypes = txTypes;
-    }
-
     /** What the nested transactions are filtered by; the page index has been filtered already. */
-    public record Nesting(AggregationLevel level, Set<String> transactionTypes, boolean excludeCancelled) {
+    public record Nesting(AggregationLevel level, Set<String> transactionTypes, boolean excludeCancelled, Instant to) {
 
         public Nesting {
             if (level == null || level == AggregationLevel.L0) {
                 throw new IllegalArgumentException("assembly is for level 1 or 2, was " + level);
+            }
+            if (to == null) {
+                throw new IllegalArgumentException("the range end is required");
             }
             transactionTypes = Set.copyOf(transactionTypes);
         }
@@ -75,28 +76,32 @@ public class HighLevelAssembler {
         Map<String, List<TxView>> txsByBatch = Map.of();
         Map<String, Map<String, List<TxView>>> txsByPlay = Map.of();
         if (!sessions.isEmpty()) {
+            // Bounds of the page's sessions' "startedAt" only (partition pruning of "wqSession");
+            // every member probe is per session, inside its own window (final review F1).
             Instant lo = sessions.values().stream().map(s -> s.getStartedAt().toInstant())
                     .min(Comparator.naturalOrder()).orElseThrow();
-            Instant hi = sessions.values().stream().map(s -> s.getEndedAt().toInstant())
+            Instant hi = sessions.values().stream().map(s -> s.getStartedAt().toInstant())
                     .max(Comparator.naturalOrder()).orElseThrow();
             Map<String, WqSessionRecord> byBatch = new HashMap<>();
             sessions.values().forEach(s -> byBatch.put(s.getBatchId(), s));
             if (n.level() == AggregationLevel.L2) {
                 plays = plays(tx, userId, byBatch, lo, hi, n.excludeCancelled());
             }
-            Set<Short> typeIds = n.transactionTypes().isEmpty() ? Set.of() : txTypes.idsOf(tx, n.transactionTypes());
-            boolean nothingMatches = !n.transactionTypes().isEmpty() && typeIds.isEmpty();
-            List<ItemEntry> children = nothingMatches ? List.of() : items.sessionItems(
-                    tx, userId, byBatch.keySet(), lo, hi, typeIds, n.excludeCancelled());
+            Map<String, Set<String>> listedPlays = new HashMap<>();
+            plays.forEach((b, ps) -> ps.forEach(
+                    p -> listedPlays.computeIfAbsent(b, x -> new HashSet<>()).add(p.getSubBatchId())));
+            List<ItemEntry> children = items.sessionItems(
+                    tx, userId, byBatch.keySet(), lo, hi, n.to(), n.transactionTypes(), n.excludeCancelled());
             txsByBatch = new HashMap<>();
             txsByPlay = new HashMap<>();
             for (ItemEntry e : children) {
-                WqSessionRecord s = byBatch.get(e.batchId());
-                if (s == null || e.occurredAt().isBefore(s.getStartedAt().toInstant())
-                        || e.occurredAt().isAfter(s.getEndedAt().toInstant())) {
-                    continue; // outside its session's [startedAt, endedAt]
+                if (!byBatch.containsKey(e.batchId())) {
+                    continue;
                 }
-                if (n.level() == AggregationLevel.L2 && e.subBatchId() != null) {
+                // A row whose play is not listed (omitted under excl, or no play row at all) stays
+                // on the session rather than vanishing at level 2 (final review F2).
+                if (n.level() == AggregationLevel.L2 && e.subBatchId() != null
+                        && listedPlays.getOrDefault(e.batchId(), Set.of()).contains(e.subBatchId())) {
                     txsByPlay.computeIfAbsent(e.batchId(), b -> new HashMap<>())
                             .computeIfAbsent(e.subBatchId(), p -> new ArrayList<>()).add(TxView.of(e));
                 } else {
@@ -176,7 +181,8 @@ public class HighLevelAssembler {
     }
 
     /**
-     * The sessions' plays, newest first ("startedAt" desc, "subBatchId" desc), grouped by batch.
+     * The sessions' plays, newest first ("startedAt" desc, "subBatchId" desc), grouped by batch:
+     * per session, through "wqPlay_batch", inside the session's own window (final review F1).
      * Under excludeCancelled a play with no surviving transaction is omitted.
      */
     private static Map<String, List<WqPlayRecord>> plays(DSLContext tx, long userId,
@@ -184,17 +190,18 @@ public class HighLevelAssembler {
         Table<?> ids = batchIds(sessions.keySet());
         Map<String, List<WqPlayRecord>> out = new LinkedHashMap<>();
         tx.select(WQ_PLAY.fields())
-                .from(WQ_PLAY)
-                .join(ids).on(WQ_PLAY.batchId.eq(ids.field("id", String.class)))
-                .where(WQ_PLAY.userId.eq(userId))
-                .and(WQ_PLAY.startedAt.between(utc(lo), utc(hi)))
-                .and(excludeCancelled ? WQ_PLAY.txCountExclCancelled.gt(0) : DSL.noCondition())
+                .from(ids)
+                .join(WQ_SESSION).on(WQ_SESSION.userId.eq(userId)
+                        .and(WQ_SESSION.batchId.eq(ids.field("id", String.class)))
+                        .and(WQ_SESSION.startedAt.between(utc(lo), utc(hi))))
+                .join(WQ_PLAY).on(WQ_PLAY.userId.eq(userId)
+                        .and(WQ_PLAY.batchId.eq(WQ_SESSION.batchId))
+                        .and(WQ_PLAY.startedAt.between(WQ_SESSION.startedAt, WQ_SESSION.endedAt)))
+                .where(excludeCancelled ? WQ_PLAY.txCountExclCancelled.gt(0) : DSL.noCondition())
                 .orderBy(WQ_PLAY.startedAt.desc(), WQ_PLAY.subBatchId.desc())
                 .fetchInto(WQ_PLAY)
                 .forEach(p -> {
-                    WqSessionRecord s = sessions.get(p.getBatchId());
-                    if (s != null && !p.getStartedAt().isBefore(s.getStartedAt())
-                            && !p.getStartedAt().isAfter(s.getEndedAt())) {
+                    if (sessions.containsKey(p.getBatchId())) {
                         out.computeIfAbsent(p.getBatchId(), b -> new ArrayList<>()).add(p);
                     }
                 });

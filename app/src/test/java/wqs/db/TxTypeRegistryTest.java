@@ -90,6 +90,31 @@ class TxTypeRegistryTest extends PostgresTestBase {
         assertThat(rowCount()).isEqualTo(before);
     }
 
+    /** F4 (final review): a cold lookup of many codes is ONE statement, on either overload. */
+    @Test
+    void ids_of_reads_all_uncached_codes_in_one_statement() {
+        List<String> codes = new java.util.ArrayList<>(List.of("TT_BUY", "PRIZE"));
+        for (int i = 0; i < 50; i++) {
+            codes.add("TT_BOGUS_" + i + "_" + UUID.randomUUID());
+        }
+        java.util.concurrent.atomic.AtomicInteger statements = new java.util.concurrent.atomic.AtomicInteger();
+        DSLContext counting = DSL.using(TX_DSL.configuration().derive(
+                org.jooq.ExecuteListener.onExecuteStart(ctx -> statements.incrementAndGet())));
+
+        // reader overload, cold registry
+        var viaReader = registry().idsOf(counting, codes);
+        assertThat(statements.get()).as("reader overload statements").isEqualTo(1);
+
+        // writer overload, cold registry built on the counting DSL
+        statements.set(0);
+        var viaWriter = new TxTypeRegistry(counting, TM).idsOf(codes);
+        assertThat(statements.get()).as("writer overload statements").isEqualTo(1);
+
+        TxTypeRegistry warm = registry();
+        assertThat(viaReader).containsExactlyInAnyOrder(warm.idOf("TT_BUY"), warm.idOf("PRIZE"));
+        assertThat(viaWriter).isEqualTo(viaReader);
+    }
+
     @Test
     void an_unknown_type_id_is_a_bug_not_a_default() {
         assertThatThrownBy(() -> registry().directionOf((short) 32000))

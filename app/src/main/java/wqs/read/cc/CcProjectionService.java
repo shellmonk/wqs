@@ -56,7 +56,7 @@ public class CcProjectionService {
             long page, long pageSize) {
         HighLevelRequest req = new HighLevelRequest(ViewKind.CC, level,
                 new HighLevelFilter(userId, productTypes, excludeCancelled), from, to, page, pageSize);
-        HighLevelAssembler.Nesting nesting = new HighLevelAssembler.Nesting(level, transactionTypes, excludeCancelled);
+        HighLevelAssembler.Nesting nesting = new HighLevelAssembler.Nesting(level, transactionTypes, excludeCancelled, to);
         HighLevelPage<HighLevelEntry> result = reader.readHighLevel(req,
                 (tx, keys) -> assembler.assemble(tx, assembly, userId, nesting, keys));
         return ProjectionResponse.ofHighLevel(result, page, reader.effectivePageSize(pageSize));

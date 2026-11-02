@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -85,15 +87,22 @@ public class TxTypeRegistry {
      */
     public Set<Short> idsOf(DSLContext reader, Collection<String> codes) {
         Set<Short> ids = new LinkedHashSet<>();
+        Set<String> missing = new LinkedHashSet<>();
         for (String code : codes) {
             Short id = idsByCode.get(code);
-            if (id == null) {
-                WqTxTypeRecord row = find(reader, code);
-                id = row == null ? null : remember(row).typeId();
-            }
             if (id != null) {
                 ids.add(id);
+            } else if (code != null) {
+                missing.add(code);
             }
+        }
+        if (!missing.isEmpty()) {
+            // One statement for every uncached code (final review F4), the array a single bind.
+            reader.selectFrom(WQ_TX_TYPE)
+                    .where(WQ_TX_TYPE.code.eq(DSL.any(DSL.val(missing.toArray(String[]::new),
+                            SQLDataType.CLOB.getArrayDataType()))))
+                    .fetch()
+                    .forEach(row -> ids.add(remember(row).typeId()));
         }
         return ids;
     }
