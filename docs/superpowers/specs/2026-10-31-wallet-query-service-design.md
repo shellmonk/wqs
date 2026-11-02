@@ -232,7 +232,8 @@ fixtures for the decoder). These supersede the O-13 wire-format assumption phase
 | `batchId` / `subBatchId` | `batchContext.*` | `""` → null; `batchEnded` kept |
 | `cancels` | `references.transactionReference` | **only** when `type` ∈ {`TT_CANCEL`, `CANCEL`, `TT_TOMBSTONE`} and the reference ≠ `id` — the producer self-references when there is no link. `*_UNDO` / `*_ROLLBACK` are ordinary items |
 
-Every empty string is normalised to null. All accounts (`AT_MAIN`, bonus, …) and non-monetary
+Every empty string is normalised to null. The non-player check runs after the message is decoded,
+so a malformed non-player message is dead-lettered (raw body included) rather than skipped. All accounts (`AT_MAIN`, bonus, …) and non-monetary
 rows are projected. Remaining fields go to `"detail"` through an **allowlist**, never "the rest of
 the row" — `walPayments` carries encrypted card and bank data.
 
@@ -880,13 +881,15 @@ off-by-one defects:
 - `pageNumber` is **1-based**. Page 1 is the first page. `pagesAvailable == ceil(totalRowCount / pageSize)`,
   and `pagesAvailable == 0` when `totalRowCount == 0`.
 
-Sort order is **fixed newest-first**: total order (`"occurredAt" desc`, `"itemId" desc`), so
-ties on timestamp page deterministically. Not client-configurable.
+Sort order is **fixed newest-first**: total order (`"occurredAt" desc`, `"itemId" desc`) at level
+0 and (`"occurredAt" desc`, `"kind" desc`, `"refId" desc`) at levels 1–2, so ties on timestamp page
+deterministically. Not client-configurable.
 
 **Validation.** `pageNumber` and `pageSize` must be >= 1; `{playerId}` is a positive decimal long;
 each list takes at most 50 values (repeated or comma-separated, trimmed, blanks dropped); `from > to`
 is 400, while `from == to` is an empty 200 (half-open empty interval, totals 0). A non-empty
-`transactionTypes` list naming no known type yields an empty, correct page without running SQL. The optional
+`transactionTypes` list naming no known type yields, at level 0, an empty, correct page without
+running SQL; at levels 1–2 sessions still appear, with empty `txs`. The optional
 `wqs.read.max-page-size` clamps `pageSize`, and the response reports the effective value (§7.9).
 Error bodies are `ProblemDetail` with fixed text; `instance` is the endpoint template, never the
 request URI.
@@ -1066,8 +1069,13 @@ Per the API contract (`docs/reference/api-contract.md`, §4.1), every level uses
 - **Level 2:** as level 1, but a session nests `subitems: [{subBatchId, playTimestamp,
   playAmount, winAmount, amount, txs: [transaction…]}]`. Session items with no `subBatchId`
   stay in the session's own `txs` (omitted when empty).
-- With `excludeCancelledTransactions`, nested `txs` follow level-0 semantics exactly: cancelled
-  items are hidden, cancellation rows are not.
+- With `excludeCancelledTransactions`, nested `txs` follow level-0 semantics: cancelled items are
+  hidden, cancellation rows are not — including a cancel dated after its session's `endedAt`, and
+  one whose play is not listed, which then sits in the session's own `txs`. At level 2 a play with
+  no surviving transaction is omitted, so `playCount` equals the listed plays.
+- `txs` (level 1), `subitems` (level 2) and each play's `txs` are always present, possibly `[]`.
+- `transactionTypes` filters only transactions nested in a session; unsessioned top-level entries
+  are page units and are not filtered by it.
 - Totals are the stored rollup values — the excl-cancelled variants when
   `excludeCancelledTransactions` is set — never recomputed on read. `transactionTypes` filters only
   the nested `txs`; sessions and their totals are unaffected.
@@ -1080,7 +1088,7 @@ There is no separate unsessioned array and no truncation flag: unsessioned items
 - **Known risk (R-2).** A request such as `pageSize=500000` at level 2 can produce an enormous
   response and hold an Aurora connection for a long time. A configurable ceiling is implemented
   but **ships disabled**, so operations can clamp it without a release.
-- A page beyond the last page returns **200 with an empty body** and correct `totalPages`. This
+- A page beyond the last page returns **200 with an empty body** and correct `pagesAvailable`. This
   avoids spurious errors when live ingestion changes the page count between requests.
 
 ### 7.10 Aurora reader/writer split
