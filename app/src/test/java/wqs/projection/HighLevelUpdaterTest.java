@@ -1,6 +1,7 @@
 package wqs.projection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -15,6 +16,7 @@ import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.domain.ViewKind;
 
 class HighLevelUpdaterTest extends PostgresTestBase {
 
@@ -24,15 +26,14 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     void setUp() {
         // July and August 2034: the month-boundary move needs both partitions.
         new PartitionManager(dsl()).ensurePartitionsAhead(YearMonth.of(2034, 7), 1);
-        dsl().execute("delete from \"wqWebHighLevel\"");
-        dsl().execute("delete from \"wqCcHighLevel\"");
+        clean();
     }
 
     @Test
     void a_new_session_inserts_one_row_per_view_it_feeds() {
-        int inserted = apply(tx("t1", "b1", T0), newSession(T0, 11));
+        HighLevelResult result = apply(tx("t1", "b1", T0), newSession(T0, 11));
 
-        assertThat(inserted).isEqualTo(2);
+        assertThat(result.insertedCount()).isEqualTo(2);
         assertThat(count("wqWebHighLevel")).isEqualTo(1);
         assertThat(count("wqCcHighLevel")).isEqualTo(1);
     }
@@ -41,19 +42,19 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     void a_transaction_joining_an_existing_session_inserts_nothing() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
 
-        int inserted = apply(tx("t2", "b1", T0.plusSeconds(10)), joined(T0, 11));
+        HighLevelResult result = apply(tx("t2", "b1", T0.plusSeconds(10)), joined(T0, 11));
 
-        assertThat(inserted).isZero();
+        assertThat(result.insertedCount()).isZero();
         assertThat(count("wqWebHighLevel")).isEqualTo(1);
         assertThat(count("wqCcHighLevel")).isEqualTo(1);
     }
 
     @Test
     void an_unsessioned_item_is_always_its_own_high_level_row() {
-        int inserted = apply(payment("pay1", T0), RollupResult.NONE);
+        HighLevelResult result = apply(payment("pay1", T0), RollupResult.NONE);
 
         // Payments feed /cc only.
-        assertThat(inserted).isEqualTo(1);
+        assertThat(result.insertedCount()).isEqualTo(1);
         assertThat(count("wqCcHighLevel")).isEqualTo(1);
         assertThat(count("wqWebHighLevel")).isZero();
         Record row = dsl().fetchOne("select * from \"wqCcHighLevel\"");
@@ -96,8 +97,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
                 1L, SourceKind.PAYMENT, "pay2", T0, null, null, null,
                 (short) 9, new BigDecimal("-50.0000"), "EUR", null, "pay1", null);
 
-        assertThat(apply(sessionedCancel, RollupResult.NONE)).isZero();
-        assertThat(apply(unsessionedCancel, RollupResult.NONE)).isZero();
+        assertThat(apply(sessionedCancel, RollupResult.NONE)).isEqualTo(HighLevelResult.NONE);
+        assertThat(apply(unsessionedCancel, RollupResult.NONE)).isEqualTo(HighLevelResult.NONE);
         assertThat(count("wqWebHighLevel")).isZero();
         assertThat(count("wqCcHighLevel")).isZero();
     }
@@ -107,9 +108,12 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
         Instant earlier = T0.minusSeconds(3600);
 
-        int inserted = apply(tx("t0", "b1", earlier), moved(earlier, 11, T0, 11));
+        HighLevelResult result = apply(tx("t0", "b1", earlier), moved(earlier, 11, T0, 11));
 
-        assertThat(inserted).isZero();
+        assertThat(result.insertedCount()).isZero();
+        assertThat(result.moved()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
+        assertThat(result.movedFrom()).isEqualTo(T0);
+        assertThat(result.movedFromProductId()).isEqualTo(11);
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(earlier);
         assertThat(occurredAts("wqCcHighLevel")).containsExactly(earlier);
     }
@@ -145,9 +149,12 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     void a_product_only_change_updates_the_row_in_place() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
 
-        int inserted = apply(tx("t2", "b1", T0.plusSeconds(5)), moved(T0, 7, T0, 11));
+        HighLevelResult result = apply(tx("t2", "b1", T0.plusSeconds(5)), moved(T0, 7, T0, 11));
 
-        assertThat(inserted).isZero();
+        assertThat(result.insertedCount()).isZero();
+        assertThat(result.moved()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
+        assertThat(result.movedFrom()).isEqualTo(T0);
+        assertThat(result.movedFromProductId()).isEqualTo(11);
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(T0);
         assertThat(dsl().fetchOne("select \"productId\" from \"wqWebHighLevel\"")
                 .get(0, Integer.class)).isEqualTo(7);
@@ -156,16 +163,47 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     @Test
-    void a_move_only_touches_views_where_the_session_row_exists() {
-        // A session whose row exists in /cc only (e.g. created by a /cc-only source).
+    void a_move_materialises_a_missing_row_in_the_views_the_item_feeds() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
         dsl().execute("delete from \"wqWebHighLevel\"");
         Instant earlier = T0.minusSeconds(60);
 
-        apply(tx("t0", "b1", earlier), moved(earlier, 11, T0, 11));
+        HighLevelResult result = apply(tx("t0", "b1", earlier), moved(earlier, 11, T0, 11));
 
-        assertThat(count("wqWebHighLevel")).isZero();
+        // /cc row moved (0); the missing /web row is created at the current key.
+        assertThat(result.inserted()).containsExactly(ViewKind.WEB);
+        assertThat(result.moved()).containsExactly(ViewKind.CC);
+        assertThat(occurredAts("wqWebHighLevel")).containsExactly(earlier);
         assertThat(occurredAts("wqCcHighLevel")).containsExactly(earlier);
+    }
+
+    @Test
+    void the_end_state_does_not_depend_on_which_source_opens_the_session() {
+        ProjectionItem cc = ccOnly("m1", "b1", T0.plusSeconds(30));
+        ProjectionItem web = tx("t1", "b1", T0);
+
+        List<HighLevelResult> first = driveBoth(cc, web);
+        List<String> ccFirst = snapshot();
+        clean();
+        List<HighLevelResult> second = driveBoth(web, cc);
+
+        assertThat(snapshot()).isEqualTo(ccFirst);
+        // Per-view insert totals (what drives per-view counters) are order independent too.
+        assertThat(insertedViews(first)).containsExactlyInAnyOrderElementsOf(insertedViews(second));
+        assertThat(insertedViews(first)).hasSize(2);
+        // cc-first: the earlier TRANSACTION re-anchors the session, moving only the /cc row.
+        assertThat(first.get(1).moved()).containsExactly(ViewKind.CC);
+        assertThat(first.get(1).movedFrom()).isEqualTo(T0.plusSeconds(30));
+        assertThat(first.get(1).inserted()).containsExactly(ViewKind.WEB);
+        assertThat(second.stream().flatMap(r -> r.moved().stream())).isEmpty();
+        assertThat(count("wqWebHighLevel")).isEqualTo(1);
+        assertThat(count("wqCcHighLevel")).isEqualTo(1);
+    }
+
+    @Test
+    void a_sessioned_item_without_a_session_key_is_a_contract_violation() {
+        assertThatThrownBy(() -> apply(tx("t1", "b1", T0), RollupResult.NONE))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -181,20 +219,46 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(e2);
     }
 
-    @Test
-    void it_requires_a_caller_transaction() {
-        HighLevelUpdater updater = new HighLevelUpdater(dsl());
-        // Direct construction has no proxy, so MANDATORY is enforced by Spring only; here we
-        // assert the annotation is present rather than re-implementing the proxy.
-        assertThat(HighLevelUpdater.class.getMethods())
-                .filteredOn(m -> m.getName().equals("applyItem"))
-                .allSatisfy(m -> assertThat(m.getAnnotation(
-                        org.springframework.transaction.annotation.Transactional.class).propagation())
-                        .isEqualTo(org.springframework.transaction.annotation.Propagation.MANDATORY));
-        assertThat(updater).isNotNull();
+    /** Drives the real RollupUpdater then HighLevelUpdater, one transaction per item. */
+    private List<HighLevelResult> driveBoth(ProjectionItem... items) {
+        List<HighLevelResult> results = new java.util.ArrayList<>();
+        for (ProjectionItem item : items) {
+            results.add(dsl().transactionResult(cfg -> {
+                RollupResult rollup = new RollupUpdater(DSL.using(cfg)).applyItem(item);
+                return new HighLevelUpdater(DSL.using(cfg)).applyItem(item, rollup);
+            }));
+        }
+        return results;
     }
 
-    private int apply(ProjectionItem item, RollupResult rollup) {
+    private static List<ViewKind> insertedViews(List<HighLevelResult> results) {
+        return results.stream().flatMap(r -> r.inserted().stream()).toList();
+    }
+
+    private void clean() {
+        dsl().execute("delete from \"wqWebHighLevel\"");
+        dsl().execute("delete from \"wqCcHighLevel\"");
+        dsl().execute("delete from \"wqGroupLocator\"");
+        dsl().execute("delete from \"wqPlay\"");
+        dsl().execute("delete from \"wqSession\"");
+    }
+
+    private List<String> snapshot() {
+        return java.util.stream.Stream.of("wqWebHighLevel", "wqCcHighLevel")
+                .flatMap(t -> dsl().fetch("select \"userId\",\"occurredAt\",\"kind\",\"refId\","
+                        + "\"productId\",\"currency\",\"visibleExclCancelled\" from \"" + t
+                        + "\" order by 1,2,3,4").stream()
+                        .map(r -> t + r.intoList()))
+                .toList();
+    }
+
+    private ProjectionItem ccOnly(String id, String batchId, Instant at) {
+        return new ProjectionItem(
+                1L, SourceKind.MANUAL_ADJUSTMENT, id, at, 11, batchId, null,
+                (short) 9, new BigDecimal("5.0000"), "EUR", null, null, null);
+    }
+
+    private HighLevelResult apply(ProjectionItem item, RollupResult rollup) {
         return dsl().transactionResult(
                 cfg -> new HighLevelUpdater(DSL.using(cfg)).applyItem(item, rollup));
     }
