@@ -75,7 +75,60 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
                 .startsWith("missing counter row");
     }
 
+    @Test
+    void a_changed_excl_cancelled_count_alone_is_counter_drift() {
+        // /cc items on April 1: pay1 (cancelled), c1 and pc1 -- excl is 2 of 3.
+        execute("""
+                update "wqCountDay" set "cntExclCancelled" = "cntExclCancelled" - 1
+                where "viewKind" = 2 and "pageUnit" = 0 and "productId" = 0
+                  and "period" = date '2034-04-01'""");
+
+        assertThat(invariants.counterDrift()).singleElement().asString()
+                .startsWith("counter mismatch").contains("expectedAll=3 storedAll=3",
+                        "expectedExcl=2 storedExcl=1");
+    }
+
     // --- P-4 -------------------------------------------------------------------------------------
+
+    @Test
+    void a_play_without_items_is_aggregation_drift() {
+        execute("""
+                insert into "wqPlay" ("userId", "batchId", "subBatchId", "startedAt", "endedAt",
+                                      "currency")
+                values (1, 'b1', 'ghost', timestamptz '2034-03-31 10:00Z',
+                        timestamptz '2034-03-31 10:00Z', 'EUR')""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("orphan play row").contains("subBatchId=ghost");
+    }
+
+    @Test
+    void a_deleted_session_row_is_aggregation_drift() {
+        execute("""
+                delete from "wqSession" where "batchId" = 'b1'""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("missing session row").contains("batchId=b1");
+    }
+
+    @Test
+    void a_changed_session_play_count_is_aggregation_drift() {
+        execute("""
+                update "wqSession" set "playCount" = "playCount" + 1""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("session mismatch").contains("batchId=b1");
+    }
+
+    @Test
+    void a_changed_session_play_count_excl_cancelled_is_aggregation_drift() {
+        // p1's only transaction is cancelled, p2's is not: one surviving play.
+        execute("""
+                update "wqSession" set "playCountExclCancelled" = "playCountExclCancelled" - 1""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("session mismatch").contains("batchId=b1");
+    }
 
     @Test
     void a_changed_session_tx_count_excl_cancelled_is_aggregation_drift() {
@@ -127,6 +180,26 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("page row visibility mismatch").contains("view=WEB", "refId=b1");
+    }
+
+    @Test
+    void a_session_row_missing_from_one_view_is_high_level_drift() {
+        // Materialisation is per view: the session must have its row in /web as well as /cc.
+        execute("""
+                delete from "wqWebHighLevel" where "kind" = 0""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("missing page row").contains("view=WEB", "kind=0", "refId=b1");
+    }
+
+    @Test
+    void a_session_row_with_another_currency_is_high_level_drift() {
+        execute("""
+                update "wqCcHighLevel" set "currency" = 'USD' where "kind" = 0""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("page row currency mismatch").contains("view=CC",
+                        "expectedCurrency=EUR", "storedCurrency=USD");
     }
 
     @Test

@@ -19,12 +19,12 @@ import wqs.domain.MoneyDirection;
  * OUTER JOIN of expected against stored, so a stored row nothing justifies (orphan) and an
  * expected row nothing stores (missing) both surface, not only value mismatches.
  *
- * Shared semantics (mirroring the write path, not re-deciding it):
+ * The spec semantics checked here, which the write path must also follow:
  * <ul>
  *   <li>A cancellation is an item row ("cancels" non-blank). It is counted at the ITEM page unit
  *       like any row, but never rolls up and never gets a page-index row.</li>
  *   <li>A session's key is (MIN occurredAt, LEAST non-null productId) over its non-cancellation
- *       items, cancelled or not -- a cancel never moves a row.</li>
+ *       items, cancelled or not -- a cancel never moves a row. Its currency is LEAST likewise.</li>
  *   <li>Counters are sparse: a stored row with cntAll = 0 is itself drift.</li>
  * </ul>
  */
@@ -249,9 +249,10 @@ public final class ProjectionInvariants {
      * Per view V (its item table holds exactly the items whose source feeds V): one session row
      * for each session with at least one non-cancellation item in V, at the session key
      * (startedAt, productId) folded over ALL the session's non-cancellation items, visible iff at
-     * least one of its non-cancellation items in V is not cancelled; and one row per
-     * non-cancellation unsessioned item in V, at the item's own (occurredAt, productId), visible
-     * iff the item is not cancelled. Rows are matched on (userId, kind, refId), so a row at the
+     * least one of its non-cancellation items in V is not cancelled, carrying the session's
+     * currency (LEAST over the same items as the key); and one row per non-cancellation
+     * unsessioned item in V, at the item's own (occurredAt, productId) with its own currency,
+     * visible iff the item is not cancelled. Rows are matched on (userId, kind, refId), so a row at the
      * wrong key reads as a key mismatch rather than an orphan plus a missing row.
      */
     public List<String> highLevelDrift() {
@@ -261,22 +262,23 @@ public final class ProjectionInvariants {
             drift.addAll(dsl.fetch("""
                     with session_key as (
                         select i."userId", i."batchId", min(i."occurredAt") as "startedAt",
-                               min(i."productId") as "productId"
+                               min(i."productId") as "productId",
+                               min(i."currency"::text) as currency
                         from "wqCcItem" i
                         where i."batchId" is not null and %3$s
                         group by 1, 2
                     ),
                     expected as (
                         select k."userId", k."startedAt" as "occurredAt", 0::smallint as kind,
-                               k."batchId" as "refId", k."productId",
+                               k."batchId" as "refId", k."productId", k.currency,
                                bool_or(not i."cancelled") as visible
                         from "%1$s" i
                         join session_key k on k."userId" = i."userId" and k."batchId" = i."batchId"
                         where %3$s
-                        group by 1, 2, 3, 4, 5
+                        group by 1, 2, 3, 4, 5, 6
                       union all
                         select i."userId", i."occurredAt", i."source", i."sourceId", i."productId",
-                               not i."cancelled"
+                               i."currency"::text, not i."cancelled"
                         from "%1$s" i
                         where i."batchId" is null and %3$s
                     )
@@ -285,6 +287,8 @@ public final class ProjectionInvariants {
                                 when e."occurredAt" <> h."occurredAt"
                                   or e."productId" is distinct from h."productId"
                                   then 'page row key mismatch'
+                                when e.currency is distinct from h."currency"::text
+                                  then 'page row currency mismatch'
                                 else 'page row visibility mismatch' end as problem,
                            '%4$s' as view,
                            coalesce(e."userId", h."userId") as "userId",
@@ -292,6 +296,7 @@ public final class ProjectionInvariants {
                            coalesce(e."refId", h."refId") as "refId",
                            e."occurredAt" as "expectedAt", h."occurredAt" as "storedAt",
                            e."productId" as "expectedProductId", h."productId" as "storedProductId",
+                           e.currency as "expectedCurrency", h."currency" as "storedCurrency",
                            e.visible as "expectedVisible", h."visibleExclCancelled" as "storedVisible"
                     from expected e
                     full outer join "%2$s" h
@@ -299,6 +304,7 @@ public final class ProjectionInvariants {
                     where e."refId" is null or h."refId" is null
                        or e."occurredAt" <> h."occurredAt"
                        or e."productId" is distinct from h."productId"
+                       or e.currency is distinct from h."currency"::text
                        or e.visible <> h."visibleExclCancelled"
                     order by 3, 4, 5
                     """.formatted(view[1], view[2], NOT_A_CANCELLATION, view[0]))

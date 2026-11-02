@@ -57,6 +57,18 @@ public final class EventGenerators {
                 .injectNull(0.5);
     }
 
+    /**
+     * The currency of the /cc-only adjustment and the claimable prize joining a session: EUR (the
+     * transactions' currency) half the time, otherwise a second currency above or below it, so
+     * sessions mix currencies and their LEAST depends on which items have arrived.
+     */
+    private static Arbitrary<String> joiningCurrencies() {
+        return Arbitraries.frequency(
+                net.jqwik.api.Tuple.of(2, "EUR"),
+                net.jqwik.api.Tuple.of(1, "USD"),
+                net.jqwik.api.Tuple.of(1, "AUD"));
+    }
+
     private static Arbitrary<Instant> timestamps() {
         long spanSeconds = ChronoUnit.SECONDS.between(SESSION_START_MIN, WINDOW_END);
         return Arbitraries.longs().between(0, spanSeconds).map(SESSION_START_MIN::plusSeconds);
@@ -77,6 +89,9 @@ public final class EventGenerators {
      * arrival is later raised to 13 in place, or never seen as a change if it arrives last), and
      * session 0 is joined by a /cc-only adjustment a day earlier at product 7 (start AND product
      * move) and one after its last transaction at product 3 (product-only change, same start).
+     * Half the time those adjustments (and the claimable prize) are in USD or AUD rather than the
+     * transactions' EUR, so session 0's LEAST currency -- which its page rows must carry in both
+     * views -- also depends on arrival order.
      */
     public static Arbitrary<List<ProjectionItem>> itemSequences() {
         return Combinators.combine(
@@ -87,7 +102,8 @@ public final class EventGenerators {
                         timestamps(),
                         amounts(),
                         collidingSources(),
-                        details())
+                        Combinators.combine(details(), joiningCurrencies())
+                                .as(net.jqwik.api.Tuple::of))
                 .as(EventGenerators::buildSequence);
     }
 
@@ -98,10 +114,12 @@ public final class EventGenerators {
      * sourceId collisions are cancelled too.
      *
      * <ul>
-     *   <li>About a third of sessions have EVERY item cancelled, /cc-only ones included, so
-     *       they end hidden in both views. Interleaved with their originals (and arriving in
-     *       either order), the cancels hide a session's rows and a later live item revives them,
-     *       repeatedly.</li>
+     *   <li>A third of sessions (decided once per session) have EVERY item cancelled, /cc-only
+     *       ones included, so they end hidden in both views. Measured over 1000 samples: of the
+     *       sessions with two or more items, 34% end fully cancelled, 51% partially cancelled
+     *       (most of those across several plays) and 15% untouched. Interleaved with their
+     *       originals (and arriving in either order), the cancels hide a session's rows and a
+     *       later live item revives them, repeatedly.</li>
      *   <li>Otherwise each item is cancelled with probability 1/4.</li>
      *   <li>About a third of cancels are placed BEFORE their original, at a random earlier
      *       position -- often in an earlier batch, so they park and drain across batches.</li>
@@ -118,11 +136,17 @@ public final class EventGenerators {
 
     private static List<ProjectionItem> withCancels(List<ProjectionItem> items, long seed) {
         java.util.Random random = new java.util.Random(seed);
-        java.util.Set<String> fullyCancelled = new java.util.HashSet<>();
+        // Decided once per distinct session, in first-seen order (deterministic for a seed).
+        java.util.Set<String> sessions = new java.util.LinkedHashSet<>();
         for (ProjectionItem item : items) {
-            if (item.batchId() != null && !fullyCancelled.contains(item.batchId())
-                    && random.nextInt(3) == 0) {
-                fullyCancelled.add(item.batchId());
+            if (item.batchId() != null) {
+                sessions.add(item.batchId());
+            }
+        }
+        java.util.Set<String> fullyCancelled = new java.util.HashSet<>();
+        for (String batchId : sessions) {
+            if (random.nextInt(3) == 0) {
+                fullyCancelled.add(batchId);
             }
         }
 
@@ -160,7 +184,10 @@ public final class EventGenerators {
 
     private static List<ProjectionItem> buildSequence(
             long userId, int sessions, int plays, int txPerPlay, Instant start, BigDecimal amount,
-            java.util.Set<SourceKind> colliding, String detail) {
+            java.util.Set<SourceKind> colliding,
+            net.jqwik.api.Tuple.Tuple2<String, String> detailAndCurrency) {
+        String detail = detailAndCurrency.get1();
+        String joiningCurrency = detailAndCurrency.get2();
         List<ProjectionItem> items = new ArrayList<>();
         int sequence = 0;
 
@@ -198,11 +225,11 @@ public final class EventGenerators {
         items.add(new ProjectionItem(
                 userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adj" + sequence,
                 start.minus(1, ChronoUnit.DAYS), 7,
-                "u" + userId + "-s0", null, (short) 9, amount, "EUR", null, null, null));
+                "u" + userId + "-s0", null, (short) 9, amount, joiningCurrency, null, null, null));
         items.add(new ProjectionItem(
                 userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adjlate" + sequence,
                 start.plusSeconds(sequence * 7L + 5), 3,
-                "u" + userId + "-s0", null, (short) 9, amount, "EUR", null, null, null));
+                "u" + userId + "-s0", null, (short) 9, amount, joiningCurrency, null, null, null));
 
         // Unsessioned items: payments carry no batchId (spec 7.4).
         items.add(new ProjectionItem(
@@ -222,7 +249,8 @@ public final class EventGenerators {
                     sessioned ? 11 : null,
                     sessioned ? "u" + userId + "-sprize" : null,
                     sessioned ? "u" + userId + "-sprize-p0" : null,
-                    (short) (kind == SourceKind.PAYMENT ? 9 : 3), amount, "EUR", null, null, detail));
+                    (short) (kind == SourceKind.PAYMENT ? 9 : 3), amount,
+                    sessioned ? joiningCurrency : "EUR", null, null, detail));
         }
 
         return items;
