@@ -61,6 +61,26 @@ class PartitionManagerTest extends PostgresTestBase {
         assertThat(manager.runwayMonths(YearMonth.of(2031, 5))).isZero();
     }
 
+    @Test
+    void a_row_at_the_exact_month_boundary_lands_in_the_new_month_not_the_old_one() {
+        manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 1);
+
+        dsl().execute("""
+                      insert into "wqWebItem"
+                        ("userId","itemId","source","sourceId","occurredAt","type","amount","currency")
+                      values (1, 2, 1, 'tx-boundary', timestamptz '2031-02-01T00:00:00Z', 1, 10.0000, 'EUR')
+                      """);
+
+        Integer februaryCount = dsl()
+                .fetchOne("select count(*)::int from \"wqWebItem_2031_02\"")
+                .get(0, Integer.class);
+        Integer januaryCount = dsl()
+                .fetchOne("select count(*)::int from \"wqWebItem_2031_01\"")
+                .get(0, Integer.class);
+        assertThat(februaryCount).isEqualTo(1);
+        assertThat(januaryCount).isZero();
+    }
+
     private void dropTestPartitions() {
         existingPartitionNames().stream()
                 .filter(name -> name.contains("_2031_"))
