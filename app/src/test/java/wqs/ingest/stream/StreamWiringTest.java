@@ -71,6 +71,7 @@ class StreamWiringTest extends PostgresTestBase {
     @Test
     void the_consumer_is_started_polled_and_projects_into_the_item_tables() {
         assertThat(context.getBeanNamesForType(StreamConsumer.class)).hasSize(1);
+        assertThat(context.getBeanNamesForType(StreamDisabledNotice.class)).isEmpty();
         // Started by ApplicationReadyEvent, from offset 0 on an empty offset table.
         assertThat(source.subscribeCount()).isEqualTo(1);
         assertThat(source.subscribedFrom()).isZero();

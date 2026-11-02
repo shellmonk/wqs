@@ -4,6 +4,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TimeZone;
 import org.quartz.CronScheduleBuilder;
 import org.quartz.CronTrigger;
 import org.quartz.JobBuilder;
@@ -36,6 +37,7 @@ import wqs.jobs.JobProperties.MisfirePolicy;
 public class JobRegistrar {
 
     public static final String GROUP = "wqs";
+    private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
 
     private static final Logger log = LoggerFactory.getLogger(JobRegistrar.class);
 
@@ -111,7 +113,8 @@ public class JobRegistrar {
         }
         if (desired instanceof CronTrigger desiredCron) {
             return !(existing instanceof CronTrigger existingCron)
-                    || !existingCron.getCronExpression().equals(desiredCron.getCronExpression());
+                    || !existingCron.getCronExpression().equals(desiredCron.getCronExpression())
+                    || !existingCron.getTimeZone().getID().equals(desiredCron.getTimeZone().getID());
         }
         if (desired instanceof SimpleTrigger desiredSimple) {
             return !(existing instanceof SimpleTrigger existingSimple)
@@ -127,7 +130,9 @@ public class JobRegistrar {
                 .forJob(jobKey);
 
         if (spec.isCronBased()) {
-            CronScheduleBuilder cron = CronScheduleBuilder.cronSchedule(spec.cron());
+            // UTC, never the JVM default zone: every node must read "0 0 3 * * ?" the same way
+            // (spec 7.1: UTC throughout), and a node's TZ setting must not move the schedule.
+            CronScheduleBuilder cron = CronScheduleBuilder.cronSchedule(spec.cron()).inTimeZone(UTC);
             return builder.withSchedule(
                     spec.misfirePolicy() == MisfirePolicy.DO_NOTHING
                             ? cron.withMisfireHandlingInstructionDoNothing()

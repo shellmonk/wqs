@@ -233,6 +233,49 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
     // --- fixtures --------------------------------------------------------------------------------
 
+    // --- cancellation (spec 6.3) --------------------------------------------------------------
+
+    @Test
+    void an_unapplied_cancel_is_cancellation_drift() {
+        execute("""
+                update "wqWebItem" set "cancelled" = false, "cancelledBy" = null
+                where "sourceId" = 't1'""");
+
+        assertThat(invariants.cancellationDrift()).singleElement().asString()
+                .startsWith("cancel not applied").contains("view=WEB", "sourceId=t1");
+    }
+
+    @Test
+    void a_wrong_cancelled_by_is_cancellation_drift() {
+        execute("""
+                update "wqCcItem" set "cancelledBy" = 'zz'
+                where "sourceId" = 'pay1'""");
+
+        assertThat(invariants.cancellationDrift()).singleElement().asString()
+                .startsWith("cancelledBy mismatch").contains("view=CC", "sourceId=pay1");
+    }
+
+    @Test
+    void a_cancelled_flag_without_any_cancel_is_cancellation_drift() {
+        execute("""
+                update "wqCcItem" set "cancelled" = true, "cancelledBy" = 'ghost'
+                where "sourceId" = 't2'""");
+
+        assertThat(invariants.cancellationDrift()).singleElement().asString()
+                .startsWith("cancelled without a cancel").contains("sourceId=t2");
+    }
+
+    @Test
+    void a_parked_cancel_whose_target_exists_is_cancellation_drift() {
+        execute("""
+                insert into "wqPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "userId",
+                    "occurredAt", "type", "amount", "currency")
+                values (1, 'c9', 't2', 1, timestamptz '2034-04-01 00:00:00+00', 1, 1, 'EUR')""");
+
+        assertThat(invariants.cancellationDrift()).singleElement().asString()
+                .startsWith("unexpected pending cancel").contains("cancelSourceId=c9");
+    }
+
     private void execute(String sql) {
         assertThat(dsl().execute(sql)).as(sql).isEqualTo(1);
     }

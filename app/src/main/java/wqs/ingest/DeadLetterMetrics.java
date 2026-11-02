@@ -22,7 +22,9 @@ public class DeadLetterMetrics {
 
     public DeadLetterMetrics(DSLContext dsl, MeterRegistry registry, Clock clock) {
         CachedGaugeValue depth = new CachedGaugeValue(() -> dsl.fetchCount(WQ_DEAD_LETTER), clock, TTL);
+        // strongReference: Micrometer holds gauge state weakly, and nothing else holds this one.
         Gauge.builder("wqs.deadletter.depth", depth, CachedGaugeValue::get)
+                .strongReference(true)
                 .description("Events quarantined in wqDeadLetter")
                 .register(registry);
     }

@@ -29,6 +29,9 @@ wqs:
   stream:
     # Off by default so broker-less contexts (tests, tooling) start. Deployments enable it with
     # WQS_STREAM_ENABLED=true (Spring relaxed binding).
+    # EXACTLY ONE replica may set WQS_STREAM_ENABLED=true. Nothing yet enforces it (single-active-
+    # consumer / advisory lock is deferred): two consumers would both project and race on the
+    # stored offset (spec 6.1). A WARN is logged at startup on every replica where it is off.
     enabled: false
     name: wallet-transactions
     uri: rabbitmq-stream://localhost:5552

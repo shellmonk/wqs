@@ -8,7 +8,6 @@ import org.mapstruct.Mapping;
 import org.mapstruct.Named;
 import org.mapstruct.ReportingPolicy;
 import wqs.domain.ProjectionItem;
-import wqs.domain.SourceKind;
 import wqs.projection.source.StreamPayload;
 
 /**

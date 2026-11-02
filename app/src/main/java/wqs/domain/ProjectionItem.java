@@ -10,7 +10,8 @@ import java.time.Instant;
  * (spec section 13). {@code detailJson} is a String rather than jOOQ's JSONB so that the
  * domain package carries no jOOQ dependency.
  *
- * {@code cancels} is the sourceId this item cancels, or null. Phase 3 acts on it.
+ * {@code cancels} is the sourceId this item cancels, or null; blank is normalised to null like
+ * the batch ids, so "not a cancellation" has exactly one representation.
  *
  * A blank {@code batchId} or {@code subBatchId} is normalised to null here, at the domain
  * boundary: "no session" and "no play" have exactly one representation, and the empty string --
@@ -43,10 +44,11 @@ public record ProjectionItem(
         }
         batchId = blankToNull(batchId);
         subBatchId = blankToNull(subBatchId);
+        cancels = blankToNull(cancels);
     }
 
     public boolean isCancellation() {
-        return cancels != null && !cancels.isBlank();
+        return cancels != null;
     }
 
     public boolean isSessioned() {

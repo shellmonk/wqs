@@ -68,7 +68,12 @@ class BatchAccumulatorTest {
         accumulator.add(item("b"), 9);
         accumulator.add(item("c"), 8);
 
-        assertThat(accumulator.drainNow().orElseThrow().committedOffset()).isEqualTo(9L);
+        ProjectionBatch batch = accumulator.drainNow().orElseThrow();
+        assertThat(batch.committedOffset()).isEqualTo(9L);
+        // Each item keeps its own offset, for its dead-letter row.
+        assertThat(batch.itemOffsets()).containsExactly(7L, 9L, 8L);
+        accumulator.add(item("d"), 10);
+        assertThat(accumulator.drainNow().orElseThrow().itemOffsets()).containsExactly(10L);
     }
 
     @Test

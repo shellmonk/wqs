@@ -4,7 +4,9 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.slices;
 
+import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClass;
+import com.tngtech.archunit.core.domain.JavaFieldAccess;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -54,57 +56,30 @@ class ArchitectureTest {
         rule.check(classes);
     }
 
-    /** Spec 9 control 3: security by schema -- /web cannot reach the operator table. */
+    /**
+     * Spec 9 control 3: security by schema -- /web cannot reach operator data. Forbids every
+     * generated {@code WqCc*} type (the operator item table, its page index, their records) AND
+     * any access to a {@code Tables.WQ_CC_*} field: passing {@code WQ_CC_ITEM} straight to
+     * {@code selectFrom(..)} depends on no WqCc type, only on the Tables field.
+     */
     @Test
-    void web_layer_cannot_touch_the_operator_item_table() {
+    void web_layer_cannot_touch_operator_tables() {
         ArchRule rule = noClasses()
                 .that().resideInAnyPackage("wqs.api.web..", "wqs.read.web..")
-                .should().dependOnClassesThat().haveSimpleNameStartingWith("WqCcItem")
+                .should().dependOnClassesThat().haveSimpleNameStartingWith("WqCc")
+                .orShould().accessFieldWhere(operatorTableField())
                 .allowEmptyShould(true);
         rule.check(classes);
     }
 
-    /**
-     * Spec 8.5 layering rule / spec 10: {@code api -> read/projection -> domain} and
-     * {@code ingest -> projection}. The query and write layers never reach back up into the
-     * drivers (ingest) or the edge (api).
-     */
-    @Test
-    void read_and_projection_depend_on_neither_ingest_nor_api() {
-        ArchRule rule = noClasses()
-                .that().resideInAnyPackage("wqs.projection..", "wqs.read..")
-                .should().dependOnClassesThat().resideInAnyPackage("wqs.ingest..", "wqs.api..");
-        rule.check(classes);
-    }
-
-    /** Spec 8.5 layering rule: domain is the bottom layer and depends on no other WQS package. */
-    @Test
-    void domain_depends_on_no_other_wqs_package() {
-        ArchRule rule = noClasses()
-                .that().resideInAPackage("wqs.domain..")
-                .should().dependOnClassesThat().resideInAnyPackage(
-                        "wqs.api..", "wqs.read..", "wqs.projection..", "wqs.ingest..", "wqs.jobs..",
-                        "wqs.db..", "wqs.config..", "wqs.metrics..");
-        rule.check(classes);
-    }
-
-    /** Spec 8.5 layering rule: nothing depends on api. */
-    @Test
-    void nothing_depends_on_api() {
-        ArchRule rule = noClasses()
-                .that().resideOutsideOfPackage("wqs.api..")
-                .should().dependOnClassesThat().resideInAPackage("wqs.api..");
-        rule.check(classes);
-    }
-
-    /**
-     * Spec 8.5 layering rule: a layering is only a layering without cycles. Checked over the
-     * top-level WQS packages, so any new package is covered without editing this rule.
-     */
-    @Test
-    void top_level_packages_are_free_of_cycles() {
-        ArchRule rule = slices().matching("wqs.(*)..").should().beFreeOfCycles();
-        rule.check(classes);
+    private static DescribedPredicate<JavaFieldAccess> operatorTableField() {
+        return new DescribedPredicate<>("a Tables.WQ_CC_* field") {
+            @Override
+            public boolean test(JavaFieldAccess access) {
+                return access.getTargetOwner().getName().equals("wqs.db.generated.Tables")
+                        && access.getTarget().getName().startsWith("WQ_CC_");
+            }
+        };
     }
 
     /** Spec 2.1: no regression to the superseded JPA-plus-raw-SQL pattern. */

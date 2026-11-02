@@ -20,7 +20,7 @@ import org.springframework.stereotype.Component;
 @RawSqlJustified(
         "jOOQ has no DSL for CREATE TABLE ... PARTITION OF, and Postgres does not accept bind "
         + "parameters in FOR VALUES, so DSLContext.execute(String) is required. The pg_inherits "
-        + "existence check uses from(String)/where(String, Object...) because the catalog table "
+        + "existence check uses from(String), where(String, Object...) and and(String, Object...) because the catalog table "
         + "is not in the generated schema and to_regclass(?) takes a quoted regclass name. All "
         + "inputs are program-generated and identifiers pass through quoteIdent.")
 @Component

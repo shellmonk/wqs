@@ -60,6 +60,36 @@ class JobRegistrarTest {
     }
 
     @Test
+    void cron_triggers_run_in_utc_whatever_the_jvm_zone() throws Exception {
+        java.util.TimeZone jvm = java.util.TimeZone.getDefault();
+        try {
+            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("America/New_York"));
+            registrar(spec("0 0 3 * * ?", null)).reconcile();
+        } finally {
+            java.util.TimeZone.setDefault(jvm);
+        }
+
+        CronTrigger trigger = (CronTrigger) scheduler.getTrigger(TRIGGER_KEY);
+        assertThat(trigger.getTimeZone().getID()).isEqualTo("UTC");
+        java.time.Instant next = trigger.getFireTimeAfter(new Date()).toInstant();
+        assertThat(next.atZone(java.time.ZoneOffset.UTC).getHour()).isEqualTo(3);
+    }
+
+    @Test
+    void a_stored_cron_trigger_in_another_zone_is_rescheduled_to_utc() throws Exception {
+        scheduler.addJob(org.quartz.JobBuilder.newJob(NoOpJob.class).withIdentity(JOB_KEY).storeDurably().build(), true);
+        scheduler.scheduleJob(org.quartz.TriggerBuilder.newTrigger().withIdentity(TRIGGER_KEY).forJob(JOB_KEY)
+                .withSchedule(org.quartz.CronScheduleBuilder.cronSchedule("0 0 3 * * ?")
+                        .inTimeZone(java.util.TimeZone.getTimeZone("Europe/Belgrade"))
+                        .withMisfireHandlingInstructionDoNothing())
+                .build());
+
+        registrar(spec("0 0 3 * * ?", null)).reconcile();
+
+        assertThat(((CronTrigger) scheduler.getTrigger(TRIGGER_KEY)).getTimeZone().getID()).isEqualTo("UTC");
+    }
+
+    @Test
     void reschedules_rather_than_duplicating_when_the_cron_changes() throws Exception {
         registrar(spec("0 0 3 * * ?", null)).reconcile();
 

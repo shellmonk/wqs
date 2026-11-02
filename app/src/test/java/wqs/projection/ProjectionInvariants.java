@@ -44,7 +44,70 @@ public final class ProjectionInvariants {
         all.addAll(counterDrift());
         all.addAll(aggregationDrift());
         all.addAll(highLevelDrift());
+        all.addAll(cancellationDrift());
         return all;
+    }
+
+    /**
+     * Cancellation itself (spec 6.3), per view item table: an item is "cancelled" exactly when a
+     * cancel item for it exists -- same source, same user, "cancels" = its sourceId -- and then
+     * "cancelledBy" is the least such cancel's sourceId (null otherwise). And "wqPendingCancel"
+     * holds exactly the cancels whose target is absent (no locator row with that source,
+     * sourceId and user).
+     *
+     * A drained cancel that failed and was dead-lettered (spec 6.3/6.4) legitimately reports here
+     * as "cancel not applied": it is an incident awaiting replay, not a false positive.
+     */
+    public List<String> cancellationDrift() {
+        List<String> drift = new ArrayList<>();
+        String cancels = "c.\"cancels\" is not null and btrim(c.\"cancels\") <> ''";
+        for (String[] view : new String[][] {{"WEB", "wqWebItem"}, {"CC", "wqCcItem"}}) {
+            drift.addAll(dsl.fetch("""
+                    with cancel as (
+                        select c."source", c."userId", c."cancels" as target, min(c."sourceId") as "by"
+                        from "wqCcItem" c
+                        where %3$s
+                        group by 1, 2, 3
+                    )
+                    select case when i."cancelled" and k.target is null then 'cancelled without a cancel'
+                                when not i."cancelled" and k.target is not null then 'cancel not applied'
+                                else 'cancelledBy mismatch' end as problem,
+                           '%2$s' as view, i."userId", i."source", i."sourceId",
+                           i."cancelled" as "storedCancelled",
+                           k."by" as "expectedCancelledBy", i."cancelledBy" as "storedCancelledBy"
+                    from "%1$s" i
+                    left join cancel k
+                      on k."source" = i."source" and k."userId" = i."userId" and k.target = i."sourceId"
+                    where i."cancelled" <> (k.target is not null)
+                       or i."cancelledBy" is distinct from k."by"
+                    order by 3, 4, 5
+                    """.formatted(view[1], view[0], cancels))
+                    .map(ProjectionInvariants::describe));
+        }
+        drift.addAll(dsl.fetch("""
+                with expected as (
+                    select c."source", c."sourceId", c."cancels", c."userId"
+                    from "wqCcItem" c
+                    where %1$s
+                      and not exists (select 1 from "wqItemLocator" l
+                                      where l."source" = c."source" and l."sourceId" = c."cancels"
+                                        and l."userId" = c."userId")
+                )
+                select case when e."sourceId" is null then 'unexpected pending cancel'
+                            else 'missing pending cancel' end as problem,
+                       coalesce(e."userId", p."userId") as "userId",
+                       coalesce(e."source", p."source") as "source",
+                       coalesce(e."sourceId", p."cancelSourceId") as "cancelSourceId",
+                       coalesce(e."cancels", p."cancelsSourceId") as "cancelsSourceId"
+                from expected e
+                full outer join "wqPendingCancel" p
+                  on p."source" = e."source" and p."cancelSourceId" = e."sourceId"
+                 and p."cancelsSourceId" = e."cancels" and p."userId" = e."userId"
+                where e."sourceId" is null or p."cancelSourceId" is null
+                order by 2, 3, 4
+                """.formatted(cancels))
+                .map(ProjectionInvariants::describe));
+        return drift;
     }
 
     /**

@@ -108,7 +108,9 @@ public class StreamConsumer {
         // Head minus committed. Cached: each scrape costs a broker round trip and a DB read. NaN
         // when the source cannot report a head (a test fake), never a reassuring 0.
         CachedGaugeValue offsetLag = new CachedGaugeValue(this::offsetLag, clock, OFFSET_LAG_TTL);
+        // strongReference: Micrometer holds gauge state weakly, and nothing else holds this one.
         Gauge.builder("wqs.ingest.stream.offset.lag", offsetLag, CachedGaugeValue::get)
+                .strongReference(true)
                 .description("Stream head offset minus the committed offset (a lower bound: the "
                         + "head is the broker's last committed chunk id)")
                 .register(registry);
@@ -346,8 +348,9 @@ public class StreamConsumer {
                 batch.items().size(), properties.maxAttempts(), batch.stream(), batchError);
 
         List<ProjectionItem> projectedItems = new java.util.ArrayList<>();
-        for (ProjectionItem item : batch.items()) {
-            if (applyAlone(batch, item)) {
+        for (int i = 0; i < batch.items().size(); i++) {
+            ProjectionItem item = batch.items().get(i);
+            if (applyAlone(batch, item, batch.offsetOf(i))) {
                 projectedItems.add(item);
             }
         }
@@ -358,7 +361,11 @@ public class StreamConsumer {
         }
     }
 
-    private boolean applyAlone(ProjectionBatch batch, ProjectionItem item) {
+    /**
+     * The dead-letter row records the item's OWN offset (the batch's highest only if unknown) and
+     * its TRUE attempt count: maxAttempts as part of the batch plus maxAttempts alone.
+     */
+    private boolean applyAlone(ProjectionBatch batch, ProjectionItem item, Long itemOffset) {
         RuntimeException lastError = null;
         for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
             try {
@@ -371,10 +378,10 @@ public class StreamConsumer {
             }
         }
         // If this write also fails the exception escapes: the offset must not move.
-        deadLetterStore.record(batch.stream(), batch.committedOffset(), item, lastError, properties.maxAttempts());
+        Long offset = itemOffset != null ? itemOffset : batch.committedOffset();
+        deadLetterStore.record(batch.stream(), offset, item, lastError, 2 * properties.maxAttempts());
         deadLetteredCounter.increment();
-        log.error("Dead-lettered item {} (batch offset {}) on stream {}",
-                item.sourceId(), batch.committedOffset(), batch.stream());
+        log.error("Dead-lettered item {} (offset {}) on stream {}", item.sourceId(), offset, batch.stream());
         return false;
     }
 

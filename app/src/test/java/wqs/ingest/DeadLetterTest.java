@@ -101,11 +101,12 @@ class DeadLetterTest extends PostgresTestBase {
                         + "\"payload\"->>'occurredAt' as at, \"payload\"->>'amount' as amount "
                         + "from \"wqDeadLetter\"");
         assertThat(row.get("sourceId", String.class)).isEqualTo("tx-poison");
-        // The batch's highest offset: the whole batch is now accounted for.
-        assertThat(row.get("streamOffset", Long.class)).isEqualTo(3L);
+        // The item's OWN offset, not the batch's highest.
+        assertThat(row.get("streamOffset", Long.class)).isEqualTo(2L);
         assertThat(row.get("stream", String.class)).isEqualTo(STREAM);
         assertThat(row.get("source", Integer.class)).isEqualTo(SourceKind.TRANSACTION.code());
-        assertThat(row.get("attempts", Integer.class)).isEqualTo(2);
+        // The TRUE attempt count: 2 as part of the batch + 2 alone.
+        assertThat(row.get("attempts", Integer.class)).isEqualTo(4);
         // Instant serialises as ISO-8601 text (WRITE_DATES_AS_TIMESTAMPS is off in Spring Boot).
         assertThat(Instant.parse(row.get("at", String.class))).isEqualTo(POISON_WHEN);
         assertThat(new BigDecimal(row.get("amount", String.class))).isEqualByComparingTo("5.0000");

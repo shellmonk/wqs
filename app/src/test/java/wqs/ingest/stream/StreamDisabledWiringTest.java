@@ -31,4 +31,10 @@ class StreamDisabledWiringTest extends PostgresTestBase {
         assertThat(context.getBeanNamesForType(com.rabbitmq.stream.Environment.class)).isEmpty();
         assertThat(context.getBeanNamesForType(StreamSource.class)).isEmpty();
     }
+
+    /** R101: a replica with the consumer off says so at startup. */
+    @Test
+    void a_disabled_stream_registers_the_startup_warning() {
+        assertThat(context.getBeanNamesForType(StreamDisabledNotice.class)).hasSize(1);
+    }
 }

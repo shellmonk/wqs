@@ -25,6 +25,7 @@ public class BatchAccumulator {
     private final Clock clock;
 
     private final List<ProjectionItem> pending = new ArrayList<>();
+    private final List<Long> pendingOffsets = new ArrayList<>();
     private long highestOffset = -1;
     private Instant windowStart;
 
@@ -40,6 +41,7 @@ public class BatchAccumulator {
             windowStart = clock.instant();
         }
         pending.add(item);
+        pendingOffsets.add(offset);
         highestOffset = Math.max(highestOffset, offset);
     }
 
@@ -58,8 +60,9 @@ public class BatchAccumulator {
         if (pending.isEmpty()) {
             return Optional.empty();
         }
-        ProjectionBatch batch = new ProjectionBatch(stream, List.copyOf(pending), highestOffset);
+        ProjectionBatch batch = new ProjectionBatch(stream, List.copyOf(pending), highestOffset, pendingOffsets);
         pending.clear();
+        pendingOffsets.clear();
         highestOffset = -1;
         windowStart = null;
         return Optional.of(batch);
@@ -68,6 +71,7 @@ public class BatchAccumulator {
     /** Discards everything and resets all state. Used when the consumer re-reads from the store. */
     public void clear() {
         pending.clear();
+        pendingOffsets.clear();
         highestOffset = -1;
         windowStart = null;
     }

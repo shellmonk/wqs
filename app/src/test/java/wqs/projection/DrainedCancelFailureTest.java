@@ -98,7 +98,13 @@ class DrainedCancelFailureTest extends PostgresTestBase {
                 .containsEntry("streamOffset", null);
         assertThat(count("\"wqDeadLetter\"")).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(2L);
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        ProjectionInvariants invariants = new ProjectionInvariants(dsl());
+        assertThat(invariants.counterDrift()).isEmpty();
+        assertThat(invariants.aggregationDrift()).isEmpty();
+        assertThat(invariants.highLevelDrift()).isEmpty();
+        // The dead-lettered cancel is the one known exception, awaiting replay.
+        assertThat(invariants.cancellationDrift()).hasSize(2) // t1 in both views
+                .allSatisfy(line -> assertThat(line).startsWith("cancel not applied").contains("sourceId=t1"));
     }
 
     private static ProjectionItem tx(String id) {
