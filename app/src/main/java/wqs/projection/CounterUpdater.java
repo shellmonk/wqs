@@ -34,6 +34,9 @@ import wqs.domain.ViewKind;
  * {@link #moveHighLevel} for each view in {@code moved()} from
  * (movedFrom, movedFromProductId) to the current key, with that row's visibility.
  *
+ * A decrement that empties a row (cntAll reaches 0) deletes it, keeping rows sparse and stored
+ * state independent of the path a moved page unit took.
+ *
  * Decrements are strict: every key a decrement targets was counted first (the gate and the
  * per-view page-index mirror guarantee it), so a decrement that does not affect exactly one row
  * is a bug and throws {@link IllegalStateException} naming the full key. The table CHECK
@@ -177,14 +180,28 @@ public class CounterUpdater {
                 .execute();
     }
 
+    /**
+     * Decrements cntAll (and cntExclCancelled iff {@code excl}); a row left at cntAll = 0 is
+     * deleted. Rows are sparse (spec 5.7) and must stay so: a move would otherwise leave an empty
+     * row at every key a page unit passed through, making stored state depend on arrival order
+     * (spec P-1). cntExclCancelled &lt;= cntAll (CHECK), so a deleted row holds nothing.
+     */
     private <R extends Record> void decrement(
             Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
         var update = dsl.update(t.table()).set(t.cntAll(), t.cntAll().minus(1L));
         var step = excl
                 ? update.set(t.cntExclCancelled(), t.cntExclCancelled().minus(1L))
                 : update;
-        int rows = step.where(rowIs(t, userId, view, unit, key)).execute();
-        requireOneRow(rows, t, userId, view, unit, key);
+        Long remaining = step.where(rowIs(t, userId, view, unit, key))
+                .returning(t.cntAll())
+                .fetchOptional(t.cntAll())
+                .orElse(null);
+        requireOneRow(remaining == null ? 0 : 1, t, userId, view, unit, key);
+        if (remaining == 0L) {
+            dsl.deleteFrom(t.table())
+                    .where(rowIs(t, userId, view, unit, key))
+                    .execute();
+        }
     }
 
     private <R extends Record> void decrementExcl(

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.time.YearMonth;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
@@ -104,6 +105,33 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     @Test
+    void a_move_deletes_the_counter_rows_it_empties_so_state_is_path_independent() {
+        // Counted directly at its final key...
+        run(u -> u.countHighLevel(1L, ViewKind.WEB, 7, NEXT_DAY));
+        List<String> direct = allCounterRows();
+        dsl().execute("delete from \"wqCountDay\"");
+        dsl().execute("delete from \"wqCountMonth\"");
+
+        // ...or counted elsewhere first and moved there (spec P-1: identical state either way).
+        run(u -> u.countHighLevel(1L, ViewKind.WEB, 11, T0));
+        run(u -> u.moveHighLevel(1L, ViewKind.WEB, 11, T0, 7, NEXT_DAY, true));
+
+        assertThat(allCounterRows()).isEqualTo(direct);
+        assertThat(dsl().fetchOne("select count(*)::int from \"wqCountDay\" where \"cntAll\" = 0")
+                .get(0, Integer.class)).isZero();
+    }
+
+    @Test
+    void uncounting_keeps_a_row_whose_cntAll_is_still_positive() {
+        run(u -> u.countItem(tx("t1", 11)));
+
+        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.ITEM, 11, T0));
+
+        assertThat(dayCount(ViewKind.WEB, PageUnit.ITEM, 11, T0)).isEqualTo(1);
+        assertThat(dayExcl(ViewKind.WEB, PageUnit.ITEM, 11, T0)).isZero();
+    }
+
+    @Test
     void a_move_across_days_shifts_day_rows_but_not_the_month_row() {
         run(u -> u.countHighLevel(1L, ViewKind.WEB, 11, T0));
 
@@ -194,7 +222,10 @@ class CounterUpdaterTest extends PostgresTestBase {
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isZero();
         assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isZero();
         assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isEqualTo(1);
-        assertThat(rows("wqCountDay")).isEqualTo(3); // 11@T0 (0), 0@T0 (0), 0@NEXT_DAY (1)
+        // Emptied rows are deleted (sparse): only 0@NEXT_DAY remains in the day tier, and the
+        // month tier keeps only the sentinel.
+        assertThat(rows("wqCountDay")).isEqualTo(1);
+        assertThat(rows("wqCountMonth")).isEqualTo(1);
     }
 
     @Test
@@ -251,6 +282,13 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     private int monthExcl(ViewKind v, PageUnit u, int product, Instant at) {
         return counter("wqCountMonth", "cntExclCancelled", v, u, product, at, true);
+    }
+
+    private List<String> allCounterRows() {
+        return java.util.stream.Stream.of("wqCountDay", "wqCountMonth")
+                .flatMap(t -> dsl().fetch("select * from \"" + t + "\" order by 1, 2, 3, 4, 5")
+                        .stream().map(r -> t + r.intoList()))
+                .toList();
     }
 
     private int rows(String table) {
