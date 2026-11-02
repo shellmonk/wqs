@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import java.lang.reflect.Field;
+import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -36,6 +37,14 @@ class GeneratedCodeTest {
         assertThat(fields).doesNotContain("OCCURREDAT", "OCCURRED_AT", "Occurredat");
     }
 
+    /** Task 13 queries WQ_ITEM_LOCATOR.sourceId by that name. */
+    @Test
+    void locator_table_exposes_source_id() throws Exception {
+        Class<?> table = Class.forName("wqs.db.generated.tables.WqItemLocator");
+
+        assertThat(fieldNames(table)).contains("sourceId");
+    }
+
     @Test
     void table_constant_is_upper_snake() throws Exception {
         Class<?> tables = Class.forName("wqs.db.generated.Tables");
@@ -59,6 +68,11 @@ class GeneratedCodeTest {
 
         assertThatCode(() -> record.getMethod("getOccurredAt")).doesNotThrowAnyException();
         assertThatCode(() -> record.getMethod("getSubBatchId")).doesNotThrowAnyException();
+
+        // Task 14 maps INTO records under unmappedTargetPolicy = ERROR, so the setter name
+        // carries as much weight as the getter.
+        assertThatCode(() -> record.getMethod("setOccurredAt", OffsetDateTime.class))
+                .doesNotThrowAnyException();
     }
 
     @Test

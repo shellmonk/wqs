@@ -64,10 +64,15 @@ val generateJooq by tasks.registering(JavaExec::class) {
     // (Wqwebitem.java -> WqWebItem.java) overwrites the existing file while the directory
     // entry keeps the OLD spelling, so the sweep then deletes it as an orphan. Measured
     // once: a run that reported success and emitted no table classes at all.
-    doFirst { outputDir.deleteRecursively() }
+    doFirst { check(outputDir.deleteRecursively()) { "could not clear $outputDir" } }
 
     inputs.dir("src/main/resources/db/migration")
-    inputs.dir("src/codegen/java")
+    // JavaExec.getClasspath() is not an annotated task input, so the jOOQ jars and the
+    // compiled strategy are invisible to the up-to-date check unless declared here. Without
+    // this a jooq version bump leaves the task UP-TO-DATE and compiles the previous version's
+    // generated source against the new runtime. Subsumes the codegen sources, whose compiled
+    // output is on this classpath.
+    inputs.files(sourceSets["codegen"].runtimeClasspath)
     outputs.dir(generatedSrc)
 }
 

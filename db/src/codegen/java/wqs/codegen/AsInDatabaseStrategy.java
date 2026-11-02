@@ -15,9 +15,13 @@ import org.jooq.meta.Definition;
  * <ul>
  *   <li>class and record names: WqWebItem, WqWebItemRecord
  *   <li>column identifiers: WqWebItem.occurredAt, verbatim from the database
- *   <li>every other identifier: Tables.WQ_WEB_ITEM, Sequences.WQ_ITEM_ID_SEQ
+ *   <li>table, sequence, key and index identifiers: Tables.WQ_WEB_ITEM, Sequences.WQ_ITEM_ID_SEQ
  *   <li>record accessors: getOccurredAt(), setOccurredAt()
  * </ul>
+ *
+ * <p>Member names are not covered -- {@code getJavaMemberName} is left alone -- so the
+ * generated record's all-args constructor parameters stay flattened ({@code Long userid}).
+ * Nothing names those: records are built field by field through the accessors above.
  *
  * <p>Overriding the getter and setter names needs care rather than avoidance. jOOQ's own
  * documented example returns {@code "get" + definition.getOutputName()}, which yields
