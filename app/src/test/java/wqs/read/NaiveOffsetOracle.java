@@ -26,7 +26,8 @@ public final class NaiveOffsetOracle {
     public long count(ViewKind v, Level0Filter f, Instant from, Instant to) {
         List<Object> binds = new ArrayList<>();
         String sql = "select count(*) from \"" + v.itemTable() + "\" where " + where(f, from, to, binds);
-        return dsl.fetchValue(sql, binds.toArray()) instanceof Number n ? n.longValue() : 0L;
+        // A non-numeric or null result is a broken oracle, not zero: fail loudly.
+        return ((Number) dsl.fetchValue(sql, binds.toArray())).longValue();
     }
 
     public List<ItemEntry> page(ViewKind v, Level0Filter f, Instant from, Instant to, long offset, int limit) {
