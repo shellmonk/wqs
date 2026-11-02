@@ -1,0 +1,177 @@
+package wqs.projection;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+import wqs.domain.ProjectionItem;
+import wqs.domain.SourceKind;
+
+/**
+ * Negative controls for {@link ProjectionInvariants}: a projection the writer built is clean, and
+ * corrupting one stored value by direct SQL makes the owning invariant report it. Without these, an
+ * oracle that silently returned nothing would make P-2, P-4 and P-8 pass vacuously.
+ */
+@SpringBootTest
+class ProjectionInvariantsTest extends ProjectionPropertyBase {
+
+    private static final Instant T0 = Instant.parse("2034-03-31T23:00:00Z");
+
+    private ProjectionInvariants invariants;
+
+    @BeforeEach
+    void buildACleanProjection() {
+        reset();
+        invariants = new ProjectionInvariants(dsl());
+        writer.apply(new ProjectionBatch("s", List.of(
+                tx("t1", "p1", T0, (short) 1, "5.0000"),
+                tx("t2", "p2", T0.plusSeconds(30), (short) 2, "-7.0000"),
+                // A /cc-only item a day earlier at a lower product: the session's key moves.
+                new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a1",
+                        T0.minusSeconds(86_400), 7, "b1", null, (short) 9,
+                        new BigDecimal("1.0000"), "EUR", null, null, null),
+                new ProjectionItem(1L, SourceKind.PAYMENT, "pay1", T0.plusSeconds(3_600), null,
+                        null, null, (short) 9, new BigDecimal("20.0000"), "EUR", null, null, null),
+                cancel(SourceKind.TRANSACTION, "c1", "t1"),
+                cancel(SourceKind.PAYMENT, "pc1", "pay1")), 1L));
+
+        assertThat(invariants.drift()).as("a projection the writer built").isEmpty();
+    }
+
+    // --- P-2 -------------------------------------------------------------------------------------
+
+    @Test
+    void a_bumped_month_tier_product_counter_is_counter_drift() {
+        execute("""
+                update "wqCountMonth" set "cntAll" = "cntAll" + 1
+                where "viewKind" = 2 and "pageUnit" = 1 and "productId" = 7""");
+
+        assertThat(invariants.counterDrift()).singleElement().asString()
+                .startsWith("counter mismatch").contains("tier=month", "productId=7");
+    }
+
+    @Test
+    void a_stored_zero_counter_row_is_counter_drift() {
+        execute("""
+                insert into "wqCountDay"
+                values (1, 1, 1, 99, date '2034-03-30', 0, 0)""");
+
+        assertThat(invariants.counterDrift()).singleElement().asString()
+                .startsWith("orphan counter row").contains("productId=99");
+    }
+
+    @Test
+    void a_deleted_counter_row_is_counter_drift() {
+        execute("""
+                delete from "wqCountDay"
+                where "viewKind" = 2 and "pageUnit" = 0 and "productId" = 0
+                  and "period" = date '2034-04-01'""");
+
+        assertThat(invariants.counterDrift()).singleElement().asString()
+                .startsWith("missing counter row");
+    }
+
+    // --- P-4 -------------------------------------------------------------------------------------
+
+    @Test
+    void a_changed_session_tx_count_excl_cancelled_is_aggregation_drift() {
+        execute("""
+                update "wqSession" set "txCountExclCancelled" = "txCountExclCancelled" + 1""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("session mismatch").contains("batchId=b1");
+    }
+
+    @Test
+    void a_changed_play_net_is_aggregation_drift() {
+        execute("""
+                update "wqPlay" set "netExclCancelled" = "netExclCancelled" + 1
+                where "subBatchId" = 'p2'""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("play mismatch").contains("subBatchId=p2");
+    }
+
+    @Test
+    void a_misplaced_group_locator_is_aggregation_drift() {
+        execute("""
+                update "wqGroupLocator" set "startedAt" = "startedAt" + interval '1 second'
+                where "subBatchId" = ''""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("group locator startedAt mismatch");
+    }
+
+    @Test
+    void a_session_without_items_is_aggregation_drift() {
+        execute("""
+                insert into "wqSession" ("userId", "batchId", "startedAt", "endedAt", "currency")
+                values (1, 'ghost', timestamptz '2034-03-31 10:00Z', timestamptz '2034-03-31 10:00Z',
+                        'EUR')""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("orphan session row").contains("batchId=ghost");
+    }
+
+    // --- P-8 -------------------------------------------------------------------------------------
+
+    @Test
+    void a_flipped_page_row_visibility_is_high_level_drift() {
+        execute("""
+                update "wqWebHighLevel" set "visibleExclCancelled" = not "visibleExclCancelled"
+                where "kind" = 0""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("page row visibility mismatch").contains("view=WEB", "refId=b1");
+    }
+
+    @Test
+    void a_page_row_at_a_stale_key_is_high_level_drift() {
+        execute("""
+                update "wqCcHighLevel" set "occurredAt" = "occurredAt" + interval '1 day'
+                where "kind" = 0""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("page row key mismatch").contains("view=CC");
+    }
+
+    @Test
+    void a_page_row_for_a_cc_only_item_in_web_is_high_level_drift() {
+        execute("""
+                insert into "wqWebHighLevel"
+                values (1, timestamptz '2034-04-01 00:00Z', 4, 'pay1', null, 'EUR', false)""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("orphan page row").contains("view=WEB", "refId=pay1");
+    }
+
+    @Test
+    void a_deleted_unsessioned_page_row_is_high_level_drift() {
+        execute("""
+                delete from "wqCcHighLevel" where "kind" = 4""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("missing page row").contains("refId=pay1");
+    }
+
+    // --- fixtures --------------------------------------------------------------------------------
+
+    private void execute(String sql) {
+        assertThat(dsl().execute(sql)).as(sql).isEqualTo(1);
+    }
+
+    private static ProjectionItem tx(
+            String id, String subBatchId, Instant at, short type, String amount) {
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, 11, "b1", subBatchId,
+                type, new BigDecimal(amount), "EUR", null, null, null);
+    }
+
+    private static ProjectionItem cancel(SourceKind source, String id, String cancels) {
+        return new ProjectionItem(1L, source, id, T0.plusSeconds(7_200), 11, null, null,
+                (short) 2, new BigDecimal("-1.0000"), "EUR", null, cancels, null);
+    }
+}

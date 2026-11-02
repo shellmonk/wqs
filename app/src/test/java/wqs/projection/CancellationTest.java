@@ -74,7 +74,7 @@ class CancellationTest extends PostgresTestBase {
         // ITEM: t1 left the excl tally; t2 and the cancel row itself remain.
         assertThat(itemSentinel(WEB, "cntExclCancelled")).isEqualTo(2);
         assertThat(itemSentinel(WEB, "cntAll")).isEqualTo(3);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -89,7 +89,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(highLevelSentinel(WEB, "cntExclCancelled")).isZero();
         // cntAll is untouched: the row still exists and is returned when the filter is off.
         assertThat(highLevelSentinel(WEB, "cntAll")).isEqualTo(1);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -135,7 +135,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(rowVisible(CC, SourceKind.PAYMENT.code(), "pay1")).isFalse();
         assertThat(highLevelSentinel(CC, "cntExclCancelled")).isZero();
         assertThat(highLevelSentinel(CC, "cntAll")).isEqualTo(1);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -145,7 +145,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(pendingCancelStore.depth()).isEqualTo(1);
         assertThat(pendingCancelStore.oldestParkedAt()).isPresent();
         assertThat(exists(WEB, "t1")).isFalse();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
 
         apply(tx("t1", "b1", "p1"));
 
@@ -154,7 +154,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(cancelled(WEB, "t1")).isTrue();
         assertThat(sessionField("txCountExclCancelled")).isZero();
         assertThat(sessionVisible(WEB)).isFalse();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -168,7 +168,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
         assertThat(sessionField("playCountExclCancelled")).isEqualTo(1);
         assertThat(highLevelSentinel(WEB, "cntExclCancelled")).isEqualTo(1);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     // --- replay and second cancels ---------------------------------------------------------------
@@ -184,7 +184,7 @@ class CancellationTest extends PostgresTestBase {
 
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
         assertThat(itemSentinel(WEB, "cntExclCancelled")).isEqualTo(2);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -197,7 +197,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
         // Whichever arrives first, the smallest cancel id is recorded (P-1).
         assertThat(cancelledBy("t1")).isEqualTo("c1");
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -210,7 +210,7 @@ class CancellationTest extends PostgresTestBase {
         // LEAST, not last-wins: c2 arrived last yet c1 is kept.
         assertThat(cancelledBy("t1")).isEqualTo("c1");
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     // --- R96: a cancel only resolves an original of its own user ---------------------------------
@@ -232,8 +232,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(after.webHighLevel()).isEqualTo(before.webHighLevel());
         assertThat(after.ccHighLevel()).isEqualTo(before.ccHighLevel());
         assertThat(cancelledBy("t1")).isNull();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
-        ProjectionOracle.assertConsistent(dsl(), 2L);
+        assertNoDrift();
     }
 
     @Test
@@ -246,7 +245,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(cancelled(WEB, "t1")).isFalse();
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
         assertThat(sessionVisible(WEB)).isTrue();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     // --- R86: resolution by (source, sourceId) ---------------------------------------------------
@@ -263,7 +262,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
         assertThat(sessionVisible(CC)).isTrue();
         assertThat(rowVisible(CC, SourceKind.PAYMENT.code(), "x1")).isFalse();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -280,7 +279,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(pendingCancelStore.depth()).isZero();
         assertThat(cancelledOf(CC, SourceKind.TRANSACTION, "x1")).isTrue();
         assertThat(cancelledOf(CC, SourceKind.PAYMENT, "x1")).isFalse();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -312,7 +311,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(highLevelSentinel(CC, "cntExclCancelled")).isEqualTo(1);
         // The adjustment still survives in the session's rollup.
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     // --- R88: revival ----------------------------------------------------------------------------
@@ -329,7 +328,7 @@ class CancellationTest extends PostgresTestBase {
         assertThat(sessionVisible(CC)).isTrue();
         assertThat(highLevelSentinel(WEB, "cntExclCancelled")).isEqualTo(1);
         assertThat(highLevelSentinel(WEB, "cntAll")).isEqualTo(1);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -341,7 +340,7 @@ class CancellationTest extends PostgresTestBase {
 
         assertThat(sessionVisible(WEB)).isFalse();
         assertThat(sessionVisible(CC)).isTrue();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     @Test
@@ -363,7 +362,7 @@ class CancellationTest extends PostgresTestBase {
     void a_cancelled_session_that_later_re_anchors_keeps_its_counters_consistent() {
         apply(txProduct("t1", "b1", "p1", T0, 11));
         apply(cancelOf("c1", "t1"));
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
 
         // Earlier by a day at a lower product: start AND product move, invisible WEB row moves
         // with its visibility, and the CC row is revived at the new key.
@@ -372,21 +371,21 @@ class CancellationTest extends PostgresTestBase {
         assertThat(sessionVisible(WEB)).isFalse();
         assertThat(sessionVisible(CC)).isTrue();
         assertThat(sessionStart()).isEqualTo(T0.minus(1, ChronoUnit.DAYS));
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
 
         // Later at a lower product still: product-only change, and the WEB row is revived.
         apply(txProduct("t9", "b1", "p9", T0.plusSeconds(500), 3));
 
         assertThat(sessionVisible(WEB)).isTrue();
         assertThat(highLevelProduct(WEB)).isEqualTo(3);
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
 
         // And cancelling within the re-anchored session uncounts at the session's NEW key.
         apply(cancelOf("c9", "t9"));
 
         assertThat(sessionVisible(WEB)).isFalse();
         assertThat(sessionVisible(CC)).isTrue();
-        ProjectionOracle.assertConsistent(dsl(), 1L);
+        assertNoDrift();
     }
 
     // --- R90: order independence -----------------------------------------------------------------
@@ -443,7 +442,7 @@ class CancellationTest extends PostgresTestBase {
                 ProjectionSnapshot snapshot = ProjectionSnapshot.of(dsl());
                 String described = order.stream().map(ProjectionItem::sourceId).toList()
                         + (singleBatch ? " as one batch" : " one per batch");
-                ProjectionOracle.assertConsistent(dsl(), 1L);
+                assertNoDrift();
                 if (expected == null) {
                     expected = snapshot;
                 } else {
@@ -470,6 +469,11 @@ class CancellationTest extends PostgresTestBase {
             }
         }
         return result;
+    }
+
+    /** Counters, rollups, group locators and the page index all agree with the item rows. */
+    private void assertNoDrift() {
+        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
     }
 
     // --- fixtures --------------------------------------------------------------------------------

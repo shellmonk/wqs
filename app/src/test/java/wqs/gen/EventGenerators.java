@@ -91,6 +91,73 @@ public final class EventGenerators {
                 .as(EventGenerators::buildSequence);
     }
 
+    /**
+     * {@link #itemSequences()} with cancellations (spec 8.1 requires cancels on both sides of their
+     * originals). Every cancel targets an item of its OWN source and user (spec 6.3, R86) -- any
+     * source, so unsessioned payments, play-less /cc-only adjustments and the cross-source
+     * sourceId collisions are cancelled too.
+     *
+     * <ul>
+     *   <li>About a third of sessions have EVERY item cancelled, /cc-only ones included, so
+     *       they end hidden in both views. Interleaved with their originals (and arriving in
+     *       either order), the cancels hide a session's rows and a later live item revives them,
+     *       repeatedly.</li>
+     *   <li>Otherwise each item is cancelled with probability 1/4.</li>
+     *   <li>About a third of cancels are placed BEFORE their original, at a random earlier
+     *       position -- often in an earlier batch, so they park and drain across batches.</li>
+     *   <li>About one cancelled item in eight gets a second, distinct cancel (cancelledBy keeps
+     *       the smallest id whatever the order).</li>
+     *   <li>Half the cancels carry their original's batchId and subBatchId, as a producer might:
+     *       a cancellation row must never roll up or count as a session's surviving item.</li>
+     * </ul>
+     */
+    public static Arbitrary<List<ProjectionItem>> itemSequencesWithCancels() {
+        return Combinators.combine(itemSequences(), Arbitraries.longs())
+                .as(EventGenerators::withCancels);
+    }
+
+    private static List<ProjectionItem> withCancels(List<ProjectionItem> items, long seed) {
+        java.util.Random random = new java.util.Random(seed);
+        java.util.Set<String> fullyCancelled = new java.util.HashSet<>();
+        for (ProjectionItem item : items) {
+            if (item.batchId() != null && !fullyCancelled.contains(item.batchId())
+                    && random.nextInt(3) == 0) {
+                fullyCancelled.add(item.batchId());
+            }
+        }
+
+        List<ProjectionItem> result = new ArrayList<>();
+        for (ProjectionItem item : items) {
+            boolean cancelIt = (item.batchId() != null && fullyCancelled.contains(item.batchId()))
+                    || random.nextInt(4) == 0;
+            result.add(item);
+            if (!cancelIt) {
+                continue;
+            }
+            int cancels = random.nextInt(8) == 0 ? 2 : 1;
+            for (int c = 1; c <= cancels; c++) {
+                ProjectionItem cancel = cancelOf(item, "-cancel" + c, random.nextBoolean());
+                if (random.nextInt(3) == 0) {
+                    // Before its original: anywhere earlier, so often in an earlier batch.
+                    int originalAt = result.size() - 1;
+                    result.add(random.nextInt(originalAt + 1), cancel);
+                } else {
+                    result.add(cancel);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static ProjectionItem cancelOf(ProjectionItem item, String suffix, boolean grouped) {
+        return new ProjectionItem(
+                item.userId(), item.source(), item.sourceId() + suffix,
+                item.occurredAt().plusSeconds(90), item.productId(),
+                grouped ? item.batchId() : null, grouped ? item.subBatchId() : null,
+                (short) 2, item.amount().negate(), item.currency(), null,
+                item.sourceId(), null);
+    }
+
     private static List<ProjectionItem> buildSequence(
             long userId, int sessions, int plays, int txPerPlay, Instant start, BigDecimal amount,
             java.util.Set<SourceKind> colliding, String detail) {

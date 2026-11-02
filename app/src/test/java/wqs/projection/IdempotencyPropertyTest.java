@@ -2,7 +2,6 @@ package wqs.projection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -11,12 +10,7 @@ import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.lifecycle.BeforeTry;
 import net.jqwik.spring.JqwikSpringSupport;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import wqs.db.PartitionManager;
-import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.gen.EventGenerators;
 
@@ -27,37 +21,46 @@ import wqs.gen.EventGenerators;
  * Validates the locator idempotency gate and, through {@link ProjectionSnapshot}, everything
  * derived from it: rollups (including re-anchoring), the page index (including materialisation
  * of a session row in a view whose source arrived later) and both counter tiers (including
- * HIGH_LEVEL counter moves). Phase 3 extends this to cancellations arriving on either side of
- * their originals.
+ * HIGH_LEVEL counter moves). Each property also runs over sequences with cancellations on either
+ * side of their originals, so parking, draining across batches, hiding and revival must converge
+ * too (spec 8.1 names pending-cancel parking under P-1).
  */
 @JqwikSpringSupport
 @SpringBootTest
-class IdempotencyPropertyTest extends PostgresTestBase {
-
-    @DynamicPropertySource
-    static void datasource(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        registry.add("spring.datasource.username", POSTGRES::getUsername);
-        registry.add("spring.datasource.password", POSTGRES::getPassword);
-        registry.add("spring.flyway.enabled", () -> "false");
-    }
-
-    @Autowired private ProjectionWriter writer;
-    @Autowired private PartitionManager partitionManager;
+class IdempotencyPropertyTest extends ProjectionPropertyBase {
 
     @BeforeTry
-    void reset() {
-        partitionManager.ensurePartitionsAhead(YearMonth.from(
-                EventGenerators.WINDOW_START.atZone(java.time.ZoneOffset.UTC)), 1);
-        clearProjection();
-        dsl().execute("delete from \"wqStreamOffset\"");
+    void resetBeforeTry() {
+        reset();
     }
 
     @Property(tries = 40)
     void a_permuted_and_duplicated_sequence_converges_to_the_same_state(
             @ForAll("sequences") List<ProjectionItem> items,
             @ForAll long seed) {
+        assertPermutedAndDuplicatedConverges(items, seed);
+    }
 
+    @Property(tries = 40)
+    void a_permuted_and_duplicated_sequence_with_cancels_converges_to_the_same_state(
+            @ForAll("sequencesWithCancels") List<ProjectionItem> items,
+            @ForAll long seed) {
+        assertPermutedAndDuplicatedConverges(items, seed);
+    }
+
+    @Property(tries = 20)
+    void applying_a_sequence_twice_changes_nothing(
+            @ForAll("sequences") List<ProjectionItem> items) {
+        assertReplayChangesNothing(items);
+    }
+
+    @Property(tries = 20)
+    void applying_a_sequence_with_cancels_twice_changes_nothing(
+            @ForAll("sequencesWithCancels") List<ProjectionItem> items) {
+        assertReplayChangesNothing(items);
+    }
+
+    private void assertPermutedAndDuplicatedConverges(List<ProjectionItem> items, long seed) {
         ProjectionSnapshot inOrder = applyAndSnapshot(items);
 
         reset();
@@ -66,10 +69,7 @@ class IdempotencyPropertyTest extends PostgresTestBase {
         assertThat(shuffledWithDuplicates).isEqualTo(inOrder);
     }
 
-    @Property(tries = 20)
-    void applying_a_sequence_twice_changes_nothing(
-            @ForAll("sequences") List<ProjectionItem> items) {
-
+    private void assertReplayChangesNothing(List<ProjectionItem> items) {
         ProjectionSnapshot once = applyAndSnapshot(items);
         applyBatches(items);
 
@@ -80,6 +80,11 @@ class IdempotencyPropertyTest extends PostgresTestBase {
     @net.jqwik.api.Provide
     net.jqwik.api.Arbitrary<List<ProjectionItem>> sequences() {
         return EventGenerators.itemSequences();
+    }
+
+    @net.jqwik.api.Provide
+    net.jqwik.api.Arbitrary<List<ProjectionItem>> sequencesWithCancels() {
+        return EventGenerators.itemSequencesWithCancels();
     }
 
     private ProjectionSnapshot applyAndSnapshot(List<ProjectionItem> items) {
@@ -109,15 +114,6 @@ class IdempotencyPropertyTest extends PostgresTestBase {
     private List<String> keys(String table) {
         return dsl().fetch("select \"source\", \"sourceId\" from \"" + table + "\"")
                 .map(r -> r.get(0) + "/" + r.get(1));
-    }
-
-    /** Applies in small batches, since batch boundaries are themselves a source of reordering. */
-    private void applyBatches(List<ProjectionItem> items) {
-        int batchSize = 3;
-        for (int from = 0; from < items.size(); from += batchSize) {
-            List<ProjectionItem> slice = items.subList(from, Math.min(from + batchSize, items.size()));
-            writer.apply(new ProjectionBatch("wallet-transactions", slice, (long) from));
-        }
     }
 
     /** Shuffles and duplicates roughly a third of the events. */

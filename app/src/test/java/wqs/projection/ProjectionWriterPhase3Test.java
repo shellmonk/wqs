@@ -175,55 +175,9 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         assertEveryCounterMatchesTheProjection();
     }
 
-    /**
-     * The P-2 oracle over the whole projection: for each view, page unit, tier, product (and the
-     * all-products sentinel) and period, the stored (cntAll, cntExclCancelled) equals a live
-     * COUNT over the item table or page index. Zero counter rows are ignored.
-     */
+    /** P-2 over the whole projection, via the shared oracle. */
     private void assertEveryCounterMatchesTheProjection() {
-        for (int view : List.of(1, 2)) {
-            String items = view == 1 ? "wqWebItem" : "wqCcItem";
-            String pages = view == 1 ? "wqWebHighLevel" : "wqCcHighLevel";
-            for (String tier : List.of("day", "month")) {
-                assertThat(stored(view, 0, tier))
-                        .as("ITEM %s counters, view %d", tier, view)
-                        .isEqualTo(live(items, "not \"cancelled\"", tier));
-                assertThat(stored(view, 1, tier))
-                        .as("HIGH_LEVEL %s counters, view %d", tier, view)
-                        .isEqualTo(live(pages, "\"visibleExclCancelled\"", tier));
-            }
-        }
-    }
-
-    private Map<String, String> stored(int view, int pageUnit, String tier) {
-        String table = tier.equals("day") ? "wqCountDay" : "wqCountMonth";
-        return toKeyed(dsl().fetch("""
-                select "productId" || '|' || "period"::text as k,
-                       "cntAll" || '/' || "cntExclCancelled" as v
-                from "%s"
-                where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "cntAll" > 0
-                """.formatted(table), (short) view, (short) pageUnit));
-    }
-
-    private Map<String, String> live(String table, String visible, String tier) {
-        String period = tier.equals("day")
-                ? "(\"occurredAt\" at time zone 'UTC')::date"
-                : "date_trunc('month', \"occurredAt\" at time zone 'UTC')::date";
-        return toKeyed(dsl().fetch("""
-                with r as (
-                    select "productId" as p, %1$s as d, %2$s as vis from "%3$s" where "userId" = 1
-                    union all
-                    select 0, %1$s, %2$s from "%3$s" where "userId" = 1
-                )
-                select p || '|' || d::text as k,
-                       count(*) || '/' || count(*) filter (where vis) as v
-                from r where p is not null group by p, d
-                """.formatted(period, visible, table)));
-    }
-
-    private static Map<String, String> toKeyed(org.jooq.Result<Record> rows) {
-        return rows.stream().collect(Collectors.toMap(
-                r -> r.get("k", String.class), r -> r.get("v", String.class)));
+        assertThat(new ProjectionInvariants(dsl()).counterDrift()).isEmpty();
     }
 
     private List<Integer> highLevelProducts(String table) {
