@@ -53,16 +53,63 @@ class Level0QueryTest extends Level0TestSupport {
 
     @Test
     void slice_orders_ties_by_itemId_desc() {
-        for (int i = 0; i < 5; i++) {
+        // Ascending itemIds, and the plan is forced to seq-scan + sort so index order cannot
+        // mask a missing tie-break.
+        for (int i = 0; i < 12; i++) {
             project(item(TRANSACTION, "t" + i, "2034-02-10T10:00:00Z", 11, null, null));
         }
         Level0Filter f = new Level0Filter(USER, null, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
-        List<ItemKey> all = web.keys(readerDsl, f, lo, hi, 0, 10);
-        assertThat(all).hasSize(5);
+        List<ItemKey> all = readerDsl.transactionResult(cfg -> {
+            var tx = org.jooq.impl.DSL.using(cfg);
+            tx.execute("set local enable_indexscan = off");
+            tx.execute("set local enable_indexonlyscan = off");
+            tx.execute("set local enable_bitmapscan = off");
+            return web.keys(tx, f, lo, hi, 0, 20);
+        });
+        assertThat(all).hasSize(12);
         assertThat(all).extracting(ItemKey::itemId).isSortedAccordingTo(java.util.Comparator.reverseOrder());
-        assertThat(web.keys(readerDsl, f, lo, hi, 2, 2)).isEqualTo(all.subList(2, 4));
+        List<ItemKey> page = readerDsl.transactionResult(cfg -> {
+            var tx = org.jooq.impl.DSL.using(cfg);
+            tx.execute("set local enable_indexscan = off");
+            tx.execute("set local enable_indexonlyscan = off");
+            tx.execute("set local enable_bitmapscan = off");
+            return web.keys(tx, f, lo, hi, 2, 2);
+        });
+        assertThat(page).isEqualTo(all.subList(2, 4));
+    }
+
+    @Test
+    void fetch_handles_a_very_large_key_list() {
+        partitionManager.ensurePartitionsAhead(java.time.YearMonth.of(2034, 5), 0);
+        var t = wqs.db.generated.Tables.WQ_WEB_ITEM;
+        Instant base = t("2034-05-01T00:00:00Z");
+        var records = new java.util.ArrayList<wqs.db.generated.tables.records.WqWebItemRecord>();
+        for (int i = 0; i < 40_000; i++) {
+            var r = dsl().newRecord(t);
+            r.setUserId(USER);
+            r.setItemId(9_000_000_000L + i);            r.setSource((short) 1);
+            r.setSourceId("bulk" + i);
+            r.setOccurredAt(base.plusSeconds(i).atOffset(java.time.ZoneOffset.UTC));
+            r.setType((short) 1);
+            r.setAmount(java.math.BigDecimal.ONE);
+            r.setCurrency("EUR");
+            records.add(r);
+        }
+        try {
+            dsl().batchInsert(records).execute();
+            Level0Filter f = new Level0Filter(USER, null, false);
+            List<ItemKey> keys = web.keys(readerDsl, f, base, base.plusSeconds(50_000), 0, 50_000);
+            assertThat(keys).hasSize(40_000);
+            List<ItemEntry> entries = web.fetch(readerDsl, USER, keys);
+            assertThat(entries).hasSize(40_000);
+            assertThat(entries).extracting(ItemEntry::occurredAt)
+                    .isSortedAccordingTo(java.util.Comparator.reverseOrder());
+            assertThat(entries.get(0).sourceId()).isEqualTo("bulk39999");
+        } finally {
+            clearProjection();
+        }
     }
 
     @Test

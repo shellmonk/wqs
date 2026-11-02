@@ -15,6 +15,7 @@ class CounterReaderTest extends Level0TestSupport {
 
     @Autowired CounterReader counters;
     @Autowired WebLevel0Query web;
+    @Autowired wqs.read.cc.CcLevel0Query cc;
 
     @BeforeEach
     void clean() {
@@ -55,5 +56,21 @@ class CounterReaderTest extends Level0TestSupport {
         assertThat(days).containsOnly(java.util.Map.entry(LocalDate.parse("2034-01-10"), 2L));
         assertThat(counters.days(readerDsl, ViewKind.WEB, all,
                 LocalDate.parse("2034-01-11"), LocalDate.parse("2034-01-12"))).isEmpty();
+    }
+
+    @Test
+    void counter_reader_separates_views() {
+        project(
+                item(TRANSACTION, "a", "2034-01-10T10:00:00Z", 11, null, null),
+                item(wqs.domain.SourceKind.PAYMENT, "p", "2034-01-11T10:00:00Z", 11, null, null));
+        Level0Filter all = new Level0Filter(USER, null, false);
+        LocalDate jan = LocalDate.parse("2034-01-01");
+        Instant lo = Instant.parse("2034-01-01T00:00:00Z");
+        Instant hi = Instant.parse("2034-02-01T00:00:00Z");
+        long webLive = web.count(readerDsl, all, lo, hi);
+        long ccLive = cc.count(readerDsl, all, lo, hi);
+        assertThat(counters.months(readerDsl, ViewKind.WEB, all, jan, jan)).containsEntry(jan, webLive);
+        assertThat(counters.months(readerDsl, ViewKind.CC, all, jan, jan)).containsEntry(jan, ccLive);
+        assertThat(webLive).isNotEqualTo(ccLive);
     }
 }
