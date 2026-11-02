@@ -223,6 +223,83 @@ class ProjectionReaderTest extends ReadPropertyBase {
         assertThat(page.items()).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3));
     }
 
+    /**
+     * Spec 7.5 / P-3 within a request: totals and items come from ONE snapshot. A writer commit
+     * (through the real writer, so counters move too) lands mid-read -- on the reader's first
+     * Level0Query call, after the counter rows were read -- inside the range. Neither the total
+     * nor the page may see it; the next read sees both. Two placements: in the live remainder
+     * (a leak shows in the live count) and in a counter-covered month (counters were already
+     * read, so a leak shows only in the items).
+     */
+    @Test
+    void a_read_sees_one_snapshot_despite_a_concurrent_commit() {
+        assertOneSnapshot("2034-03-01T06:00:00Z", List.of("late", "f3", "f2", "f1", "j2", "j1"));
+        reset();
+        assertOneSnapshot("2034-02-20T10:00:00Z", List.of("f3", "late", "f2", "f1", "j2", "j1"));
+    }
+
+    private void assertOneSnapshot(String lateAt, List<String> afterOrder) {
+        applyBatches(fiveItems());
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-03-01T12:00:00Z");
+        Level0Request req = new Level0Request(ALL, from, to, 1, 10);
+        ProjectionPage before = reader.readLevel0(webQuery, req);
+        assertThat(before.totalItems()).isEqualTo(5);
+
+        CommitOnFirstCall probe = new CommitOnFirstCall(webQuery, () -> writer.apply(new wqs.projection.ProjectionBatch(
+                "wallet-transactions", List.of(item("late", lateAt)), 100L)));
+        ProjectionPage during = reader.readLevel0(probe, req);
+
+        assertThat(probe.fired).as("the commit happened inside the read").isTrue();
+        assertThat(during.totalItems()).as("total, late item at %s", lateAt).isEqualTo(5);
+        assertThat(during.items()).as("items, late item at %s", lateAt).isEqualTo(before.items());
+        ProjectionPage after = reader.readLevel0(webQuery, req);
+        assertThat(after.totalItems()).isEqualTo(6);
+        assertThat(after.items()).extracting(ItemEntry::sourceId).containsExactlyElementsOf(afterOrder);
+    }
+
+    /** Delegate that runs {@code commit} (a writer-side transaction) before its first call of any kind. */
+    static final class CommitOnFirstCall implements Level0Query {
+        private final Level0Query delegate;
+        private final Runnable commit;
+        boolean fired;
+
+        CommitOnFirstCall(Level0Query delegate, Runnable commit) {
+            this.delegate = delegate;
+            this.commit = commit;
+        }
+
+        private void once() {
+            if (!fired) {
+                fired = true;
+                commit.run();
+            }
+        }
+
+        @Override
+        public ViewKind view() {
+            return delegate.view();
+        }
+
+        @Override
+        public long count(DSLContext tx, Level0Filter f, Instant lo, Instant hi) {
+            once();
+            return delegate.count(tx, f, lo, hi);
+        }
+
+        @Override
+        public List<ItemKey> keys(DSLContext tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
+            once();
+            return delegate.keys(tx, f, lo, hi, offset, limit);
+        }
+
+        @Override
+        public List<ItemEntry> fetch(DSLContext tx, long userId, List<ItemKey> keys) {
+            once();
+            return delegate.fetch(tx, userId, keys);
+        }
+    }
+
     /** 3 items in Feb 2034, 2 in Jan 2034, all user 1. */
     private static List<ProjectionItem> fiveItems() {
         return List.of(
