@@ -43,8 +43,9 @@ public abstract class PostgresTestBase {
     }
 
     /**
-     * Empties every table the projection writer maintains. The container is shared by all test
-     * classes, so clearing only some of them leaves derived state (rollups, page index, counters)
+     * Empties every table the projection writer maintains, including the stream offset it
+     * commits. The container is shared by all test classes, so clearing only some of them leaves
+     * derived state (rollups, page index, counters)
      * pointing at rows that no longer exist -- e.g. a session locator without its session, or a
      * page-index row whose counters another class deleted -- which the strict updaters then
      * (correctly) reject.
@@ -52,7 +53,7 @@ public abstract class PostgresTestBase {
     protected static void clearProjection() {
         for (String table : java.util.List.of(
                 "wqItemLocator", "wqWebItem", "wqCcItem", "wqGroupLocator", "wqSession", "wqPlay",
-                "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth")) {
+                "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth", "wqStreamOffset")) {
             dsl().execute("delete from \"" + table + "\"");
         }
     }

@@ -18,9 +18,17 @@ import wqs.domain.SourceKind;
  */
 public final class EventGenerators {
 
-    /** All generated timestamps sit inside one month so a single partition suffices. */
-    public static final Instant WINDOW_START = Instant.parse("2034-03-01T00:00:00Z");
-    public static final Instant WINDOW_END = Instant.parse("2034-03-31T23:00:00Z");
+    /**
+     * Every generated timestamp lies in [WINDOW_START, WINDOW_END + a few minutes], which
+     * straddles the March/April 2034 boundary, so re-anchors move rollups, page-index rows and
+     * HIGH_LEVEL counters across months as well as days. Callers need partitions for
+     * YearMonth.from(WINDOW_START) and the month after.
+     */
+    public static final Instant WINDOW_START = Instant.parse("2034-03-29T00:00:00Z");
+    public static final Instant WINDOW_END = Instant.parse("2034-04-02T00:00:00Z");
+
+    /** Session starts are drawn from a day after WINDOW_START, leaving room for a day-earlier item. */
+    private static final Instant SESSION_START_MIN = WINDOW_START.plus(1, ChronoUnit.DAYS);
 
     /** Heavily skewed: user 1 appears far more often than user 20. */
     public static Arbitrary<Long> users() {
@@ -50,8 +58,8 @@ public final class EventGenerators {
     }
 
     private static Arbitrary<Instant> timestamps() {
-        long spanSeconds = ChronoUnit.SECONDS.between(WINDOW_START, WINDOW_END);
-        return Arbitraries.longs().between(0, spanSeconds).map(WINDOW_START::plusSeconds);
+        long spanSeconds = ChronoUnit.SECONDS.between(SESSION_START_MIN, WINDOW_END);
+        return Arbitraries.longs().between(0, spanSeconds).map(SESSION_START_MIN::plusSeconds);
     }
 
     private static Arbitrary<BigDecimal> amounts() {
@@ -61,7 +69,14 @@ public final class EventGenerators {
 
     /**
      * A sequence of items clustered into sessions: each session gets a batchId, a product, and
-     * between 1 and 6 plays, each play 1 to 3 transactions.
+     * between 1 and 4 plays, each play 1 to 3 transactions.
+     *
+     * Products vary so that a session's key (startedAt, LEAST(productId)) depends on arrival
+     * order, which drives every product-changing path under permutation: even sessions use
+     * product 11, odd sessions 13 with a product-less FIRST play (so an early null-product
+     * arrival is later raised to 13 in place, or never seen as a change if it arrives last), and
+     * session 0 is joined by a /cc-only adjustment a day earlier at product 7 (start AND product
+     * move) and one after its last transaction at product 3 (product-only change, same start).
      */
     public static Arbitrary<List<ProjectionItem>> itemSequences() {
         return Combinators.combine(
@@ -84,7 +99,9 @@ public final class EventGenerators {
 
         for (int s = 0; s < sessions; s++) {
             String batchId = "u" + userId + "-s" + s;
+            Integer sessionProduct = s % 2 == 0 ? 11 : 13;
             for (int p = 0; p < plays; p++) {
+                Integer product = s % 2 == 1 && p == 0 ? null : sessionProduct;
                 String subBatchId = batchId + "-p" + p;
                 for (int t = 0; t < txPerPlay; t++) {
                     items.add(new ProjectionItem(
@@ -92,7 +109,7 @@ public final class EventGenerators {
                             SourceKind.TRANSACTION,
                             batchId + "-t" + (sequence++),
                             start.plusSeconds(sequence * 7L),
-                            11,
+                            product,
                             batchId,
                             subBatchId,
                             (short) (t == 0 ? 1 : 2),
@@ -105,14 +122,19 @@ public final class EventGenerators {
             }
         }
 
-        // A /cc-only item joining the first session, a day before it: whichever of this and the
-        // session's TRANSACTIONs arrives first decides which view's page-index row is created
-        // first and which is materialised later, and when it arrives last it re-anchors the
-        // session (and so moves its page-index rows and HIGH_LEVEL counters) across a UTC day.
-        Instant dayBefore = start.minus(1, ChronoUnit.DAYS);
+        // /cc-only items joining the first session. Whichever of these and the session's
+        // TRANSACTIONs arrives first decides which view's page-index row is created first and
+        // which is materialised later. The early one, a day before the session at a lower
+        // product, re-anchors the session across a UTC day (and a month when the session starts
+        // on April 1) while changing its product; the late one, after the session's last
+        // transaction at a lower product still, changes only the product.
         items.add(new ProjectionItem(
                 userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adj" + sequence,
-                dayBefore.isBefore(WINDOW_START) ? WINDOW_START : dayBefore, 11,
+                start.minus(1, ChronoUnit.DAYS), 7,
+                "u" + userId + "-s0", null, (short) 9, amount, "EUR", null, null, null));
+        items.add(new ProjectionItem(
+                userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adjlate" + sequence,
+                start.plusSeconds(sequence * 7L + 5), 3,
                 "u" + userId + "-s0", null, (short) 9, amount, "EUR", null, null, null));
 
         // Unsessioned items: payments carry no batchId (spec 7.4).
