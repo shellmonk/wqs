@@ -143,7 +143,16 @@ public class StreamConsumer {
         closeQuietly();
         synchronized (this) {
             if (!stopped) {
-                subscribe();
+                // A failing subscribe (broker unreachable at startup) must not fail the app: it
+                // enters the same recovery loop as a mid-run failure, and poll() retries from the
+                // stored offset once the backoff has elapsed. An Error is rethrown after the state
+                // is set (StreamLifecycle still installs the poller).
+                try {
+                    subscribe();
+                } catch (Throwable e) {
+                    enterRecovery(e);
+                    rethrowIfError(e);
+                }
             }
         }
     }

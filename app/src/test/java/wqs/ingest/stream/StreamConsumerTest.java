@@ -167,6 +167,68 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(count("wqWebItem")).isEqualTo(1);
     }
 
+    @Test
+    void start_survives_a_failing_subscribe_and_poll_retries() {
+        offsetStore.write("wallet-transactions", 9L);
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumerWith(clock, 1);
+        source.failNextSubscribes(2);
+
+        consumer.start(); // first subscribe fails: must not throw
+        assertThat(source.subscribeCount()).isEqualTo(1);
+
+        clock.advance(Duration.ofSeconds(6)); // past the default 5s backoff
+        consumer.poll(); // second subscribe fails
+        assertThat(source.subscribeCount()).isEqualTo(2);
+
+        clock.advance(Duration.ofSeconds(6));
+        consumer.poll(); // third succeeds
+        assertThat(source.subscribeCount()).isEqualTo(3);
+        assertThat(source.subscribeOffsets()).containsExactly(10L, 10L, 10L);
+        assertThat(source.subscribedFrom()).isEqualTo(10L);
+
+        source.queue(payload("tx-10"), 10);
+        source.deliverAll();
+        consumer.poll();
+        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(offsetStore.read("wallet-transactions")).contains(10L);
+    }
+
+    @Test
+    void start_does_not_resubscribe_while_backing_off() {
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumerWith(clock, 1);
+        source.failNextSubscribes(1);
+
+        consumer.start();
+        clock.advance(Duration.ofSeconds(4)); // inside the 5s backoff
+        consumer.poll();
+        consumer.poll();
+
+        assertThat(source.subscribeCount()).isEqualTo(1);
+    }
+
+    /** Convention: an Error from subscribe() sets recovery state first, then is rethrown. */
+    @Test
+    void an_error_from_subscribe_during_start_sets_recovery_state_then_rethrows() {
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamConsumer consumer = consumerWith(clock, 1);
+        source.failNextSubscribes(1, new StackOverflowError("simulated"));
+
+        org.junit.jupiter.api.Assertions.assertThrows(StackOverflowError.class, consumer::start);
+
+        clock.advance(Duration.ofSeconds(6));
+        consumer.poll(); // recovery state was set, so this re-subscribes
+        assertThat(source.subscribeCount()).isEqualTo(2);
+    }
+
+    private StreamConsumer consumerWith(Clock clock, int batchSize) {
+        StreamProperties properties =
+                new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);
+        return new StreamConsumer(
+                source, properties, payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
+    }
+
     private StreamConsumer consumer(int batchSize, Duration maxWait) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, maxWait, 3, null, null);

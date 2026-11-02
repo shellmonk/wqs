@@ -17,7 +17,9 @@ class StreamBrokerConfig {
     @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean(StreamSource.class)
     Environment streamEnvironment(StreamProperties properties) {
-        return Environment.builder().uri(properties.uri()).build();
+        // Lazy: the constructor must not connect, so an unreachable broker cannot fail startup
+        // (D3). The first connection happens in subscribe(), inside the consumer's recovery loop.
+        return Environment.builder().uri(properties.uri()).lazyInitialization(true).build();
     }
 
     @Bean

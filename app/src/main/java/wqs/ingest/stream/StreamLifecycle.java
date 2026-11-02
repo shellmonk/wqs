@@ -47,7 +47,16 @@ public class StreamLifecycle {
         if (scheduler != null) {
             return;
         }
-        consumer.start();
+        try {
+            consumer.start();
+        } finally {
+            // Even when start() rethrows an Error: recovery is driven by poll(), so the poller
+            // must exist or the consumer would stay unscheduled for good.
+            installPoller();
+        }
+    }
+
+    private void installPoller() {
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "wqs-stream-poll");
             thread.setDaemon(true);

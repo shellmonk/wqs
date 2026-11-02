@@ -18,6 +18,9 @@ public class FakeStreamSource implements StreamSource {
     private int subscribeCount;
     private Runnable onClose = () -> {};
     private Long head;
+    private int failSubscribes;
+    private Throwable subscribeFailure = new IllegalStateException("broker unreachable");
+    private final List<Long> subscribeOffsets = new ArrayList<>();
 
     public void queue(StreamPayload payload, long offset) {
         queued.add(new Object[] {payload, offset});
@@ -93,10 +96,34 @@ public class FakeStreamSource implements StreamSource {
         return subscribedFrom;
     }
 
+    /** The next n subscribe() calls throw (and are counted) instead of subscribing. */
+    public void failNextSubscribes(int n) {
+        this.failSubscribes = n;
+    }
+
+    public void failNextSubscribes(int n, Throwable failure) {
+        this.failSubscribes = n;
+        this.subscribeFailure = failure;
+    }
+
+    /** The fromOffset of every subscribe() call, failed ones included. */
+    public List<Long> subscribeOffsets() {
+        return subscribeOffsets;
+    }
+
     @Override
     public void subscribe(long fromOffset, StreamHandler handler) {
+        subscribeCount++;
+        subscribeOffsets.add(fromOffset);
+        if (failSubscribes > 0) {
+            failSubscribes--;
+            if (subscribeFailure instanceof Error e) {
+                throw e;
+            }
+            throw (RuntimeException) (subscribeFailure instanceof RuntimeException r ? r
+                    : new IllegalStateException(subscribeFailure));
+        }
         this.subscribedFrom = fromOffset;
-        this.subscribeCount++;
         this.handler = handler;
         handlers.add(handler);
     }

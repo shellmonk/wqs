@@ -75,6 +75,25 @@ class StreamLifecycleTest {
         assertThat(pollsAfterStop.get()).isZero();
     }
 
+    /** An Error rethrown from start() must not leave the consumer permanently unscheduled. */
+    @Test
+    void an_error_from_consumer_start_still_installs_the_poller() {
+        StreamConsumer consumer = mock(StreamConsumer.class);
+        doAnswer(inv -> {
+            throw new StackOverflowError("simulated Error");
+        }).when(consumer).start();
+        AtomicInteger polls = new AtomicInteger();
+        doAnswer(inv -> polls.incrementAndGet()).when(consumer).poll();
+
+        StreamLifecycle lifecycle = new StreamLifecycle(consumer, Duration.ofMillis(10));
+        try {
+            org.junit.jupiter.api.Assertions.assertThrows(StackOverflowError.class, lifecycle::start);
+            await().atMost(Duration.ofSeconds(5)).until(() -> polls.get() >= 3);
+        } finally {
+            lifecycle.stop();
+        }
+    }
+
     @Test
     void stop_is_idempotent_and_safe_before_start() {
         StreamConsumer consumer = mock(StreamConsumer.class);
