@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
+import wqs.domain.DataDomain;
 
 /**
  * On-demand monthly partitions for whatever months a batch touches (spec 5.8, ruling R100).
@@ -59,6 +60,22 @@ public class PartitionProvisioner {
         this.clock = clock;
         this.maxMonthsAhead = maxMonthsAhead;
         this.floor = YearMonth.parse(provisionFloor);
+        requireInsideDataDomain(floor, YearMonth.now(clock).plusMonths(maxMonthsAhead));
+    }
+
+    /**
+     * Ruling F2: the API's range clamp into {@link DataDomain} is exact only if no partition can
+     * exist outside it, so a provisioning window that reaches outside fails startup.
+     */
+    private static void requireInsideDataDomain(YearMonth floor, YearMonth lastProvisionable) {
+        if (floor.isBefore(DataDomain.FIRST_MONTH)) {
+            throw new IllegalStateException("wqs.partition.provision-floor " + floor
+                    + " is before the data domain's first month " + DataDomain.FIRST_MONTH);
+        }
+        if (!lastProvisionable.isBefore(DataDomain.END_MONTH)) {
+            throw new IllegalStateException("wqs.partition.max-months-ahead reaches " + lastProvisionable
+                    + ", not before the data domain's end " + DataDomain.END_MONTH);
+        }
     }
 
     /**

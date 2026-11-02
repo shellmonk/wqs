@@ -29,7 +29,7 @@ class RangeDecompositionTest {
     @Test
     void full_clamped_domain_is_at_most_2760_months() {
         List<Segment> segments = RangeDecomposition.newestFirst(
-                wqs.api.ProjectionParams.DOMAIN_START, wqs.api.ProjectionParams.DOMAIN_END);
+                wqs.domain.DataDomain.START, wqs.domain.DataDomain.END);
         assertThat(segments).allMatch(s -> s.tier() == Tier.MONTH);
         assertThat(segments).hasSizeLessThanOrEqualTo(2_760);
     }

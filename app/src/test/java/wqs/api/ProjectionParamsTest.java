@@ -18,8 +18,8 @@ class ProjectionParamsTest {
 
     @Test
     void the_domain_constants_are_the_ruled_bounds() {
-        assertThat(ProjectionParams.DOMAIN_START).isEqualTo(DOMAIN_START);
-        assertThat(ProjectionParams.DOMAIN_END).isEqualTo(DOMAIN_END);
+        assertThat(wqs.domain.DataDomain.START).isEqualTo(DOMAIN_START);
+        assertThat(wqs.domain.DataDomain.END).isEqualTo(DOMAIN_END);
     }
 
     @Test
