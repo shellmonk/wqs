@@ -34,6 +34,10 @@ wqs:
       # url/username/password fall back to spring.datasource.* when unset.
       hikari:
         maximum-pool-size: 32
+  # read:
+    # Optional page-size ceiling (spec 7.9). Ships disabled (unset): any pageSize is honoured.
+    # When set, larger requests are clamped to it and the response reports the effective size.
+    # max-page-size: 1000
   stream:
     # Off by default so broker-less contexts (tests, tooling) start. Deployments enable it with
     # WQS_STREAM_ENABLED=true (Spring relaxed binding).
