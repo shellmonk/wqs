@@ -1,4 +1,7 @@
 spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 12
   application:
     name: wqs
   threads:
@@ -26,6 +29,11 @@ spring:
   # produces duplicate or missed fires (spec section 6.5).
 
 wqs:
+  datasource:
+    reader:
+      # url/username/password fall back to spring.datasource.* when unset.
+      hikari:
+        maximum-pool-size: 32
   stream:
     # Off by default so broker-less contexts (tests, tooling) start. Deployments enable it with
     # WQS_STREAM_ENABLED=true (Spring relaxed binding).

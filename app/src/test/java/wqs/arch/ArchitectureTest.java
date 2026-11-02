@@ -14,9 +14,13 @@ import com.tngtech.archunit.lang.ArchCondition;
 import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import wqs.config.ReaderDsl;
 import wqs.db.RawSqlJustified;
+import wqs.read.archfixture.UnqualifiedReader;
 
 /**
  * Each rule names the spec decision it enforces. Per spec section 8.5, a rule that cannot be
@@ -174,6 +178,50 @@ class ArchitectureTest {
                                 "plain-SQL API used in " + call.getOriginOwner().getFullName()
                                         + " -- annotate with @RawSqlJustified and explain why"
                                         + " (spec 2.2 rule 1): " + call.getDescription())));
+            }
+        };
+    }
+
+    /** Spec 10 "datasource routing is explicit" (ruling D11): reads never land on the writer. */
+    @Test
+    void read_layer_injects_only_the_reader_dsl() {
+        readerDslRule().check(classes);
+    }
+
+    /** Proves the rule above can fail. */
+    @Test
+    void read_layer_rule_rejects_an_unqualified_dsl() {
+        JavaClasses fixture = new ClassFileImporter().importClasses(UnqualifiedReader.class);
+        assertThatThrownBy(() -> readerDslRule().check(fixture)).isInstanceOf(AssertionError.class);
+    }
+
+    private static ArchRule readerDslRule() {
+        // Not noClasses(): see string_based_sql_requires_justification.
+        return classes()
+                .that().resideInAPackage("wqs.read..")
+                .should(injectOnlyQualifiedDsl())
+                // removed in Task 4 (no wqs.read main classes exist until then)
+                .allowEmptyShould(true);
+    }
+
+    private static ArchCondition<JavaClass> injectOnlyQualifiedDsl() {
+        return new ArchCondition<>("inject org.jooq.DSLContext only with @ReaderDsl") {
+            @Override
+            public void check(JavaClass item, ConditionEvents events) {
+                item.getFields().stream()
+                        .filter(f -> f.getRawType().isAssignableTo(org.jooq.DSLContext.class))
+                        .filter(f -> !f.isAnnotatedWith(ReaderDsl.class))
+                        .forEach(f -> events.add(SimpleConditionEvent.violated(
+                                f, f.getDescription() + " is an unqualified DSLContext")));
+                item.getConstructors().forEach(c -> {
+                    for (int i = 0; i < c.getRawParameterTypes().size(); i++) {
+                        if (c.getRawParameterTypes().get(i).isAssignableTo(org.jooq.DSLContext.class)
+                                && !c.getParameters().get(i).isAnnotatedWith(ReaderDsl.class)) {
+                            events.add(SimpleConditionEvent.violated(
+                                    c, c.getDescription() + " takes an unqualified DSLContext"));
+                        }
+                    }
+                });
             }
         };
     }
