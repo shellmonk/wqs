@@ -145,10 +145,32 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         // The counter move needs each moved row's visibility (it decides cntExclCancelled).
         assertThat(result.movedVisible())
                 .containsExactlyInAnyOrderEntriesOf(Map.of(ViewKind.WEB, false, ViewKind.CC, true));
-        assertThat(visible("wqWebHighLevel")).isFalse();
+        // The row moved hidden, then t0 -- a live item feeding /web -- revived it at the new key
+        // (spec 6.3); the counter move uses the moved visibility, the revival adds excl after.
+        assertThat(result.revived()).containsExactly(ViewKind.WEB);
+        assertThat(visible("wqWebHighLevel")).isTrue();
         assertThat(visible("wqCcHighLevel")).isTrue();
         assertThat(dsl().fetchOne("select \"productId\" from \"wqWebHighLevel\"")
                 .get(0, Integer.class)).isEqualTo(7);
+    }
+
+    @Test
+    void a_live_item_revives_hidden_session_rows_only_in_the_views_its_source_feeds() {
+        apply(tx("t1", "b1", T0), newSession(T0, 11));
+        dsl().execute("update \"wqWebHighLevel\" set \"visibleExclCancelled\" = false");
+        dsl().execute("update \"wqCcHighLevel\" set \"visibleExclCancelled\" = false");
+
+        HighLevelResult result = apply(ccOnly("a1", "b1", T0.plusSeconds(5)), joined(T0, 11));
+
+        assertThat(result.inserted()).isEmpty();
+        assertThat(result.revived()).containsExactly(ViewKind.CC);
+        assertThat(visible("wqCcHighLevel")).isTrue();
+        assertThat(visible("wqWebHighLevel")).isFalse();
+
+        // Already visible: nothing to revive.
+        assertThat(apply(tx("t2", "b1", T0.plusSeconds(6)), joined(T0, 11)).revived())
+                .containsExactly(ViewKind.WEB);
+        assertThat(apply(tx("t3", "b1", T0.plusSeconds(7)), joined(T0, 11)).revived()).isEmpty();
     }
 
     @Test

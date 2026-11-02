@@ -30,7 +30,13 @@ import wqs.domain.ViewKind;
  * Every sessioned item also ensures the row exists in each view its own source feeds, so the end
  * state does not depend on which source opened the session.
  *
- * A cancellation never creates a row: cancellation effects are applied by a later task.
+ * Visibility ("visibleExclCancelled") is per view: a session row in view V is visible while the
+ * session has at least one surviving (non-cancelled, non-cancellation) item whose source feeds V.
+ * {@link CancellationApplier} hides a row when a cancel removes the last such item; here, a live
+ * item joining a session whose row in a view its source feeds is hidden REVIVES it, since the
+ * item is itself a surviving item in that view.
+ *
+ * A cancellation never creates a row; its effects are applied by {@link CancellationApplier}.
  */
 @Component
 public class HighLevelUpdater {
@@ -49,8 +55,9 @@ public class HighLevelUpdater {
      *
      * @param rollup what {@link RollupUpdater} did for this item ({@link RollupResult#NONE} for
      *               unsessioned items and cancellations)
-     * @return the views where a row was inserted and the views where an existing session row
-     *         moved or changed product; see {@link HighLevelResult}
+     * @return the views where a row was inserted, where an existing session row moved or
+     *         changed product, and where a hidden session row was revived; see
+     *         {@link HighLevelResult}
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public HighLevelResult applyItem(ProjectionItem item, RollupResult rollup) {
@@ -61,7 +68,7 @@ public class HighLevelUpdater {
             return new HighLevelResult(
                     insertForSource(item, item.occurredAt(), (short) item.source().code(),
                             item.sourceId(), item.productId()),
-                    Set.of(), null, null, Map.of());
+                    Set.of(), null, null, Map.of(), Set.of());
         }
         if (rollup.sessionStart() == null) {
             throw new IllegalStateException(
@@ -86,10 +93,30 @@ public class HighLevelUpdater {
         // the session has a surviving item in that view and the row is visible.
         Set<ViewKind> inserted = insertForSource(item, rollup.sessionStart(), KIND_SESSION,
                 item.batchId(), rollup.sessionProductId());
+        // Where the row already existed, it may have been hidden by cancels; this live item
+        // makes the session visible again in the views its source feeds.
+        Set<ViewKind> revived = HighLevelResult.newViewSet();
+        for (ViewKind view : item.source().views()) {
+            if (!inserted.contains(view) && revive(view(view), item, rollup)) {
+                revived.add(view);
+            }
+        }
         return new HighLevelResult(inserted, moved,
                 moved.isEmpty() ? null : rollup.previousSessionStart(),
                 moved.isEmpty() ? null : rollup.previousSessionProductId(),
-                movedVisible);
+                movedVisible, revived);
+    }
+
+    /** Flips a hidden session row visible at the session's current key; true iff it flipped. */
+    private boolean revive(View v, ProjectionItem item, RollupResult rollup) {
+        return dsl.update(v.table)
+                .set(v.visible, true)
+                .where(v.userId.eq(item.userId()),
+                       v.occurredAt.eq(utc(rollup.sessionStart())),
+                       v.kind.eq(KIND_SESSION),
+                       v.refId.eq(item.batchId()),
+                       v.visible.isFalse())
+                .execute() > 0;
     }
 
     private Set<ViewKind> insertForSource(ProjectionItem item, Instant at, short kind,

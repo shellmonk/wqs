@@ -249,6 +249,28 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     @Test
+    void recounting_restores_only_the_excl_cancelled_tally_and_is_strict() {
+        run(u -> u.countHighLevel(1L, ViewKind.WEB, 11, T0));
+        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0));
+
+        run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0));
+
+        assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isEqualTo(1);
+        assertThat(dayExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)).isEqualTo(1);
+        assertThat(monthExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, 0, T0)).isEqualTo(1);
+        // Excl above cntAll: the CHECK rejects it.
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, 11, T0)))
+                .isInstanceOf(RuntimeException.class);
+        // No row to restore: never created.
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                run(u -> u.recountExclCancelled(1L, ViewKind.CC, PageUnit.HIGH_LEVEL, 11, T0)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("expected 1");
+        assertThat(rows("wqCountDay")).isEqualTo(2);
+    }
+
+    @Test
     void the_check_constraint_rejects_negative_and_excl_above_all() {
         run(u -> u.countItem(tx("t1", 11)));
 

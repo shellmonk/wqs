@@ -36,7 +36,10 @@ import wqs.domain.ProjectionItem;
  *       by the ordinary upsert, and the locator is pointed at the new startedAt. Play and session
  *       re-anchor independently.</li>
  *   <li>"endedAt" = latest occurredAt (GREATEST).</li>
- *   <li>counts and money = sums.</li>
+ *   <li>counts and money = sums. The ExclCancelled columns are the same sums over surviving
+ *       items: {@link CancellationApplier} subtracts a cancelled item's own contribution, and
+ *       "playCountExclCancelled" counts plays with a surviving transaction -- so a live item
+ *       joining a play that cancels had emptied brings it back, not only a new play.</li>
  *   <li>"productId" and "currency" = LEAST over the group's non-null values. A group's items are
  *       expected to agree; if they do not, the smallest value wins regardless of arrival order
  *       rather than whichever item happened to arrive first.</li>
@@ -88,13 +91,18 @@ public class RollupUpdater {
                 item, item.occurredAt().atOffset(ZoneOffset.UTC), plays, wins);
 
         boolean playIsNew = false;
+        boolean playIsLive = false;
         if (item.hasPlay()) {
             Anchor play = claim(item.userId(), item.batchId(), item.subBatchId(), contribution.at());
             if (play.previousStart() != null) {
                 movePlay(item, play.previousStart(), play.startedAt());
             }
-            upsertPlay(contribution, play.startedAt());
+            int survivors = upsertPlay(contribution, play.startedAt());
             playIsNew = play.isNew();
+            // This item is the play's only surviving transaction: the play is new, or every
+            // earlier transaction in it was cancelled (spec 6.3). Either way it rejoins the
+            // session's playCountExclCancelled.
+            playIsLive = survivors == 1;
         }
 
         Anchor session = claim(item.userId(), item.batchId(), SESSION_MARKER, contribution.at());
@@ -105,7 +113,7 @@ public class RollupUpdater {
         if (session.previousStart() != null) {
             moveSession(item, session.previousStart(), session.startedAt());
         }
-        Integer productId = upsertSession(contribution, session.startedAt(), playIsNew);
+        Integer productId = upsertSession(contribution, session.startedAt(), playIsNew, playIsLive);
 
         boolean keyChanged = !session.isNew()
                 && (session.previousStart() != null || !Objects.equals(oldProductId, productId));
@@ -191,9 +199,10 @@ public class RollupUpdater {
         dsl.insertInto(WQ_SESSION).set(row).execute();
     }
 
-    private void upsertPlay(Contribution c, OffsetDateTime startedAt) {
+    /** @return the play's txCountExclCancelled after the fold. */
+    private int upsertPlay(Contribution c, OffsetDateTime startedAt) {
         ProjectionItem item = c.item();
-        dsl.insertInto(WQ_PLAY)
+        return dsl.insertInto(WQ_PLAY)
                 .set(WQ_PLAY.userId, item.userId())
                 .set(WQ_PLAY.batchId, item.batchId())
                 .set(WQ_PLAY.subBatchId, item.subBatchId())
@@ -222,13 +231,22 @@ public class RollupUpdater {
                 .set(WQ_PLAY.totalPlaysExclCancelled, summed(WQ_PLAY.totalPlaysExclCancelled))
                 .set(WQ_PLAY.totalWinsExclCancelled, summed(WQ_PLAY.totalWinsExclCancelled))
                 .set(WQ_PLAY.netExclCancelled, summed(WQ_PLAY.netExclCancelled))
-                .execute();
+                .returning(WQ_PLAY.txCountExclCancelled)
+                .fetchSingle()
+                .getTxCountExclCancelled();
     }
 
-    /** @return the session's productId after the fold. */
-    private Integer upsertSession(Contribution c, OffsetDateTime startedAt, boolean playIsNew) {
+    /**
+     * @param playIsNew  the item created its play: +1 playCount
+     * @param playIsLive the item is its play's only surviving transaction (new, or emptied by
+     *                   cancels): +1 playCountExclCancelled
+     * @return the session's productId after the fold.
+     */
+    private Integer upsertSession(
+            Contribution c, OffsetDateTime startedAt, boolean playIsNew, boolean playIsLive) {
         ProjectionItem item = c.item();
         int playDelta = playIsNew ? 1 : 0;
+        int playExclDelta = playIsLive ? 1 : 0;
         return dsl.insertInto(WQ_SESSION)
                 .set(WQ_SESSION.userId, item.userId())
                 .set(WQ_SESSION.batchId, item.batchId())
@@ -239,7 +257,7 @@ public class RollupUpdater {
                 .set(WQ_SESSION.txCount, 1)
                 .set(WQ_SESSION.txCountExclCancelled, 1)
                 .set(WQ_SESSION.playCount, playDelta)
-                .set(WQ_SESSION.playCountExclCancelled, playDelta)
+                .set(WQ_SESSION.playCountExclCancelled, playExclDelta)
                 .set(WQ_SESSION.totalPlays, c.plays())
                 .set(WQ_SESSION.totalWins, c.wins())
                 .set(WQ_SESSION.net, c.net())

@@ -6,13 +6,14 @@ import org.jooq.Record;
 
 /**
  * An order-independent, comparable view of the whole projection: items, the item locator, the
- * group locator, rollups, the page index and both counter tiers. Every table is ordered by its
- * full primary key, so two snapshots are equal exactly when the stored state is.
+ * group locator, rollups, the page index, both counter tiers and parked cancels. Every table is
+ * ordered by its full primary key, so two snapshots are equal exactly when the stored state is.
  *
- * CRITICAL: "itemId" and "ingestedAt" (item tables only) are excluded. itemId comes from a
- * sequence and ingestedAt from now(), so both differ between runs; including either would make
- * every convergence comparison fail for reasons that have nothing to do with correctness. No other
- * projection table has a sequence- or clock-derived column, so every other column is compared.
+ * CRITICAL: "itemId" and "ingestedAt" (item tables only) and "parkedAt" (parked cancels) are
+ * excluded. itemId comes from a sequence and ingestedAt / parkedAt from now(), so they differ
+ * between runs; including any would make every convergence comparison fail for reasons that have
+ * nothing to do with correctness. No other projection table has a sequence- or clock-derived
+ * column, so every other column is compared.
  */
 public record ProjectionSnapshot(
         List<String> webItems,
@@ -24,7 +25,8 @@ public record ProjectionSnapshot(
         List<String> webHighLevel,
         List<String> ccHighLevel,
         List<String> countDay,
-        List<String> countMonth) {
+        List<String> countMonth,
+        List<String> pendingCancels) {
 
     public static ProjectionSnapshot of(DSLContext dsl) {
         return new ProjectionSnapshot(
@@ -35,7 +37,8 @@ public record ProjectionSnapshot(
                 all(dsl, "wqWebHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
                 all(dsl, "wqCcHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
                 all(dsl, "wqCountDay", COUNTER_KEY),
-                all(dsl, "wqCountMonth", COUNTER_KEY));
+                all(dsl, "wqCountMonth", COUNTER_KEY),
+                pendingCancelRows(dsl));
     }
 
     private static final String COUNTER_KEY =
@@ -57,6 +60,18 @@ public record ProjectionSnapshot(
                          select "source", "sourceId", "userId", "occurredAt"
                          from "wqItemLocator"
                          order by "source", "sourceId"
+                         """)
+                .map(Record::toString);
+    }
+
+    /** Parked cancels, minus "parkedAt" (clock-derived). Converged state should hold none. */
+    private static List<String> pendingCancelRows(DSLContext dsl) {
+        return dsl.fetch("""
+                         select "source", "cancelSourceId", "cancelsSourceId", "userId",
+                                "occurredAt", "productId", "batchId", "subBatchId", "type",
+                                "amount", "currency", "balanceAfter", "detail"
+                         from "wqPendingCancel"
+                         order by "source", "cancelSourceId"
                          """)
                 .map(Record::toString);
     }

@@ -34,7 +34,8 @@ import wqs.domain.ViewKind;
  * {@link #moveHighLevel} for each view in {@code moved()} from
  * (movedFrom, movedFromProductId) to the current key, with that row's visibility.
  *
- * A decrement that empties a row (cntAll reaches 0) deletes it, keeping rows sparse and stored
+ * An excl-only change ({@link #uncountExclCancelled}, {@link #recountExclCancelled}) never
+ * creates or deletes a row. A decrement that empties a row (cntAll reaches 0) deletes it, keeping rows sparse and stored
  * state independent of the path a moved page unit took.
  *
  * Decrements are strict: every key a decrement targets was counted first (the gate and the
@@ -108,6 +109,21 @@ public class CounterUpdater {
             long userId, ViewKind view, PageUnit unit, Integer productId, Instant at) {
         for (Key key : keys(productId, at)) {
             decrementExcl(tier(key.month()), userId, view, unit, key);
+        }
+    }
+
+    /**
+     * Returns one row to the excl-cancelled tally, leaving cntAll untouched: the inverse of
+     * {@link #uncountExclCancelled}, for a page-index row revived by a live item joining a
+     * session whose row in that view had been hidden by cancels. Strict like every other
+     * decrement-side operation: the row must exist (it was counted when the page unit was
+     * inserted), and the CHECK rejects excl &gt; all.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void recountExclCancelled(
+            long userId, ViewKind view, PageUnit unit, Integer productId, Instant at) {
+        for (Key key : keys(productId, at)) {
+            incrementExcl(tier(key.month()), userId, view, unit, key);
         }
     }
 
@@ -213,11 +229,20 @@ public class CounterUpdater {
         requireOneRow(rows, t, userId, view, unit, key);
     }
 
+    private <R extends Record> void incrementExcl(
+            Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
+        int rows = dsl.update(t.table())
+                .set(t.cntExclCancelled(), t.cntExclCancelled().plus(1L))
+                .where(rowIs(t, userId, view, unit, key))
+                .execute();
+        requireOneRow(rows, t, userId, view, unit, key);
+    }
+
     private static <R extends Record> void requireOneRow(
             int rows, Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
         if (rows != 1) {
             throw new IllegalStateException(
-                    "counter decrement hit " + rows + " rows, expected 1: table="
+                    "counter update hit " + rows + " rows, expected 1: table="
                             + t.table().getName() + " userId=" + userId + " view=" + view
                             + " unit=" + unit + " productId=" + key.productId()
                             + " period=" + key.period());

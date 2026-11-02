@@ -28,21 +28,33 @@ import wqs.domain.ViewKind;
  *                            "visibleExclCancelled" -- whether the row is in the excl-cancelled
  *                            tally, which decides whether the counter move also shifts
  *                            cntExclCancelled. Its key set equals {@code moved}.
+ * @param revived             views where an existing session row was hidden (every item of the
+ *                            session in that view cancelled) and this live item made it visible
+ *                            again. Counters return one row to cntExclCancelled only (cntAll
+ *                            already counts it), at the CURRENT key, after any move. Disjoint
+ *                            from {@code inserted}.
  */
 public record HighLevelResult(
         Set<ViewKind> inserted,
         Set<ViewKind> moved,
         Instant movedFrom,
         Integer movedFromProductId,
-        Map<ViewKind, Boolean> movedVisible) {
+        Map<ViewKind, Boolean> movedVisible,
+        Set<ViewKind> revived) {
 
     public static final HighLevelResult NONE =
-            new HighLevelResult(Set.of(), Set.of(), null, null, Map.of());
+            new HighLevelResult(Set.of(), Set.of(), null, null, Map.of(), Set.of());
 
     public HighLevelResult {
         inserted = Set.copyOf(inserted);
         moved = Set.copyOf(moved);
         movedVisible = Map.copyOf(movedVisible);
+        revived = Set.copyOf(revived);
+        if (revived.stream().anyMatch(inserted::contains)) {
+            throw new IllegalArgumentException(
+                    "a view cannot be both inserted and revived: inserted=" + inserted
+                            + " revived=" + revived);
+        }
         if (!movedVisible.keySet().equals(moved)) {
             throw new IllegalArgumentException(
                     "movedVisible must cover exactly the moved views: moved=" + moved
