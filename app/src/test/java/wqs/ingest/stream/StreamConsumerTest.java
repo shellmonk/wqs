@@ -36,6 +36,7 @@ class StreamConsumerTest extends PostgresTestBase {
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private StreamPayloadMapper payloadMapper;
     @Autowired private PartitionManager partitionManager;
+    @Autowired private wqs.ingest.DeadLetterStore deadLetterStore;
 
     private FakeStreamSource source;
     private SimpleMeterRegistry registry;
@@ -117,10 +118,10 @@ class StreamConsumerTest extends PostgresTestBase {
 
     private StreamConsumer consumer(int batchSize, Duration maxWait) {
         StreamProperties properties =
-                new StreamProperties(true, "wallet-transactions", batchSize, maxWait, 3);
+                new StreamProperties(true, "wallet-transactions", batchSize, maxWait, 3, null);
         return new StreamConsumer(
                 source, properties, payloadMapper, writer, offsetStore, registry,
-                Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC));
+                Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
     }
 
     private StreamPayload payload(String id) {

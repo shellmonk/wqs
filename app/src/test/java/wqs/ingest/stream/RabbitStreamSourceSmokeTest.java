@@ -53,7 +53,7 @@ class RabbitStreamSourceSmokeTest {
 
                 environment.streamCreator().stream("smoke").create();
 
-                StreamProperties properties = new StreamProperties(true, "smoke", 10, null, 3);
+                StreamProperties properties = new StreamProperties(true, "smoke", 10, null, 3, null);
                 RabbitStreamSource source =
                         new RabbitStreamSource(environment, properties, new ObjectMapper());
                 List<StreamPayload> payloads = new CopyOnWriteArrayList<>();

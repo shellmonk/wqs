@@ -9,7 +9,9 @@ import java.time.Instant;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.util.List;
 import wqs.domain.ProjectionItem;
+import wqs.ingest.DeadLetterStore;
 import wqs.projection.ProjectionBatch;
 import wqs.projection.ProjectionWriter;
 import wqs.projection.StreamPayloadMapper;
@@ -25,6 +27,12 @@ import wqs.projection.WriteResult;
  * {@link #poll()} runs on a separate timer thread. Both mutate the non-thread-safe
  * {@link BatchAccumulator}, so {@code onMessage}, {@code poll} and {@code stop} are serialised
  * by this object's monitor.
+ *
+ * <p>Safety invariant: the stored offset only advances past an event that was projected or
+ * dead-lettered. If processing fails unrecoverably (for example the database is down), the
+ * consumer never continues from memory: it drops its buffer, closes the source and, after a
+ * backoff, re-subscribes from the stored offset, so a later batch cannot commit a higher offset
+ * past events that exist nowhere.
  */
 public class StreamConsumer {
 
@@ -37,11 +45,17 @@ public class StreamConsumer {
     private final StreamOffsetStore offsetStore;
     private final MeterRegistry registry;
     private final Clock clock;
+    private final DeadLetterStore deadLetterStore;
 
     private final BatchAccumulator accumulator;
     private final AtomicReference<Instant> lastProjectedAt = new AtomicReference<>();
     private final Counter projectedCounter;
     private final Counter duplicateCounter;
+    private final Counter deadLetteredCounter;
+
+    /** True after an unrecoverable failure until poll() has re-subscribed from the stored offset. */
+    private boolean recovering;
+    private Instant recoverAt;
 
     public StreamConsumer(
             StreamSource source,
@@ -50,7 +64,8 @@ public class StreamConsumer {
             ProjectionWriter writer,
             StreamOffsetStore offsetStore,
             MeterRegistry registry,
-            Clock clock) {
+            Clock clock,
+            DeadLetterStore deadLetterStore) {
         this.source = source;
         this.properties = properties;
         this.payloadMapper = payloadMapper;
@@ -58,6 +73,7 @@ public class StreamConsumer {
         this.offsetStore = offsetStore;
         this.registry = registry;
         this.clock = clock;
+        this.deadLetterStore = deadLetterStore;
         this.accumulator = new BatchAccumulator(
                 properties.name(), properties.batchMaxSize(), properties.batchMaxWait(), clock);
 
@@ -65,6 +81,8 @@ public class StreamConsumer {
                 .tag("source", "stream").tag("outcome", "projected").register(registry);
         this.duplicateCounter = Counter.builder("wqs.ingest.events")
                 .tag("source", "stream").tag("outcome", "duplicate").register(registry);
+        this.deadLetteredCounter = Counter.builder("wqs.ingest.events")
+                .tag("source", "stream").tag("outcome", "deadlettered").register(registry);
 
         Gauge.builder("wqs.ingest.lag.seconds", lastProjectedAt, ref -> {
                     Instant last = ref.get();
@@ -75,7 +93,11 @@ public class StreamConsumer {
                 .register(registry);
     }
 
-    public void start() {
+    public synchronized void start() {
+        subscribe();
+    }
+
+    private void subscribe() {
         // Resume from the NEXT offset. Subscribing at the committed offset replays the last event.
         long from = offsetStore.read(properties.name()).map(o -> o + 1).orElse(0L);
         log.info("Subscribing to stream {} from offset {}", properties.name(), from);
@@ -83,29 +105,149 @@ public class StreamConsumer {
     }
 
     private synchronized void onMessage(StreamPayload payload, long offset) {
-        accumulator.add(payloadMapper.toItem(payload), offset);
-        accumulator.drainIfReady().ifPresent(this::applyBatch);
+        if (recovering) {
+            return; // The source is closed; anything arriving now is redelivered after recovery.
+        }
+        try {
+            ProjectionItem item;
+            try {
+                item = payloadMapper.toItem(payload);
+            } catch (RuntimeException e) {
+                deadLetterUnmappable(payload, offset, e);
+                return;
+            }
+            accumulator.add(item, offset);
+            accumulator.drainIfReady().ifPresent(this::applyBatch);
+        } catch (RuntimeException e) {
+            enterRecovery(e);
+        }
+    }
+
+    /**
+     * A malformed event is poison: record it from the raw payload. The offset is persisted only
+     * when nothing earlier is still buffered; otherwise the next batch's higher offset covers it.
+     * (If the process dies in between, the event is redelivered and recorded again: harmless.)
+     */
+    private void deadLetterUnmappable(StreamPayload payload, long offset, RuntimeException cause) {
+        log.error("Cannot map event {} at offset {}; dead-lettering it",
+                payload.transactionId(), offset, cause);
+        deadLetterStore.record(properties.name(), offset, payload, cause, 1);
+        deadLetteredCounter.increment();
+        if (accumulator.pending() == 0) {
+            offsetStore.write(properties.name(), offset);
+        }
     }
 
     /** Flushes a partially filled batch whose wait window has elapsed. Called on a short timer. */
     public synchronized void poll() {
-        accumulator.drainIfReady().ifPresent(this::applyBatch);
+        if (recovering) {
+            if (!clock.instant().isBefore(recoverAt)) {
+                recover();
+            }
+            return;
+        }
+        try {
+            accumulator.drainIfReady().ifPresent(this::applyBatch);
+        } catch (RuntimeException e) {
+            enterRecovery(e);
+        }
     }
 
     public synchronized void stop() {
-        accumulator.drainNow().ifPresent(this::applyBatch);
-        source.close();
+        try {
+            if (!recovering) {
+                accumulator.drainNow().ifPresent(this::applyBatch);
+            }
+        } catch (RuntimeException e) {
+            // Not advanced, so the batch is redelivered on the next start.
+            log.error("Final flush failed on stop; unflushed events will be redelivered", e);
+        } finally {
+            source.close();
+        }
     }
 
+    private void enterRecovery(RuntimeException cause) {
+        log.error("Unrecoverable failure on stream {}; dropping the buffer and re-subscribing "
+                + "from the stored offset after {}", properties.name(), properties.recoveryBackoff(), cause);
+        try {
+            source.close();
+        } catch (RuntimeException e) {
+            log.warn("Closing the source failed", e);
+        }
+        accumulator.clear();
+        recovering = true;
+        recoverAt = clock.instant().plus(properties.recoveryBackoff());
+    }
+
+    private void recover() {
+        recovering = false;
+        try {
+            subscribe();
+        } catch (RuntimeException e) {
+            enterRecovery(e);
+        }
+    }
+
+    /**
+     * Applies the batch whole; failing that, item by item so one poison event cannot discard its
+     * neighbours; an item that still fails is dead-lettered. The batch offset is written only
+     * once every item is projected or dead-lettered. Any exception escaping this method (retries
+     * AND the dead-letter write failed, or the offset write failed) leaves the stored offset
+     * untouched, and the caller enters recovery.
+     */
     private void applyBatch(ProjectionBatch batch) {
-        WriteResult result = writer.apply(batch);
+        RuntimeException batchError = null;
+        for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
+            try {
+                WriteResult result = writer.apply(batch);
+                projectedCounter.increment(result.projected());
+                duplicateCounter.increment(result.duplicates());
+                recordLag(batch.items());
+                return;
+            } catch (RuntimeException e) {
+                batchError = e;
+                log.warn("Batch attempt {}/{} failed for stream {} at offset {}",
+                        attempt, properties.maxAttempts(), batch.stream(), batch.committedOffset(), e);
+            }
+        }
+        log.warn("Batch of {} failed {} times on stream {}; applying item by item",
+                batch.items().size(), properties.maxAttempts(), batch.stream(), batchError);
 
-        projectedCounter.increment(result.projected());
-        duplicateCounter.increment(result.duplicates());
+        List<ProjectionItem> projectedItems = new java.util.ArrayList<>();
+        for (ProjectionItem item : batch.items()) {
+            if (applyAlone(batch, item)) {
+                projectedItems.add(item);
+            }
+        }
+        recordLag(projectedItems);
 
-        batch.items().stream()
-                .map(ProjectionItem::occurredAt)
-                .max(Instant::compareTo)
-                .ifPresent(lastProjectedAt::set);
+        if (batch.committedOffset() != null) {
+            offsetStore.write(batch.stream(), batch.committedOffset());
+        }
+    }
+
+    private boolean applyAlone(ProjectionBatch batch, ProjectionItem item) {
+        RuntimeException lastError = null;
+        for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
+            try {
+                WriteResult result = writer.apply(new ProjectionBatch(batch.stream(), List.of(item), null));
+                projectedCounter.increment(result.projected());
+                duplicateCounter.increment(result.duplicates());
+                return true;
+            } catch (RuntimeException e) {
+                lastError = e;
+                log.warn("Item {} attempt {}/{} failed", item.sourceId(), attempt, properties.maxAttempts(), e);
+            }
+        }
+        // If this write also fails the exception escapes: the offset must not move.
+        deadLetterStore.record(batch.stream(), batch.committedOffset(), item, lastError, properties.maxAttempts());
+        deadLetteredCounter.increment();
+        log.error("Dead-lettered item {} (batch offset {}) on stream {}",
+                item.sourceId(), batch.committedOffset(), batch.stream());
+        return false;
+    }
+
+    private void recordLag(List<ProjectionItem> items) {
+        items.stream().map(ProjectionItem::occurredAt).max(Instant::compareTo).ifPresent(lastProjectedAt::set);
     }
 }

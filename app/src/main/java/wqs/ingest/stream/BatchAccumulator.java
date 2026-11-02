@@ -65,6 +65,13 @@ public class BatchAccumulator {
         return Optional.of(batch);
     }
 
+    /** Discards everything and resets all state. Used when the consumer re-reads from the store. */
+    public void clear() {
+        pending.clear();
+        highestOffset = -1;
+        windowStart = null;
+    }
+
     public int pending() {
         return pending.size();
     }
