@@ -351,6 +351,39 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(source.subscribeCount()).as("no recovery re-subscribe").isEqualTo(1);
     }
 
+    /**
+     * F3: a connection failure (a pool timeout, a DB outage) is a NonTransientDataAccessException
+     * in Spring's hierarchy, yet it is infrastructure: no dead letter, no offset advance, and the
+     * message is applied after recovery. Only a data-integrity violation from mapping is poison.
+     */
+    @Test
+    void a_connection_failure_in_the_registry_recovers_instead_of_dead_lettering() {
+        wqs.db.TxTypeRegistry flaky = org.mockito.Mockito.spy(txTypes);
+        org.mockito.Mockito.doThrow(new org.springframework.jdbc.CannotGetJdbcConnectionException("pool timeout"))
+                .doCallRealMethod().when(flaky).idOf("TT_BUY");
+        MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+        StreamProperties properties =
+                new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null);
+        StreamConsumer consumer = new StreamConsumer(
+                source, properties, payloadMapper, flaky, writer, offsetStore, registry, clock, deadLetterStore);
+        consumer.start();
+
+        source.queue(payload("tx-outage"), 5);
+        source.deliverAll();
+
+        assertThat(count("wqDeadLetter")).as("not dead-lettered").isZero();
+        assertThat(offsetStore.read("wallet-transactions")).as("offset not advanced").isEmpty();
+
+        clock.advance(Duration.ofSeconds(6));
+        consumer.poll();
+        source.redeliverFromSubscription();
+        consumer.poll();
+
+        assertThat(count("wqWebItem")).as("applied after recovery").isEqualTo(1);
+        assertThat(offsetStore.read("wallet-transactions")).contains(5L);
+        assertThat(count("wqDeadLetter")).isZero();
+    }
+
     private StreamConsumer consumerWith(Clock clock, int batchSize) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);

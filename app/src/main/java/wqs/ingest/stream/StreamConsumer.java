@@ -209,13 +209,14 @@ public class StreamConsumer {
             ProjectionItem item;
             try {
                 item = payloadMapper.toItem(payload, txTypes);
-            } catch (IllegalArgumentException | org.springframework.dao.NonTransientDataAccessException e) {
-                // Poison: bad input (the mapper and the domain reject it with IAE), or a database
-                // failure that is NOT transient -- e.g. a DataIntegrityViolationException from the
-                // type registry's first-sighting insert -- which would fail identically on every
-                // retry and stall the stream for good. Anything else (TransientDataAccessException,
-                // RecoverableDataAccessException, ...) is infrastructure: it falls to the outer
-                // catch and retries via recovery, never dead-lettering.
+            } catch (IllegalArgumentException | org.springframework.dao.DataIntegrityViolationException e) {
+                // Poison: bad input (the mapper and the domain reject it with IAE), or a
+                // DataIntegrityViolationException from the type registry's first-sighting insert --
+                // the DATA is rejected and would be on every retry, stalling the stream for good.
+                // Deliberately NOT all of NonTransientDataAccessException: that also covers
+                // CannotGetJdbcConnectionException and PermissionDeniedDataAccessException, which
+                // are outages, not bad data. Every other failure is infrastructure: it falls to the
+                // outer catch and retries via recovery, never dead-lettering.
                 deadLetterUnmappable(payload, offset, e);
                 return;
             }
