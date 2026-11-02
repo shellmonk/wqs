@@ -79,33 +79,44 @@ public class JobRegistrar {
                 .build();
 
         TriggerKey triggerKey = TriggerKey.triggerKey(definition.key(), GROUP);
-        Trigger trigger = buildTrigger(triggerKey, jobKey, spec);
+        Trigger desired = buildTrigger(triggerKey, jobKey, spec);
 
         // storeDurably + replace=true keeps params in sync even when the schedule is unchanged.
         scheduler.addJob(detail, true);
 
         if (scheduler.checkExists(triggerKey)) {
-            if (hasChanged(scheduler.getTrigger(triggerKey), spec)) {
-                scheduler.rescheduleJob(triggerKey, trigger);
+            if (hasChanged(scheduler.getTrigger(triggerKey), desired)) {
+                scheduler.rescheduleJob(triggerKey, desired);
                 log.info("Rescheduled job {}", jobKey);
             }
         } else {
-            scheduler.scheduleJob(trigger);
+            scheduler.scheduleJob(desired);
             log.info("Scheduled job {}", jobKey);
         }
     }
 
-    private boolean hasChanged(Trigger existing, JobSpec spec) {
-        if (spec.isCronBased()) {
-            return !(existing instanceof CronTrigger cron)
-                    || !cron.getCronExpression().equals(spec.cron());
+    /**
+     * Compares the stored trigger against the trigger freshly built from current configuration.
+     * Comparing trigger-to-trigger -- rather than re-deriving the comparison from individual
+     * {@code JobSpec} fields -- keeps every property {@link #buildTrigger} consumes
+     * automatically in scope, including the misfire instruction and any field added later, so
+     * this cannot silently drift out of sync with {@link #buildTrigger} the way a field-by-field
+     * comparison already has twice (cron-only, then interval-only).
+     */
+    private boolean hasChanged(Trigger existing, Trigger desired) {
+        if (existing.getMisfireInstruction() != desired.getMisfireInstruction()) {
+            return true;
         }
-        // Interval changes must be detected explicitly: a stored SimpleTrigger with a stale
-        // repeat interval is otherwise indistinguishable from an up-to-date one, since both are
-        // "not a CronTrigger".
-        long desiredIntervalMillis = spec.intervalSeconds() * 1000L;
-        return !(existing instanceof SimpleTrigger simple)
-                || simple.getRepeatInterval() != desiredIntervalMillis;
+        if (desired instanceof CronTrigger desiredCron) {
+            return !(existing instanceof CronTrigger existingCron)
+                    || !existingCron.getCronExpression().equals(desiredCron.getCronExpression());
+        }
+        if (desired instanceof SimpleTrigger desiredSimple) {
+            return !(existing instanceof SimpleTrigger existingSimple)
+                    || existingSimple.getRepeatInterval() != desiredSimple.getRepeatInterval();
+        }
+        // buildTrigger only ever produces a CronTrigger or a SimpleTrigger.
+        return true;
     }
 
     private Trigger buildTrigger(TriggerKey triggerKey, JobKey jobKey, JobSpec spec) {

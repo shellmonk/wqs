@@ -2,6 +2,7 @@ package wqs.jobs;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -81,10 +82,19 @@ class JobRegistrarTest {
     }
 
     @Test
-    void removes_an_orphan_whose_configuration_disappeared() throws Exception {
+    void removes_a_job_whose_definition_bean_is_no_longer_contributed() throws Exception {
         registrar(spec("0 0 3 * * ?", null)).reconcile();
 
-        new JobRegistrar(scheduler, new JobProperties(Map.of()), List.of(DEFINITION)).reconcile();
+        // The definition list -- not the config map -- is what's empty here: this is the
+        // orphan path through removeOrphans(), not the disabled/missing-config path through the
+        // main loop (that path is covered by removes_a_job_that_has_been_disabled()). Config for
+        // "demo" is left in place to prove the definition's absence, not the config, is what
+        // drives removal.
+        new JobRegistrar(
+                        scheduler,
+                        new JobProperties(Map.of("demo", spec("0 0 3 * * ?", null))),
+                        List.of())
+                .reconcile();
 
         assertThat(scheduler.checkExists(JOB_KEY)).isFalse();
     }
@@ -108,6 +118,41 @@ class JobRegistrarTest {
         assertThat(triggers).hasSize(1);
         SimpleTrigger trigger = (SimpleTrigger) triggers.get(0);
         assertThat(trigger.getRepeatInterval()).isEqualTo(10_000L);
+    }
+
+    @Test
+    void reschedules_rather_than_duplicating_when_the_misfire_policy_changes() throws Exception {
+        JobSpec doNothing = new JobSpec(true, "0 0 3 * * ?", null, MisfirePolicy.DO_NOTHING, Map.of());
+        JobSpec fireAndProceed =
+                new JobSpec(true, "0 0 3 * * ?", null, MisfirePolicy.FIRE_AND_PROCEED, Map.of());
+
+        new JobRegistrar(scheduler, new JobProperties(Map.of("demo", doNothing)), List.of(DEFINITION))
+                .reconcile();
+        new JobRegistrar(
+                        scheduler, new JobProperties(Map.of("demo", fireAndProceed)), List.of(DEFINITION))
+                .reconcile();
+
+        List<? extends Trigger> triggers = scheduler.getTriggersOfJob(JOB_KEY);
+        assertThat(triggers).hasSize(1);
+        assertThat(triggers.get(0).getMisfireInstruction())
+                .isEqualTo(CronTrigger.MISFIRE_INSTRUCTION_FIRE_ONCE_NOW);
+    }
+
+    @Test
+    void reconcile_does_not_reschedule_an_unchanged_trigger() throws Exception {
+        JobRegistrar registrar = registrar(spec("0 0 3 * * ?", null));
+
+        registrar.reconcile();
+        Date firstStartTime = scheduler.getTrigger(TRIGGER_KEY).getStartTime();
+
+        // buildTrigger() stamps a fresh start time of "now" on every call; a wrongly repeated
+        // rescheduleJob would overwrite the stored trigger's start time with a later one, so an
+        // unchanged start time after a second reconcile() is evidence no reschedule happened.
+        Thread.sleep(5);
+        registrar.reconcile();
+        Date secondStartTime = scheduler.getTrigger(TRIGGER_KEY).getStartTime();
+
+        assertThat(secondStartTime).isEqualTo(firstStartTime);
     }
 
     @Test
