@@ -10,11 +10,21 @@ dependencyManagement {
 val generatedSrc = layout.buildDirectory.dir("generated-src/jooq")
 
 sourceSets {
-    // The generated-sources directory is added to `main` in Task 4, once
-    // CodegenRunner can actually populate it. See the note above `generateJooq`.
+    main {
+        // Populated by `generateJooq`, which compileJava depends on below.
+        java.srcDir(generatedSrc)
+    }
     create("codegen") {
         java.srcDir("src/codegen/java")
         compileClasspath += configurations.runtimeClasspath.get()
+        // CodegenRunner points Flyway at "classpath:db/migration", which lives in main's
+        // resources. configurations.runtimeClasspath (added to compileClasspath above) is
+        // dependency jars only, not main's own output, so it must be added separately here
+        // for the migrations to actually be found at generateJooq runtime. Using the raw
+        // source directory (rather than sourceSets.main.output) avoids a task dependency on
+        // :db:compileJava, which would otherwise cycle back through generateJooq -> classes
+        // -> compileJava -> generateJooq.
+        runtimeClasspath += files("src/main/resources")
     }
 }
 
@@ -34,23 +44,34 @@ dependencies {
  * Postgres container. Docker is therefore a BUILD dependency, not only a test
  * dependency (spec section 8.3).
  *
- * NOT WIRED INTO compileJava YET: `wqs.codegen.CodegenRunner` does not exist
- * until Task 4, which also adds `generatedSrc` to the `main` source set and
- * `compileJava`'s dependency on this task. Until then this task exists but is
- * not part of the build graph — running it directly will fail, by design.
+ * Wired into compileJava below: `generatedSrc` is part of the `main` source set, and
+ * compileJava depends on this task. The declared inputs/outputs make it UP-TO-DATE
+ * (and therefore skip starting a container) whenever the migrations and the strategy
+ * haven't changed.
  */
 val generateJooq by tasks.registering(JavaExec::class) {
     group = "build"
     description = "Generate jOOQ classes from Flyway migrations via Testcontainers"
 
+    val outputDir = generatedSrc.get().asFile
+
     classpath = sourceSets["codegen"].runtimeClasspath
     mainClass.set("wqs.codegen.CodegenRunner")
-    args(generatedSrc.get().asFile.absolutePath)
+    args(outputDir.absolutePath)
+
+    // Always generate into an empty directory. jOOQ sweeps stale files from its own output,
+    // but on a case-insensitive filesystem a class rename that differs only in case
+    // (Wqwebitem.java -> WqWebItem.java) overwrites the existing file while the directory
+    // entry keeps the OLD spelling, so the sweep then deletes it as an orphan. Measured
+    // once: a run that reported success and emitted no table classes at all.
+    doFirst { outputDir.deleteRecursively() }
 
     inputs.dir("src/main/resources/db/migration")
     inputs.dir("src/codegen/java")
     outputs.dir(generatedSrc)
 }
+
+tasks.named<JavaCompile>("compileJava") { dependsOn(generateJooq) }
 
 val checkMigrationQuoting by tasks.registering(MigrationQuotingCheck::class) {
     group = "verification"
