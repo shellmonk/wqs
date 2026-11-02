@@ -184,4 +184,21 @@ class StreamPayloadJsonTest {
                     .hasMessageContaining("amount");
         }
     }
+
+    @Test
+    void text_fields_must_be_json_strings() {
+        for (String bad : new String[] {"{}", "true", "5", "[]"}) {
+            assertThatThrownBy(() -> parse(with("currency", bad)))
+                    .as("currency=" + bad)
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("currency");
+            assertThatThrownBy(() -> parse(with("transactionId", bad)))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("transactionId");
+        }
+        assertThatThrownBy(() -> parse(with("batchId", "5")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("batchId");
+        assertThatThrownBy(() -> parse(with("subBatchId", "{}")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("subBatchId");
+        assertThatThrownBy(() -> parse(with("cancelsTransactionId", "true")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("cancelsTransactionId");
+    }
 }

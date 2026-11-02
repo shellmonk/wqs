@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import com.rabbitmq.stream.Environment;
+import com.rabbitmq.stream.Message;
+import java.nio.charset.StandardCharsets;
 import com.rabbitmq.stream.OffsetSpecification;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -46,26 +48,43 @@ public class RabbitStreamSource implements StreamSource {
 
     @Override
     public void subscribe(long fromOffset, StreamHandler handler) {
-        // Never leave a previous consumer alive beside the new one.
+        // Never leave a previous consumer alive beside the new one. StreamConsumer has already
+        // closed this source outside its monitor, so this close() is a no-op by construction.
         close();
         consumer = environment.consumerBuilder()
                 .stream(properties.name())
                 .offset(OffsetSpecification.offset(fromOffset))
-                .messageHandler((context, message) -> {
-                    byte[] body = message.getBodyAsBinary();
-                    long offset = context.offset();
-                    StreamPayload payload;
-                    try {
-                        payload = parse(objectMapper, body);
-                    } catch (Exception e) {
-                        // Throwing here would make the client skip the message: silent loss.
-                        // Only parse failures are poison; handler failures must not be caught here.
-                        handler.onUndeserializable(body, offset, e);
-                        return;
-                    }
-                    handler.onMessage(payload, offset);
-                })
+                .messageHandler((context, message) ->
+                        handleMessage(objectMapper, message, context.offset(), handler))
                 .build();
+    }
+
+    /**
+     * Body extraction is inside the try on purpose: for AmqpValue/AmqpSequence bodies (AMQP 1.0,
+     * .NET, Go producers) the client's getBodyAsBinary() throws ClassCastException, and an
+     * exception on the client thread skips the message silently. Only extraction/parse failures
+     * are poison; handler failures must not be caught here.
+     */
+    static void handleMessage(ObjectMapper objectMapper, Message message, long offset, StreamHandler handler) {
+        byte[] body = null;
+        StreamPayload payload;
+        try {
+            body = message.getBodyAsBinary();
+            payload = parse(objectMapper, body);
+        } catch (Exception e) {
+            handler.onUndeserializable(body != null ? body : bestEffortBody(message), offset, e);
+            return;
+        }
+        handler.onMessage(payload, offset);
+    }
+
+    private static byte[] bestEffortBody(Message message) {
+        try {
+            Object raw = message.getBody();
+            return raw == null ? new byte[0] : String.valueOf(raw).getBytes(StandardCharsets.UTF_8);
+        } catch (Exception | LinkageError e) {
+            return new byte[0];
+        }
     }
 
     @Override
@@ -106,7 +125,7 @@ public class RabbitStreamSource implements StreamSource {
         });
 
         return new StreamPayload(
-                required(root, "transactionId").asText(),
+                textual(required(root, "transactionId"), "transactionId"),
                 (long) integral(required(root, "userId"), "userId", Long.MIN_VALUE, Long.MAX_VALUE),
                 instant(required(root, "occurredAt")),
                 optional(root, "productId") == null ? null
@@ -115,7 +134,7 @@ public class RabbitStreamSource implements StreamSource {
                 text(root, "subBatchId"),
                 (short) integral(required(root, "type"), "type", Short.MIN_VALUE, Short.MAX_VALUE),
                 money(required(root, "amount"), "amount"),
-                required(root, "currency").asText(),
+                textual(required(root, "currency"), "currency"),
                 optional(root, "balanceAfter") == null ? null : money(root.get("balanceAfter"), "balanceAfter"),
                 text(root, "cancelsTransactionId"),
                 extra);
@@ -136,7 +155,15 @@ public class RabbitStreamSource implements StreamSource {
 
     private static String text(JsonNode root, String field) {
         JsonNode node = optional(root, field);
-        return node == null ? null : node.asText();
+        return node == null ? null : textual(node, field);
+    }
+
+    /** Text fields must be JSON strings: asText() would silently turn true/numbers/objects into text. */
+    private static String textual(JsonNode node, String field) {
+        if (!node.isTextual()) {
+            throw new IllegalArgumentException(field + " must be a string");
+        }
+        return node.asText();
     }
 
     private static Instant instant(JsonNode node) {

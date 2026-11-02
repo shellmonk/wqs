@@ -101,6 +101,10 @@ public class StreamConsumer {
      * Every {@code source.close()} in this class runs OUTSIDE the monitor: a client close may wait
      * for an in-flight handler that is itself blocked on the monitor. The generation bump (done
      * under the lock, before the close) keeps any late delivery from the closing subscription inert.
+     *
+     * <p>Must not run concurrently with {@link #poll()}: poll's unlocked close could close the new
+     * subscription. {@code StreamLifecycle} guarantees this by calling start() before the poll
+     * scheduler exists.
      */
     public void start() {
         synchronized (this) {
