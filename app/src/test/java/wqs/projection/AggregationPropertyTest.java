@@ -7,6 +7,7 @@ import net.jqwik.api.Arbitrary;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
+import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.ProjectionItem;
@@ -17,6 +18,7 @@ import wqs.gen.EventGenerators;
  * money and their ExclCancelled forms, bounds, product, currency; net = wins - plays), and the
  * group locator points at each row.
  */
+@Tag("property")
 @JqwikSpringSupport
 @SpringBootTest
 class AggregationPropertyTest extends ProjectionPropertyBase {

@@ -10,6 +10,7 @@ import net.jqwik.api.Combinators;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
+import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.ProjectionItem;
@@ -20,6 +21,7 @@ import wqs.gen.ReadGenerators.ReadQuery;
  * Property P-3 (spec 7.1, 8.1): pages 1..totalPages concatenate to the full ordered result --
  * no gap, no duplicate, same order -- and the page after the last is empty with the same totals.
  */
+@Tag("property")
 @JqwikSpringSupport
 @SpringBootTest
 class PaginationPropertyTest extends ReadPropertyBase {

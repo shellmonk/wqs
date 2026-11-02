@@ -12,9 +12,11 @@ import net.jqwik.api.Arbitrary;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
+import net.jqwik.api.Tag;
 import org.junit.jupiter.api.Test;
 import wqs.read.Segment.Tier;
 
+@Tag("property")
 class RangeDecompositionTest {
 
     private static Instant t(String s) {

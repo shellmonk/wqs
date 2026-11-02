@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Random;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
+import net.jqwik.api.Tag;
 import net.jqwik.api.lifecycle.BeforeTry;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -25,6 +26,7 @@ import wqs.gen.EventGenerators;
  * side of their originals, so parking, draining across batches, hiding and revival must converge
  * too (spec 8.1 names pending-cancel parking under P-1).
  */
+@Tag("property")
 @JqwikSpringSupport
 @SpringBootTest
 class IdempotencyPropertyTest extends ProjectionPropertyBase {

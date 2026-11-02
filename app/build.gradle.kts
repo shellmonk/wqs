@@ -46,9 +46,21 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-tasks.withType<Test>().configureEach {
-    // Global FULL jqwik shrinking has no time bound of its own; a runaway shrink fails the build
-    // instead of hanging it. Generous: the whole suite takes a few minutes.
+// jqwik property tests (classes tagged net.jqwik.api.Tag("property")) are opt-in: the default
+// `test` task -- and so `./gradlew build` -- never runs them; `./gradlew propertyTest` does.
+// Both tasks also take the root's -PexcludeTags (e.g. broker).
+tasks.named<Test>("test") {
+    useJUnitPlatform { excludeTags("property") }
+}
+
+val propertyTest by tasks.registering(Test::class) {
+    description = "Runs the jqwik property tests (tag 'property')."
+    group = "verification"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    useJUnitPlatform { includeTags("property") }
+    // Global FULL jqwik shrinking has no time bound of its own; a runaway shrink fails the run
+    // instead of hanging it.
     timeout.set(Duration.ofMinutes(60))
 }
 

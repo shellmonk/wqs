@@ -11,6 +11,7 @@ import net.jqwik.api.Example;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
+import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.jooq.impl.DSL;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -26,6 +27,7 @@ import wqs.read.Segment.Tier;
  * Property P-5 (spec 7.5, 8.1): the total assembled from monthly counters, daily counters and
  * live counts of the sub-day remainders equals a live COUNT over the item table, for any range.
  */
+@Tag("property")
 @JqwikSpringSupport
 @SpringBootTest
 class TotalsPropertyTest extends ReadPropertyBase {

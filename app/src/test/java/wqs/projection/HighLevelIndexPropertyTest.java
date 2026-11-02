@@ -7,6 +7,7 @@ import net.jqwik.api.Arbitrary;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
+import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.ProjectionItem;
@@ -20,6 +21,7 @@ import wqs.gen.EventGenerators;
  * This property exists because the index is a MATERIALISED merge. A read-time union could never
  * disagree with its sources; a materialised one can.
  */
+@Tag("property")
 @JqwikSpringSupport
 @SpringBootTest
 class HighLevelIndexPropertyTest extends ProjectionPropertyBase {

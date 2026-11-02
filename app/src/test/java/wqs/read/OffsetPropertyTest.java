@@ -9,6 +9,7 @@ import net.jqwik.api.Combinators;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
+import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.ProjectionItem;
@@ -19,6 +20,7 @@ import wqs.gen.ReadGenerators.ReadQuery;
  * Property P-6 (spec 7.6, 8.1): the counter-assisted offset page -- segment walk, residual, one
  * ordered key query from the target segment's end -- equals the naive OFFSET/LIMIT page.
  */
+@Tag("property")
 @JqwikSpringSupport
 @SpringBootTest
 class OffsetPropertyTest extends ReadPropertyBase {
