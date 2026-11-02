@@ -11,6 +11,7 @@ import com.github.dockerjava.api.model.PortBinding;
 import com.github.dockerjava.api.model.Ports;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.Producer;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;
@@ -104,6 +105,7 @@ class StreamEndToEndTest extends PostgresTestBase {
 
     @Autowired private StreamLifecycle lifecycle;
     @Autowired private MockMvc mvc;
+    @Autowired private MeterRegistry registry;
 
     private static void publish(String body) throws InterruptedException {
         CountDownLatch confirmed = new CountDownLatch(1);
@@ -153,6 +155,7 @@ class StreamEndToEndTest extends PostgresTestBase {
     @Test
     @Order(2)
     void restart_resumes_after_the_stored_offset() throws Exception {
+        double duplicatesBefore = duplicates();
         lifecycle.stop();
         publish(event("e2e-4", "2033-09-04T10:00:00Z", 1, "1.0000", null));
         lifecycle.start();
@@ -164,5 +167,16 @@ class StreamEndToEndTest extends PostgresTestBase {
         assertThat(count("select count(distinct \"sourceId\") from \"wqWebItem\" where \"userId\" = "
                 + USER)).isEqualTo(4);
         assertThat(count("select count(*) from \"wqDeadLetter\"")).isEqualTo(1);
+        // The 5th message is offset 4. Resuming AT the stored offset (3) instead of after it would
+        // replay offset 3 as an idempotent duplicate: rows and offset alone cannot see that.
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                assertThat(count("select \"offsetVal\" from \"wqStreamOffset\" where \"stream\" = '"
+                        + STREAM + "'")).isEqualTo(4));
+        assertThat(duplicates()).as("replayed duplicates across the restart").isEqualTo(duplicatesBefore);
+    }
+
+    private double duplicates() {
+        return registry.get("wqs.ingest.events").tag("source", "stream").tag("outcome", "duplicate")
+                .counter().count();
     }
 }
