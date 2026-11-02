@@ -28,8 +28,12 @@ class PartitionProvisionerTest extends PostgresTestBase {
     };
 
     private PartitionProvisioner provisioner(int maxMonthsAhead) {
+        return provisioner(maxMonthsAhead, "2010-01");
+    }
+
+    private PartitionProvisioner provisioner(int maxMonthsAhead, String floor) {
         return new PartitionProvisioner(
-                counting, new DataSourceTransactionManager(dataSource()), NOV_2026, maxMonthsAhead);
+                counting, new DataSourceTransactionManager(dataSource()), NOV_2026, maxMonthsAhead, floor);
     }
 
     @Test
@@ -65,5 +69,31 @@ class PartitionProvisionerTest extends PostgresTestBase {
                 .hasMessageContaining("2027-12");
 
         assertThat(calls).containsExactly(YearMonth.of(2027, 11));
+    }
+
+    /** R103: the past floor is configurable and checked before any DDL. */
+    @Test
+    void a_month_before_the_configured_floor_is_rejected_as_poison_without_any_ddl() {
+        PartitionProvisioner provisioner = provisioner(12, "2019-01");
+
+        provisioner.ensureMonths(Set.of(YearMonth.of(2019, 1))); // the floor itself: allowed
+        assertThatThrownBy(() -> provisioner.ensureMonths(Set.of(YearMonth.of(2019, 2), YearMonth.of(2018, 12))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("2018-12")
+                .hasMessageContaining("floor");
+
+        assertThat(calls).containsExactly(YearMonth.of(2019, 1));
+    }
+
+    @Test
+    void partition_names_use_the_proleptic_year() {
+        // uuuu and yyyy agree for every positive year, so no existing partition is renamed.
+        java.time.format.DateTimeFormatter uuuu = java.time.format.DateTimeFormatter.ofPattern("uuuu_MM");
+        java.time.format.DateTimeFormatter yyyy = java.time.format.DateTimeFormatter.ofPattern("yyyy_MM");
+        for (YearMonth m : List.of(YearMonth.of(1, 1), YearMonth.of(2010, 1), YearMonth.of(2099, 12))) {
+            assertThat(m.format(uuuu)).isEqualTo(m.format(yyyy));
+        }
+        assertThat(YearMonth.of(0, 6).format(uuuu)).isEqualTo("0000_06");
+        assertThat(YearMonth.of(0, 6).format(yyyy)).isEqualTo("0001_06"); // year-of-era: ambiguous
     }
 }

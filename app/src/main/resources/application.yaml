@@ -32,6 +32,14 @@ wqs:
     enabled: false
     name: wallet-transactions
     uri: rabbitmq-stream://localhost:5552
+  partition:
+    # On-demand partition provisioning (spec 5.8). An event whose month is after now +
+    # max-months-ahead, or before provision-floor, is a garbage timestamp: it is dead-lettered and
+    # no partition is created. The floor bounds how many partitions a stream of garbage timestamps
+    # can create to (now + max-months-ahead - floor) months x tables; set it to the earliest month
+    # of real history (deep replays from offset 0 provision everything after it).
+    max-months-ahead: 12
+    provision-floor: 2010-01
   jobs:
     partition-rollover:
       enabled: true

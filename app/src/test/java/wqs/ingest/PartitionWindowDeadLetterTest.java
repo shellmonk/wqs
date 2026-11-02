@@ -25,8 +25,12 @@ import wqs.ingest.stream.StreamProperties;
 import wqs.projection.ProjectionWriter;
 import wqs.projection.StreamPayloadMapper;
 
-/** I1 / R100 with the production sanity window: an event 13+ months ahead is poison. */
-@SpringBootTest(properties = "wqs.partitions.max-months-ahead=12")
+/**
+ * I1 / R100 / R103 with the production sanity window: an event 13+ months ahead, or before the
+ * (here configured) provisioning floor, is poison -- dead-lettered, with no partition created.
+ */
+@SpringBootTest(properties = {
+        "wqs.partition.max-months-ahead=12", "wqs.partition.provision-floor=2015-06"})
 class PartitionWindowDeadLetterTest extends PostgresTestBase {
 
     private static final String STREAM = "wallet-transactions";
@@ -71,5 +75,31 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
                 .hasEntrySatisfying("error", e -> assertThat((String) e).contains("months ahead"));
         assertThat(offsetStore.read(STREAM)).contains(4L);
         assertThat(source.subscribeCount()).isEqualTo(1);
+    }
+
+    @Test
+    void an_event_before_the_floor_is_dead_lettered_without_creating_any_partition() {
+        FakeStreamSource source = new FakeStreamSource();
+        StreamConsumer consumer = new StreamConsumer(
+                source,
+                new StreamProperties(true, STREAM, 1, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
+                payloadMapper, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
+                deadLetterStore);
+        consumer.start();
+        int partitionsBefore = partitionCount();
+
+        source.queue(new StreamPayload("tx-before-floor", 7L, Instant.parse("2015-05-20T00:00:00Z"), 11,
+                null, null, (short) 1, new BigDecimal("1.0000"), "EUR", null, null, Map.of()), 9);
+        source.deliverAll();
+
+        assertThat(dsl().fetchOne("select \"sourceId\", \"error\" from \"wqDeadLetter\"").intoMap())
+                .containsEntry("sourceId", "tx-before-floor")
+                .hasEntrySatisfying("error", e -> assertThat((String) e).contains("2015-05").contains("floor"));
+        assertThat(partitionCount()).isEqualTo(partitionsBefore);
+        assertThat(offsetStore.read(STREAM)).contains(9L);
+    }
+
+    private static int partitionCount() {
+        return dsl().fetchOne("select count(*)::int from pg_inherits").get(0, Integer.class);
     }
 }

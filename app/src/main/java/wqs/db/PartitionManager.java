@@ -26,7 +26,9 @@ import org.springframework.stereotype.Component;
 @Component
 public class PartitionManager {
 
-    private static final DateTimeFormatter MONTH_SUFFIX = DateTimeFormatter.ofPattern("yyyy_MM");
+    // uuuu (proleptic year), not yyyy (year-of-era): year-of-era is ambiguous for years <= 0.
+    // Identical output for every positive year, so existing partition names are unchanged.
+    private static final DateTimeFormatter MONTH_SUFFIX = DateTimeFormatter.ofPattern("uuuu_MM");
 
     // Defensive ceiling on runwayMonths' DB-round-trip loop. 5 years of consecutive monthly
     // partitions is far beyond any real operating runway; if state ever makes the loop run

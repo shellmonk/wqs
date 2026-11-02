@@ -16,7 +16,7 @@ class PartitionRolloverServiceTest extends PostgresTestBase {
 
     private static final Clock FIXED =
             Clock.fixed(Instant.parse("2032-06-10T12:00:00Z"), ZoneOffset.UTC);
-    private static final DateTimeFormatter MONTH_SUFFIX = DateTimeFormatter.ofPattern("yyyy_MM");
+    private static final DateTimeFormatter MONTH_SUFFIX = DateTimeFormatter.ofPattern("uuuu_MM");
 
     // Both tests below exercise the same fixed month (2032-06) against the shared container
     // PostgresTestBase starts once per JVM, so without a reset they are order-dependent: whichever

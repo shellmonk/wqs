@@ -46,7 +46,7 @@ import wqs.db.PostgresTestBase;
 @DirtiesContext
 class PartitionRolloverJobBootTest extends PostgresTestBase {
 
-    private static final DateTimeFormatter MONTH_SUFFIX = DateTimeFormatter.ofPattern("yyyy_MM");
+    private static final DateTimeFormatter MONTH_SUFFIX = DateTimeFormatter.ofPattern("uuuu_MM");
 
     @DynamicPropertySource
     static void datasourceProperties(DynamicPropertyRegistry registry) {

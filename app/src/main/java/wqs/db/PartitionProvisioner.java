@@ -30,9 +30,12 @@ import org.springframework.transaction.support.TransactionTemplate;
  * check remains the truth, and joins the cache only after that transaction commits. If partitions
  * are ever dropped (retention, a test), call {@link #forgetKnownMonths()}.
  *
- * <p><b>Sanity window.</b> A month after now + {@code maxMonthsAhead} (12 by default) is a garbage
- * timestamp, not a partition to create: {@link IllegalArgumentException}, so the item takes the
- * normal retry / per-item / dead-letter path. There is no past floor.
+ * <p><b>Sanity window.</b> A month after now + {@code maxMonthsAhead} (12 by default) or before the
+ * provisioning floor ({@code wqs.partition.provision-floor}, 2010-01 by default) is a garbage
+ * timestamp, not a partition to create: {@link IllegalArgumentException} BEFORE any DDL, so the
+ * item takes the normal retry / per-item / dead-letter path. The floor bounds what a stream of
+ * garbage timestamps can create to (now + 12 - floor) months x tables (ruling R103). There is
+ * deliberately no per-batch cap: it would dead-letter legitimate deep-replay data.
  */
 @Component
 public class PartitionProvisioner {
@@ -41,18 +44,21 @@ public class PartitionProvisioner {
     private final TransactionTemplate requiresNew;
     private final Clock clock;
     private final int maxMonthsAhead;
+    private final YearMonth floor;
     private final Set<YearMonth> known = ConcurrentHashMap.newKeySet();
 
     public PartitionProvisioner(
             PartitionManager partitionManager,
             PlatformTransactionManager transactionManager,
             Clock clock,
-            @Value("${wqs.partitions.max-months-ahead:12}") int maxMonthsAhead) {
+            @Value("${wqs.partition.max-months-ahead:12}") int maxMonthsAhead,
+            @Value("${wqs.partition.provision-floor:2010-01}") String provisionFloor) {
         this.partitionManager = partitionManager;
         this.requiresNew = new TransactionTemplate(transactionManager);
         this.requiresNew.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.clock = clock;
         this.maxMonthsAhead = maxMonthsAhead;
+        this.floor = YearMonth.parse(provisionFloor);
     }
 
     /**
@@ -66,6 +72,10 @@ public class PartitionProvisioner {
             if (month.isAfter(limit)) {
                 throw new IllegalArgumentException("month " + month + " is more than " + maxMonthsAhead
                         + " months ahead (limit " + limit + "): treated as a garbage timestamp");
+            }
+            if (month.isBefore(floor)) {
+                throw new IllegalArgumentException("month " + month + " is before the provisioning floor "
+                        + floor + ": treated as a garbage timestamp");
             }
         }
         List<YearMonth> missing = months.stream().filter(m -> !known.contains(m)).sorted().toList();

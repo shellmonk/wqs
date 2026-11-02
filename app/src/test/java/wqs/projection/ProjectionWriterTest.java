@@ -122,7 +122,7 @@ class ProjectionWriterTest extends PostgresTestBase {
     private void dropPartitions(YearMonth month) {
         for (PartitionedTable table : PartitionedTable.values()) {
             dsl().execute("drop table if exists \"" + table.tableName() + "_"
-                    + month.format(DateTimeFormatter.ofPattern("yyyy_MM")) + "\"");
+                    + month.format(DateTimeFormatter.ofPattern("uuuu_MM")) + "\"");
         }
         provisioner.forgetKnownMonths();
     }

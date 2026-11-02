@@ -1,7 +1,7 @@
 # Test-only overrides, layered over the main application.yaml (Spring Boot reads
 # classpath:/config/application.yaml after, and on top of, classpath:/application.yaml).
 wqs:
-  partitions:
+  partition:
     # Test data is deliberately dated 2031-2035 so it never collides with the live months the
     # rollover service provisions. Production keeps the default sanity window of 12 months; the
     # window itself is tested with explicit values (PartitionProvisionerTest, ProjectionWriterTest).

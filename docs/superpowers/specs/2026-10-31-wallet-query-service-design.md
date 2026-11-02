@@ -455,10 +455,17 @@ periods). The DDL runs in its **own** transaction, never inside the projection t
 `CREATE TABLE … PARTITION OF` takes an ACCESS EXCLUSIVE lock on the parent. Months known to exist
 are cached per process; the `pg_inherits` check remains the source of truth.
 
-**Sanity window.** A month after now + 12 months is a garbage timestamp, not a partition to create:
-the item is poison and takes the normal retry / per-item / dead-letter path (§6.4). There is **no
-past floor** — a deep replay may create many small historical partitions, which is acceptable at
-monthly granularity.
+**Sanity window.** A month after now + 12 months (`wqs.partition.max-months-ahead`), or before the
+**provisioning floor** (`wqs.partition.provision-floor`, default 2010-01), is a garbage timestamp,
+not a partition to create: the item is poison and takes the normal retry / per-item / dead-letter
+path (§6.4), and the check runs before any DDL. The floor bounds the partitions a stream of garbage
+timestamps can create to (now + 12 − floor) months × tables; it is set to the earliest month of
+real history. There is deliberately **no per-batch cap** — it would dead-letter legitimate
+deep-replay data. Above the floor a deep replay may create many small historical partitions, which
+is acceptable at monthly granularity.
+
+Partition names are `<table>_<uuuu>_<MM>` — the proleptic year, not year-of-era, which is ambiguous
+for years ≤ 0; the two agree for every positive year, so no existing name changes.
 
 Partition management is designed so detach-and-archive can be added later without schema change
 (open question O-3).
