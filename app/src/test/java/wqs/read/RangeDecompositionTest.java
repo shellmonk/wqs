@@ -25,6 +25,15 @@ class RangeDecompositionTest {
         return new Segment(t(from), t(to), tier);
     }
 
+    /** C1 ruling: the full clamped domain [1970, 2200) decomposes into at most 2,760 months. */
+    @Test
+    void full_clamped_domain_is_at_most_2760_months() {
+        List<Segment> segments = RangeDecomposition.newestFirst(
+                wqs.api.ProjectionParams.DOMAIN_START, wqs.api.ProjectionParams.DOMAIN_END);
+        assertThat(segments).allMatch(s -> s.tier() == Tier.MONTH);
+        assertThat(segments).hasSizeLessThanOrEqualTo(2_760);
+    }
+
     @Test
     void same_day_is_one_live_segment() {
         assertThat(RangeDecomposition.newestFirst(t("2034-03-05T10:00:00Z"), t("2034-03-05T18:00:00Z")))

@@ -116,6 +116,88 @@ class ProjectionApiTest extends ApiTestBase {
                 .andExpect(jsonPath("$.totalPages").value(0));
     }
 
+    /**
+     * C1 ruling: bounds are clamped into the data domain [1970, 2200) before any read, so an
+     * expanded-year bound neither decomposes into millions of months nor reaches Postgres.
+     */
+    @Test
+    void far_future_to_is_clamped_to_the_domain_end() throws Exception {
+        for (boolean isWeb : new boolean[] {false, true}) {
+            String clamped = mvc.perform(either(isWeb, "to", "2200-01-01T00:00:00Z"))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            mvc.perform(either(isWeb, "to", "+1000000-01-01T00:00:00Z"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.totalItems").value(isWeb ? 1 : 3))
+                    .andExpect(content().json(clamped, true));
+        }
+    }
+
+    @Test
+    void far_past_from_is_clamped_to_the_domain_start() throws Exception {
+        for (boolean isWeb : new boolean[] {false, true}) {
+            for (String from : new String[] {"-0001-01-01T00:00:00Z", "0001-01-01T00:00:00Z"}) {
+                mvc.perform(either(isWeb, "from", from))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.totalItems").value(isWeb ? 1 : 3))
+                        .andExpect(jsonPath("$.items.length()").value(isWeb ? 1 : 2));
+            }
+        }
+    }
+
+    /** Both bounds beyond the same domain edge clamp to [edge, edge): empty, not an error. */
+    @Test
+    void both_bounds_beyond_the_domain_are_empty_200() throws Exception {
+        String[][] ranges = {
+            {"+300000-01-01T00:00:00Z", "+1000000-01-01T00:00:00Z"},
+            {"-5000-01-01T00:00:00Z", "0001-01-01T00:00:00Z"},
+        };
+        for (boolean isWeb : new boolean[] {false, true}) {
+            for (String[] r : ranges) {
+                mvc.perform(either(isWeb, "from", r[0], "to", r[1]))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.items.length()").value(0))
+                        .andExpect(jsonPath("$.totalItems").value(0))
+                        .andExpect(jsonPath("$.totalPages").value(0));
+            }
+        }
+    }
+
+    /** D6 is judged on the original bounds: inverted bounds beyond the domain are still 400. */
+    @Test
+    void inverted_bounds_beyond_the_domain_are_400() throws Exception {
+        expectProblem(cc("from", "+1000000-01-01T00:00:00Z", "to", "+300000-01-01T00:00:00Z"), 400);
+        expectProblem(web("from", "+1000000-01-01T00:00:00Z", "to", "+300000-01-01T00:00:00Z"), 400);
+    }
+
+    /**
+     * M3: bounds are truncated to microseconds (Postgres' precision) before the read, so a
+     * sub-microsecond bound answers exactly like its truncation, never like a DB-rounded value.
+     * /cc sees all three fixtures; the l1 item sits exactly on the truncated instant.
+     */
+    @Test
+    void sub_microsecond_bounds_are_truncated() throws Exception {
+        String truncated = mvc.perform(cc("to", "2034-02-12T10:00:00Z", "pageSize", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalItems").value(2))
+                .andReturn().getResponse().getContentAsString();
+        mvc.perform(cc("to", "2034-02-12T10:00:00.000000600Z", "pageSize", "10"))
+                .andExpect(status().isOk())
+                .andExpect(content().json(truncated, true));
+        mvc.perform(cc("from", "2034-02-12T10:00:00.000000600Z", "pageSize", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalItems").value(1))
+                .andExpect(jsonPath("$.items[0].sourceId").value("l1"));
+        // /web shares ProjectionParams; its one fixture (t1, 02-10T10:00) sits on a truncated `from`.
+        mvc.perform(web("from", "2034-02-10T10:00:00.000000600Z", "pageSize", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalItems").value(1))
+                .andExpect(jsonPath("$.items[0].sourceId").value("t1"));
+    }
+
+    private static MockHttpServletRequestBuilder either(boolean isWeb, String... overrides) {
+        return isWeb ? web(overrides) : cc(overrides);
+    }
+
     @Test
     void page_0_is_400() throws Exception {
         expectProblem(cc("page", "0"), 400).andExpect(jsonPath("$.detail", containsString("page")));
