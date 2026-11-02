@@ -436,8 +436,10 @@ Consequences, all of them simplifications:
   tables and counted at the `ITEM` page unit like any row, but it never rolls up, never gets a
   page-index row and never counts at `HIGH_LEVEL`.
 
-Covering index: `("userId", "occurredAt" desc) include ("kind", "refId", "productId",
-"visibleExclCancelled")`.
+Covering index: `("userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productId",
+"visibleExclCancelled")`. `"kind"` and `"refId"` are key columns so the page index has a total
+order for level 1/2 paging — rows sharing an `"occurredAt"` need a tie-break, exactly as items
+need `"itemId"`.
 
 ### 5.7 Counters
 
@@ -951,7 +953,8 @@ served by **different structures** is what lets each stay simple.
 **As created (phase 4, V9).** Item tables:
 `("userId", "occurredAt" desc, "itemId" desc) include ("cancelled", "productId")` — only the
 columns level 0 filters by; the `"itemId"` key column makes the tie-break index-ordered. The
-high-level tables follow §5.6. A test asserts the level-0 key query is an index-only scan on it.
+high-level tables follow §5.6: `("userId", "occurredAt" desc, "kind" desc, "refId" desc) include
+("productId", "visibleExclCancelled")`, the key columns again giving a total order. A test asserts the level-0 key query is an index-only scan on it.
 
 Additional indexes are added only when the benchmark harness (§8) shows a measured need.
 

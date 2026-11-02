@@ -45,6 +45,21 @@ class CoveringIndexTest extends PostgresTestBase {
         }
     }
 
+    /**
+     * Spec 5.6 / 7.7: key columns give each page index a total order (the tie-break on equal
+     * "occurredAt"); INCLUDE carries only what filtering reads.
+     */
+    @Test
+    void cover_index_key_and_include_columns() {
+        String items = "(userId, occurredAt DESC, itemId DESC) INCLUDE (cancelled, productId)";
+        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productId, visibleExclCancelled)";
+        for (String parent : PARENTS) {
+            String def = dsl().fetchOne("select pg_get_indexdef(to_regclass(?)::oid)",
+                    "\"" + parent + "_cover\"").get(0, String.class).replace("\"", "");
+            assertThat(def).as(parent).endsWith(parent.endsWith("Item") ? items : highLevel);
+        }
+    }
+
     @Test
     void level0_key_query_is_an_index_only_scan() throws Exception {
         List<String> plan = new ArrayList<>();
