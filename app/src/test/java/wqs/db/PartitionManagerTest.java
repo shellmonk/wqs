@@ -3,6 +3,7 @@ package wqs.db;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.YearMonth;
+import java.util.Arrays;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,7 +24,7 @@ class PartitionManagerTest extends PostgresTestBase {
 
         // 3 months (Jan, Feb, Mar) x 2 partitioned tables
         assertThat(created).isEqualTo(6);
-        assertThat(existingPartitionNames())
+        assertThat(testPartitionNames())
                 .contains("wqWebItem_2031_01", "wqWebItem_2031_02", "wqWebItem_2031_03",
                           "wqCcItem_2031_01", "wqCcItem_2031_02", "wqCcItem_2031_03");
     }
@@ -82,18 +83,32 @@ class PartitionManagerTest extends PostgresTestBase {
     }
 
     private void dropTestPartitions() {
-        existingPartitionNames().stream()
-                .filter(name -> name.contains("_2031_"))
-                .forEach(name -> dsl().execute("drop table if exists \"" + name + "\""));
+        testPartitionNames().forEach(name -> dsl().execute("drop table if exists \"" + name + "\""));
     }
 
-    private List<String> existingPartitionNames() {
-        return dsl()
-                .fetch("""
-                       select c.relname
-                       from pg_class c
-                       join pg_inherits i on i.inhrelid = c.oid
-                       """)
-                .getValues(0, String.class);
+    /**
+     * Test-month (2031) children that are actually attached as partitions of the managed
+     * parent tables -- mirrors PartitionManager.partitionExists (R27): joins pg_inherits
+     * against each parent's own resolved oid via to_regclass, rather than scanning pg_class
+     * for any same-named relation. A bare pg_class/pg_inherits scan with no parentage check
+     * previously also matched each partition's auto-created "_pkey" index (its pg_inherits row
+     * points at the parent's *partitioned index*, a different oid than the parent *table*), so
+     * an unordered scan occasionally handed an index name to "drop table", which Postgres
+     * refuses even with IF EXISTS. Filtering by inhparent = the table's own oid excludes those
+     * index rows by construction, the same way partitionExists excludes false-positive matches.
+     */
+    private List<String> testPartitionNames() {
+        return Arrays.stream(PartitionedTable.values())
+                .flatMap(table -> dsl()
+                        .fetch("""
+                               select c.relname
+                               from pg_inherits i
+                               join pg_class c on c.oid = i.inhrelid
+                               where i.inhparent = to_regclass(?)::oid
+                                 and c.relname like '%_2031_%'
+                               """, "\"" + table.tableName() + "\"")
+                        .getValues(0, String.class)
+                        .stream())
+                .toList();
     }
 }
