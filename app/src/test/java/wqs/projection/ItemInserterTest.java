@@ -87,6 +87,43 @@ class ItemInserterTest extends PostgresTestBase {
         assertThat(gameCode).isEqualTo("CRZ8");
     }
 
+    @Test
+    void every_field_is_written_to_both_views_with_the_locator_item_id() {
+        ProjectionItem item = new ProjectionItem(
+                7L, SourceKind.TRANSACTION, "tx-full", WHEN, 11, "batch-A", "sub-B",
+                (short) 3, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"),
+                "tx-cancelled", "{\"gameCode\":\"CRZ8\"}");
+        assertThat(inserter.insertIfAbsent(item)).isTrue();
+
+        long locatorId = dsl().fetchOne(
+                "select \"itemId\" from \"wqItemLocator\" where \"source\" = ? and \"sourceId\" = ?",
+                SourceKind.TRANSACTION.code(), "tx-full").get(0, Long.class);
+
+        for (String table : new String[] {"wqWebItem", "wqCcItem"}) {
+            var row = dsl().fetchOne(
+                    "select \"userId\", \"itemId\", \"source\", \"sourceId\", \"occurredAt\", "
+                            + "\"productId\", \"batchId\", \"subBatchId\", \"type\", \"amount\", "
+                            + "\"currency\", \"balanceAfter\", \"cancels\", \"cancelled\", "
+                            + "\"detail\" ->> 'gameCode' as game from \"" + table + "\" where \"sourceId\" = ?",
+                    "tx-full");
+            assertThat(row.get("userId", Long.class)).as(table).isEqualTo(7L);
+            assertThat(row.get("itemId", Long.class)).as(table).isEqualTo(locatorId);
+            assertThat(row.get("source", Integer.class)).as(table).isEqualTo(SourceKind.TRANSACTION.code());
+            assertThat(row.get("occurredAt", Instant.class)).as(table).isEqualTo(WHEN);
+            assertThat(row.get("productId", Integer.class)).as(table).isEqualTo(item.productId());
+            assertThat(row.get("batchId", String.class)).as(table).isEqualTo(item.batchId());
+            assertThat(row.get("subBatchId", String.class)).as(table).isEqualTo(item.subBatchId());
+            assertThat(row.get("type", Integer.class)).as(table).isEqualTo((int) item.type());
+            assertThat(row.get("amount", BigDecimal.class)).as(table).isEqualByComparingTo(item.amount());
+            assertThat(row.get("currency", String.class)).as(table).isEqualTo("EUR");
+            assertThat(row.get("balanceAfter", BigDecimal.class)).as(table)
+                    .isEqualByComparingTo(item.balanceAfter());
+            assertThat(row.get("cancels", String.class)).as(table).isEqualTo(item.cancels());
+            assertThat(row.get("cancelled", Boolean.class)).as(table).isFalse();
+            assertThat(row.get("game", String.class)).as(table).isEqualTo("CRZ8");
+        }
+    }
+
     private ProjectionItem transaction(String sourceId) {
         return new ProjectionItem(
                 7L, SourceKind.TRANSACTION, sourceId, WHEN, 11, "b-1", "p-1",

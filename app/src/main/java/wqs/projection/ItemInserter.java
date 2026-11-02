@@ -10,6 +10,8 @@ import java.time.ZoneOffset;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import wqs.domain.ProjectionItem;
 import wqs.domain.ViewKind;
 
@@ -28,7 +30,13 @@ public class ItemInserter {
         this.dsl = dsl;
     }
 
-    /** @return true if the item was newly inserted, false if it was already applied. */
+    /**
+     * The gate and view inserts must commit or roll back together, so callers must supply the
+     * transaction (ProjectionWriter.apply does); calling without one fails fast.
+     *
+     * @return true if the item was newly inserted, false if it was already applied.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
     public boolean insertIfAbsent(ProjectionItem item) {
         long itemId = dsl.nextval(WQ_ITEM_ID_SEQ);
         OffsetDateTime occurredAt = item.occurredAt().atOffset(ZoneOffset.UTC);
