@@ -194,9 +194,9 @@ class ArchitectureTest {
     /** Proves the rule above can fail, and that each branch of it does. */
     @Test
     void read_layer_rule_rejects_each_kind_of_unqualified_dsl() {
-        assertRejected(UnqualifiedCtorParamReader.class, "ctorDsl", "UnqualifiedCtorParamReader");
-        assertRejected(UnqualifiedMethodParamReader.class, "methodDsl", "run");
-        assertRejected(UnqualifiedInjectedFieldReader.class, "injectedDsl", "injectedDsl");
+        assertRejected(UnqualifiedCtorParamReader.class, "UnqualifiedCtorParamReader");
+        assertRejected(UnqualifiedMethodParamReader.class, "run");
+        assertRejected(UnqualifiedInjectedFieldReader.class, "injectedDsl");
     }
 
     @Test
@@ -204,7 +204,7 @@ class ArchitectureTest {
         readerDslRule().check(new ClassFileImporter().importClasses(QualifiedReader.class));
     }
 
-    private static void assertRejected(Class<?> fixtureClass, String member, String memberName) {
+    private static void assertRejected(Class<?> fixtureClass, String memberName) {
         JavaClasses fixture = new ClassFileImporter().importClasses(fixtureClass);
         assertThatThrownBy(() -> readerDslRule().check(fixture))
                 .isInstanceOf(AssertionError.class)
