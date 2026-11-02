@@ -1,7 +1,9 @@
 package wqs.projection;
 
 import java.time.Instant;
+import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.Map;
 import java.util.Set;
 import wqs.domain.ViewKind;
 
@@ -22,19 +24,30 @@ import wqs.domain.ViewKind;
  *                            the unchanged start. Null when {@code moved} is empty.
  * @param movedFromProductId  the session's previous productId (may be null); meaningful only
  *                            when {@code moved} is non-empty.
+ * @param movedVisible        for each view in {@code moved}, the moved row's
+ *                            "visibleExclCancelled" -- whether the row is in the excl-cancelled
+ *                            tally, which decides whether the counter move also shifts
+ *                            cntExclCancelled. Its key set equals {@code moved}.
  */
 public record HighLevelResult(
         Set<ViewKind> inserted,
         Set<ViewKind> moved,
         Instant movedFrom,
-        Integer movedFromProductId) {
+        Integer movedFromProductId,
+        Map<ViewKind, Boolean> movedVisible) {
 
     public static final HighLevelResult NONE =
-            new HighLevelResult(Set.of(), Set.of(), null, null);
+            new HighLevelResult(Set.of(), Set.of(), null, null, Map.of());
 
     public HighLevelResult {
         inserted = Set.copyOf(inserted);
         moved = Set.copyOf(moved);
+        movedVisible = Map.copyOf(movedVisible);
+        if (!movedVisible.keySet().equals(moved)) {
+            throw new IllegalArgumentException(
+                    "movedVisible must cover exactly the moved views: moved=" + moved
+                            + " movedVisible=" + movedVisible);
+        }
     }
 
     /** Number of page-index rows inserted by the call. */
@@ -44,5 +57,9 @@ public record HighLevelResult(
 
     static Set<ViewKind> newViewSet() {
         return EnumSet.noneOf(ViewKind.class);
+    }
+
+    static Map<ViewKind, Boolean> newViewMap() {
+        return new EnumMap<>(ViewKind.class);
     }
 }

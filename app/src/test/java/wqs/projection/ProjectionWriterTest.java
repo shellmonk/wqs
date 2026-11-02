@@ -41,9 +41,7 @@ class ProjectionWriterTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 7), 0);
-        dsl().execute("delete from \"wqItemLocator\"");
-        dsl().execute("delete from \"wqWebItem\"");
-        dsl().execute("delete from \"wqCcItem\"");
+        clearProjection();
         dsl().execute("delete from \"wqStreamOffset\"");
     }
 

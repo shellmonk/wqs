@@ -6,6 +6,7 @@ import static wqs.db.generated.Tables.WQ_WEB_HIGH_LEVEL;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.Set;
 import org.jooq.DSLContext;
 import org.jooq.Table;
@@ -60,25 +61,26 @@ public class HighLevelUpdater {
             return new HighLevelResult(
                     insertForSource(item, item.occurredAt(), (short) item.source().code(),
                             item.sourceId(), item.productId()),
-                    Set.of(), null, null);
+                    Set.of(), null, null, Map.of());
         }
         if (rollup.sessionStart() == null) {
             throw new IllegalStateException(
                     "sessioned item " + item.sourceId() + " has no session key in its RollupResult");
         }
-        Set<ViewKind> moved = HighLevelResult.newViewSet();
+        Map<ViewKind, Boolean> movedVisible = HighLevelResult.newViewMap();
         boolean startMoved = rollup.sessionKeyChanged()
                 && !rollup.sessionStart().equals(rollup.previousSessionStart());
         if (rollup.sessionKeyChanged()) {
             for (ViewKind view : ViewKind.values()) {
-                boolean changed = startMoved
+                Boolean visible = startMoved
                         ? move(view(view), item, rollup)
                         : updateProduct(view(view), item, rollup);
-                if (changed) {
-                    moved.add(view);
+                if (visible != null) {
+                    movedVisible.put(view, visible);
                 }
             }
         }
+        Set<ViewKind> moved = movedVisible.keySet();
         // Materialise the session row in every view THIS item's source feeds, whatever order the
         // session's items arrived in (P-1). The item is live (cancellations return above), so
         // the session has a surviving item in that view and the row is visible.
@@ -86,7 +88,8 @@ public class HighLevelUpdater {
                 item.batchId(), rollup.sessionProductId());
         return new HighLevelResult(inserted, moved,
                 moved.isEmpty() ? null : rollup.previousSessionStart(),
-                moved.isEmpty() ? null : rollup.previousSessionProductId());
+                moved.isEmpty() ? null : rollup.previousSessionProductId(),
+                movedVisible);
     }
 
     private Set<ViewKind> insertForSource(ProjectionItem item, Instant at, short kind,
@@ -115,8 +118,12 @@ public class HighLevelUpdater {
                 .execute();
     }
 
-    /** Moves the session row to its new key; returns whether the row existed in this view. */
-    private boolean move(View v, ProjectionItem item, RollupResult rollup) {
+    /**
+     * Moves the session row to its new key.
+     *
+     * @return the moved row's visibility, or null when this view held no row
+     */
+    private Boolean move(View v, ProjectionItem item, RollupResult rollup) {
         var old = dsl.deleteFrom(v.table)
                 .where(v.userId.eq(item.userId()),
                        v.occurredAt.eq(utc(rollup.previousSessionStart())),
@@ -125,22 +132,28 @@ public class HighLevelUpdater {
                 .returning(v.visible, v.currency)
                 .fetchOne();
         if (old == null) {
-            return false;
+            return null;
         }
         insert(v, item.userId(), rollup.sessionStart(), KIND_SESSION, item.batchId(),
                 rollup.sessionProductId(), old.get(v.currency), old.get(v.visible));
-        return true;
+        return old.get(v.visible);
     }
 
-    /** Updates productId in place; returns whether the row existed in this view. */
-    private boolean updateProduct(View v, ProjectionItem item, RollupResult rollup) {
-        return dsl.update(v.table)
+    /**
+     * Updates productId in place.
+     *
+     * @return the row's visibility, or null when this view held no row
+     */
+    private Boolean updateProduct(View v, ProjectionItem item, RollupResult rollup) {
+        var row = dsl.update(v.table)
                 .set(v.productId, rollup.sessionProductId())
                 .where(v.userId.eq(item.userId()),
                        v.occurredAt.eq(utc(rollup.sessionStart())),
                        v.kind.eq(KIND_SESSION),
                        v.refId.eq(item.batchId()))
-                .execute() > 0;
+                .returning(v.visible)
+                .fetchOne();
+        return row == null ? null : row.get(v.visible);
     }
 
     private static OffsetDateTime utc(Instant instant) {

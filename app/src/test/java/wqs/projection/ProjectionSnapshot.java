@@ -5,18 +5,41 @@ import org.jooq.DSLContext;
 import org.jooq.Record;
 
 /**
- * An order-independent, comparable view of projection state.
+ * An order-independent, comparable view of the whole projection: items, the item locator, the
+ * group locator, rollups, the page index and both counter tiers. Every table is ordered by its
+ * full primary key, so two snapshots are equal exactly when the stored state is.
  *
- * CRITICAL: "itemId" and "ingestedAt" are excluded. itemId comes from a sequence and ingestedAt
- * from now(), so both differ between runs; including either would make every convergence
- * comparison fail for reasons that have nothing to do with correctness.
+ * CRITICAL: "itemId" and "ingestedAt" (item tables only) are excluded. itemId comes from a
+ * sequence and ingestedAt from now(), so both differ between runs; including either would make
+ * every convergence comparison fail for reasons that have nothing to do with correctness. No other
+ * projection table has a sequence- or clock-derived column, so every other column is compared.
  */
-public record ProjectionSnapshot(List<String> webItems, List<String> ccItems, List<String> locator) {
+public record ProjectionSnapshot(
+        List<String> webItems,
+        List<String> ccItems,
+        List<String> locator,
+        List<String> groupLocator,
+        List<String> sessions,
+        List<String> plays,
+        List<String> webHighLevel,
+        List<String> ccHighLevel,
+        List<String> countDay,
+        List<String> countMonth) {
 
     public static ProjectionSnapshot of(DSLContext dsl) {
         return new ProjectionSnapshot(
-                rows(dsl, "wqWebItem"), rows(dsl, "wqCcItem"), locatorRows(dsl));
+                rows(dsl, "wqWebItem"), rows(dsl, "wqCcItem"), locatorRows(dsl),
+                all(dsl, "wqGroupLocator", "\"userId\", \"batchId\", \"subBatchId\""),
+                all(dsl, "wqSession", "\"userId\", \"startedAt\", \"batchId\""),
+                all(dsl, "wqPlay", "\"userId\", \"startedAt\", \"batchId\", \"subBatchId\""),
+                all(dsl, "wqWebHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
+                all(dsl, "wqCcHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
+                all(dsl, "wqCountDay", COUNTER_KEY),
+                all(dsl, "wqCountMonth", COUNTER_KEY));
     }
+
+    private static final String COUNTER_KEY =
+            "\"userId\", \"viewKind\", \"pageUnit\", \"productId\", \"period\"";
 
     private static List<String> rows(DSLContext dsl, String table) {
         return dsl.fetch("""
@@ -35,6 +58,12 @@ public record ProjectionSnapshot(List<String> webItems, List<String> ccItems, Li
                          from "wqItemLocator"
                          order by "source", "sourceId"
                          """)
+                .map(Record::toString);
+    }
+
+    /** Every column of a table with no volatile columns, ordered by its full primary key. */
+    private static List<String> all(DSLContext dsl, String table, String primaryKey) {
+        return dsl.fetch("select * from \"%s\" order by %s".formatted(table, primaryKey))
                 .map(Record::toString);
     }
 }

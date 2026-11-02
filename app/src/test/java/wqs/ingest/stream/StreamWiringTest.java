@@ -63,9 +63,7 @@ class StreamWiringTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 9), 0);
-        dsl().execute("delete from \"wqItemLocator\"");
-        dsl().execute("delete from \"wqWebItem\"");
-        dsl().execute("delete from \"wqCcItem\"");
+        clearProjection();
     }
 
     @Test

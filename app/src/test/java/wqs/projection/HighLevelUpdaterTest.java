@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
@@ -114,6 +115,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.moved()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
         assertThat(result.movedFrom()).isEqualTo(T0);
         assertThat(result.movedFromProductId()).isEqualTo(11);
+        assertThat(result.movedVisible())
+                .containsExactlyInAnyOrderEntriesOf(Map.of(ViewKind.WEB, true, ViewKind.CC, true));
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(earlier);
         assertThat(occurredAts("wqCcHighLevel")).containsExactly(earlier);
     }
@@ -137,12 +140,33 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         dsl().execute("update \"wqWebHighLevel\" set \"visibleExclCancelled\" = false");
         Instant earlier = T0.minusSeconds(60);
 
-        apply(tx("t0", "b1", earlier), moved(earlier, 7, T0, 11));
+        HighLevelResult result = apply(tx("t0", "b1", earlier), moved(earlier, 7, T0, 11));
 
+        // The counter move needs each moved row's visibility (it decides cntExclCancelled).
+        assertThat(result.movedVisible())
+                .containsExactlyInAnyOrderEntriesOf(Map.of(ViewKind.WEB, false, ViewKind.CC, true));
         assertThat(visible("wqWebHighLevel")).isFalse();
         assertThat(visible("wqCcHighLevel")).isTrue();
         assertThat(dsl().fetchOne("select \"productId\" from \"wqWebHighLevel\"")
                 .get(0, Integer.class)).isEqualTo(7);
+    }
+
+    @Test
+    void a_product_only_change_reports_each_moved_rows_visibility() {
+        apply(tx("t1", "b1", T0), newSession(T0, 11));
+        dsl().execute("update \"wqCcHighLevel\" set \"visibleExclCancelled\" = false");
+
+        HighLevelResult result = apply(tx("t2", "b1", T0.plusSeconds(5)), moved(T0, 7, T0, 11));
+
+        assertThat(result.movedVisible())
+                .containsExactlyInAnyOrderEntriesOf(Map.of(ViewKind.WEB, true, ViewKind.CC, false));
+    }
+
+    @Test
+    void movedVisible_is_empty_when_nothing_moved() {
+        HighLevelResult result = apply(tx("t1", "b1", T0), newSession(T0, 11));
+
+        assertThat(result.movedVisible()).isEmpty();
     }
 
     @Test
@@ -173,6 +197,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         // /cc row moved (0); the missing /web row is created at the current key.
         assertThat(result.inserted()).containsExactly(ViewKind.WEB);
         assertThat(result.moved()).containsExactly(ViewKind.CC);
+        assertThat(result.movedVisible()).containsOnlyKeys(ViewKind.CC);
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(earlier);
         assertThat(occurredAts("wqCcHighLevel")).containsExactly(earlier);
     }

@@ -24,8 +24,11 @@ import wqs.gen.EventGenerators;
  * Property P-1 (spec 8.1): applying any permutation or duplication of an event sequence
  * converges to identical projection state.
  *
- * Validates the locator idempotency gate. Phase 3 extends this to cancellations arriving on
- * either side of their originals.
+ * Validates the locator idempotency gate and, through {@link ProjectionSnapshot}, everything
+ * derived from it: rollups (including re-anchoring), the page index (including materialisation
+ * of a session row in a view whose source arrived later) and both counter tiers (including
+ * HIGH_LEVEL counter moves). Phase 3 extends this to cancellations arriving on either side of
+ * their originals.
  */
 @JqwikSpringSupport
 @SpringBootTest
@@ -46,9 +49,7 @@ class IdempotencyPropertyTest extends PostgresTestBase {
     void reset() {
         partitionManager.ensurePartitionsAhead(YearMonth.from(
                 EventGenerators.WINDOW_START.atZone(java.time.ZoneOffset.UTC)), 1);
-        dsl().execute("delete from \"wqItemLocator\"");
-        dsl().execute("delete from \"wqWebItem\"");
-        dsl().execute("delete from \"wqCcItem\"");
+        clearProjection();
         dsl().execute("delete from \"wqStreamOffset\"");
     }
 

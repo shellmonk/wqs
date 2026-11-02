@@ -41,4 +41,19 @@ public abstract class PostgresTestBase {
     protected static DSLContext dsl() {
         return DSL.using(dataSource, SQLDialect.POSTGRES);
     }
+
+    /**
+     * Empties every table the projection writer maintains. The container is shared by all test
+     * classes, so clearing only some of them leaves derived state (rollups, page index, counters)
+     * pointing at rows that no longer exist -- e.g. a session locator without its session, or a
+     * page-index row whose counters another class deleted -- which the strict updaters then
+     * (correctly) reject.
+     */
+    protected static void clearProjection() {
+        for (String table : java.util.List.of(
+                "wqItemLocator", "wqWebItem", "wqCcItem", "wqGroupLocator", "wqSession", "wqPlay",
+                "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth")) {
+            dsl().execute("delete from \"" + table + "\"");
+        }
+    }
 }

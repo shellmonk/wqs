@@ -105,6 +105,16 @@ public final class EventGenerators {
             }
         }
 
+        // A /cc-only item joining the first session, a day before it: whichever of this and the
+        // session's TRANSACTIONs arrives first decides which view's page-index row is created
+        // first and which is materialised later, and when it arrives last it re-anchors the
+        // session (and so moves its page-index rows and HIGH_LEVEL counters) across a UTC day.
+        Instant dayBefore = start.minus(1, ChronoUnit.DAYS);
+        items.add(new ProjectionItem(
+                userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adj" + sequence,
+                dayBefore.isBefore(WINDOW_START) ? WINDOW_START : dayBefore, 11,
+                "u" + userId + "-s0", null, (short) 9, amount, "EUR", null, null, null));
+
         // Unsessioned items: payments carry no batchId (spec 7.4).
         items.add(new ProjectionItem(
                 userId, SourceKind.PAYMENT, "u" + userId + "-pay" + sequence,
