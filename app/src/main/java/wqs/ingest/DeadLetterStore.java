@@ -17,6 +17,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.ingest.stream.StreamPayload;
+import wqs.projection.DrainedCancelDeadLetters;
 
 /**
  * Isolates poison events so ingestion keeps flowing (spec 6.4).
@@ -32,7 +33,7 @@ import wqs.ingest.stream.StreamPayload;
  * database is down) does the exception escape, and then the offset must not move.
  */
 @Component
-public class DeadLetterStore {
+public class DeadLetterStore implements DrainedCancelDeadLetters {
 
     private static final Logger log = LoggerFactory.getLogger(DeadLetterStore.class);
 
@@ -53,6 +54,16 @@ public class DeadLetterStore {
      */
     public void record(String stream, Long offset, ProjectionItem item, Exception error, int attempts) {
         write(stream, offset, (short) item.source().code(), item.sourceId(), item, error, attempts);
+    }
+
+    /**
+     * A parked cancel whose application failed when its original arrived (spec 6.3). Its own
+     * stream offset is not retained while parked, so the row has none; one attempt, since the
+     * drain is not retried on its own.
+     */
+    @Override
+    public void recordFailedDrainedCancel(String stream, ProjectionItem cancel, Exception error) {
+        record(stream, null, cancel, error, 1);
     }
 
     /** Records an event that could not even be mapped to an item, using the raw wire payload. */

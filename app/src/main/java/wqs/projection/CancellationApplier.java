@@ -144,8 +144,9 @@ public class CancellationApplier {
      *
      * The cancel's userId must match the original's: an item of another user is treated as not
      * seen, so the cancel parks (and, since {@link PendingCancelStore#drainFor} matches on userId
-     * too, stays parked, surfacing through the oldest-age gauge). Throwing instead would fail the
-     * batch, and on the drain path dead-letter the innocent original.
+     * too, stays parked, surfacing through the oldest-age gauge). A cross-user cancel is an
+     * expected mismatch, not a failure; an unexpected failure on the drain path is contained by
+     * {@link DrainedCancelApplier}'s savepoint and dead-letters the cancel, never the original.
      */
     private WqCcItemRecord findOriginal(ProjectionItem cancel) {
         Record2<Long, OffsetDateTime> located = dsl

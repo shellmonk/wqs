@@ -6,6 +6,8 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import wqs.db.PartitionProvisioner;
@@ -25,6 +27,8 @@ import wqs.ingest.stream.StreamOffsetStore;
 @Component
 public class ProjectionWriter {
 
+    private static final Logger log = LoggerFactory.getLogger(ProjectionWriter.class);
+
     private final ItemInserter itemInserter;
     private final RollupUpdater rollupUpdater;
     private final HighLevelUpdater highLevelUpdater;
@@ -33,6 +37,8 @@ public class ProjectionWriter {
     private final PendingCancelStore pendingCancelStore;
     private final StreamOffsetStore offsetStore;
     private final PartitionProvisioner partitionProvisioner;
+    private final DrainedCancelApplier drainedCancelApplier;
+    private final DrainedCancelDeadLetters drainedCancelDeadLetters;
 
     public ProjectionWriter(
             ItemInserter itemInserter,
@@ -42,7 +48,9 @@ public class ProjectionWriter {
             CancellationApplier cancellationApplier,
             PendingCancelStore pendingCancelStore,
             StreamOffsetStore offsetStore,
-            PartitionProvisioner partitionProvisioner) {
+            PartitionProvisioner partitionProvisioner,
+            DrainedCancelApplier drainedCancelApplier,
+            DrainedCancelDeadLetters drainedCancelDeadLetters) {
         this.itemInserter = itemInserter;
         this.rollupUpdater = rollupUpdater;
         this.highLevelUpdater = highLevelUpdater;
@@ -51,6 +59,8 @@ public class ProjectionWriter {
         this.pendingCancelStore = pendingCancelStore;
         this.offsetStore = offsetStore;
         this.partitionProvisioner = partitionProvisioner;
+        this.drainedCancelApplier = drainedCancelApplier;
+        this.drainedCancelDeadLetters = drainedCancelDeadLetters;
     }
 
     /**
@@ -90,19 +100,26 @@ public class ProjectionWriter {
 
         // Cancels that arrived before their original: the original is now projected (by this
         // batch), so they resolve. This is what makes ingestion order-independent (spec 6.3).
-        // A drained cancel that fails here fails the whole batch, and the consumer's per-item
-        // fallback then dead-letters the item that triggered the drain -- the ORIGINAL, not the
-        // cancel. That is why every expected mismatch (wrong source, wrong user) keeps a cancel
-        // parked rather than throwing.
+        // Each is applied in its own savepoint. One that fails is rolled back alone, stays removed
+        // from "wqPendingCancel" and is dead-lettered ITSELF: failing the batch instead would make
+        // the per-item fallback dead-letter the innocent original whose arrival drained it.
+        int deadLettered = 0;
         for (ProjectionItem parked : pendingCancelStore.drainFor(inserted)) {
-            cancellationApplier.apply(parked);
+            try {
+                drainedCancelApplier.apply(parked);
+            } catch (RuntimeException e) {
+                log.error("Drained cancel {} (cancels {}) failed; dead-lettering the cancel, not its original",
+                        parked.sourceId(), parked.cancels(), e);
+                drainedCancelDeadLetters.recordFailedDrainedCancel(batch.stream(), parked, e);
+                deadLettered++;
+            }
         }
 
         if (batch.committedOffset() != null) {
             offsetStore.write(batch.stream(), batch.committedOffset());
         }
 
-        return new WriteResult(projected, duplicates);
+        return new WriteResult(projected, duplicates, deadLettered);
     }
 
     /**

@@ -300,8 +300,7 @@ public class StreamConsumer {
         for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
             try {
                 WriteResult result = writer.apply(batch);
-                projectedCounter.increment(result.projected());
-                duplicateCounter.increment(result.duplicates());
+                count(result);
                 recordLag(batch.items());
                 return;
             } catch (RuntimeException e) {
@@ -331,8 +330,7 @@ public class StreamConsumer {
         for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
             try {
                 WriteResult result = writer.apply(new ProjectionBatch(batch.stream(), List.of(item), null));
-                projectedCounter.increment(result.projected());
-                duplicateCounter.increment(result.duplicates());
+                count(result);
                 return true;
             } catch (RuntimeException e) {
                 lastError = e;
@@ -358,6 +356,12 @@ public class StreamConsumer {
             reference = startedAt.get();
         }
         return reference == null ? Double.NaN : Duration.between(reference, clock.instant()).toMillis() / 1000d;
+    }
+
+    private void count(WriteResult result) {
+        projectedCounter.increment(result.projected());
+        duplicateCounter.increment(result.duplicates());
+        deadLetteredCounter.increment(result.deadLettered());
     }
 
     private void recordLag(List<ProjectionItem> items) {

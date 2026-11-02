@@ -244,7 +244,7 @@ class DeadLetterTest extends PostgresTestBase {
 
     @Test
     void an_error_thrown_by_the_writer_enters_recovery_and_is_rethrown() {
-        ProjectionWriter erroring = new ProjectionWriter(null, null, null, null, null, null, null, null) {
+        ProjectionWriter erroring = new ProjectionWriter(null, null, null, null, null, null, null, null, null, null) {
             private int calls;
 
             @Override
@@ -493,7 +493,7 @@ class DeadLetterTest extends PostgresTestBase {
         private int calls;
 
         FlakyWriter(ProjectionWriter delegate, int failFrom, int failTo) {
-            super(null, null, null, null, null, null, null, null);
+            super(null, null, null, null, null, null, null, null, null, null);
             this.delegate = delegate;
             this.failFrom = failFrom;
             this.failTo = failTo;
