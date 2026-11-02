@@ -10,6 +10,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.web.servlet.MockMvc;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 import wqs.projection.ProjectionBatch;
 import wqs.projection.ProjectionPropertyBase;
 
@@ -32,7 +33,8 @@ abstract class ApiTestBase extends ProjectionPropertyBase {
     }
 
     protected static ProjectionItem item(long userId, SourceKind source, String sourceId, String at) {
-        return new ProjectionItem(userId, source, sourceId, Instant.parse(at), 10, null, null, (short) 1,
+        return new ProjectionItem(userId, source, sourceId, Instant.parse(at), "P10", "instants", null, null,
+                TxTypes.PLAY,
                 new BigDecimal("12.5000"), "EUR", null, null, "{\"note\":\"" + sourceId + "\"}");
     }
 

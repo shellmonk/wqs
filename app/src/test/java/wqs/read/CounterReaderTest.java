@@ -25,13 +25,14 @@ class CounterReaderTest extends Level0TestSupport {
     @Test
     void counter_reader_matches_counters_for_months_and_days() {
         project(
-                item(TRANSACTION, "a", "2034-01-10T10:00:00Z", 11, null, null),
-                item(TRANSACTION, "b", "2034-01-10T11:00:00Z", 13, null, null),
-                item(TRANSACTION, "c", "2034-02-03T10:00:00Z", 11, null, null),
-                item(TRANSACTION, "x", "2034-02-03T12:00:00Z", 11, "a", null));
-        Level0Filter all = new Level0Filter(USER, null, false);
-        Level0Filter excl = new Level0Filter(USER, null, true);
-        Level0Filter p13 = new Level0Filter(USER, 13, false);
+                item(TRANSACTION, "a", "2034-01-10T10:00:00Z", "P11", null, null),
+                // No product type: only the ALL key counts it, so the month total equalling the
+                // live count proves the reader reads the ALL sentinel ('', 0), not a product key.
+                item(TRANSACTION, "b", "2034-01-10T11:00:00Z", null, null, null),
+                item(TRANSACTION, "c", "2034-02-03T10:00:00Z", "P11", null, null),
+                item(TRANSACTION, "x", "2034-02-03T12:00:00Z", "P11", "a", null));
+        Level0Filter all = new Level0Filter(USER, false);
+        Level0Filter excl = new Level0Filter(USER, true);
 
         var months = counters.months(readerDsl, ViewKind.WEB, all,
                 LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-01"));
@@ -46,11 +47,6 @@ class CounterReaderTest extends Level0TestSupport {
                 LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-01")))
                 .containsEntry(LocalDate.parse("2034-01-01"), 1L);
 
-        // product key honoured
-        assertThat(counters.months(readerDsl, ViewKind.WEB, p13,
-                LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-01")))
-                .containsOnly(java.util.Map.entry(LocalDate.parse("2034-01-01"), 1L));
-
         var days = counters.days(readerDsl, ViewKind.WEB, all,
                 LocalDate.parse("2034-01-09"), LocalDate.parse("2034-01-12"));
         assertThat(days).containsOnly(java.util.Map.entry(LocalDate.parse("2034-01-10"), 2L));
@@ -61,9 +57,9 @@ class CounterReaderTest extends Level0TestSupport {
     @Test
     void counter_reader_separates_views() {
         project(
-                item(TRANSACTION, "a", "2034-01-10T10:00:00Z", 11, null, null),
-                item(wqs.domain.SourceKind.PAYMENT, "p", "2034-01-11T10:00:00Z", 11, null, null));
-        Level0Filter all = new Level0Filter(USER, null, false);
+                item(TRANSACTION, "a", "2034-01-10T10:00:00Z", "P11", null, null),
+                item(wqs.domain.SourceKind.PAYMENT, "p", "2034-01-11T10:00:00Z", "P11", null, null));
+        Level0Filter all = new Level0Filter(USER, false);
         LocalDate jan = LocalDate.parse("2034-01-01");
         Instant lo = Instant.parse("2034-01-01T00:00:00Z");
         Instant hi = Instant.parse("2034-02-01T00:00:00Z");

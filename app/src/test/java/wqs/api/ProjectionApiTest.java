@@ -19,6 +19,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 
 /** Spec 7.1 / 7.9 request contract of the level-0 endpoints, and decisions D4-D6. */
 class ProjectionApiTest extends ApiTestBase {
@@ -212,14 +213,16 @@ class ProjectionApiTest extends ApiTestBase {
         expectProblem(web("pageSize", "0"), 400);
     }
 
-    /** D5: 0 is the counter sentinel, never a real product. */
+    /**
+     * Ruling R2: the phase-4 integer productId filter is gone (products are strings since V10; the
+     * contract's productTypes list filter arrives in phase 5 Task 7). The parameter is no longer
+     * bound, so it neither filters nor fails.
+     */
     @Test
-    void productId_0_is_400() throws Exception {
-        expectProblem(cc("productId", "0"), 400).andExpect(jsonPath("$.detail", containsString("productId")));
-        expectProblem(cc("productId", "-1"), 400);
-        expectProblem(web("productId", "0"), 400);
-        mvc.perform(cc("productId", "10")).andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(3));
-        mvc.perform(cc("productId", "11")).andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(0));
+    void productId_is_no_longer_a_filter() throws Exception {
+        mvc.perform(cc("productId", "0")).andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(3));
+        mvc.perform(cc("productId", "11")).andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(3));
+        mvc.perform(web("productId", "11")).andExpect(status().isOk());
     }
 
     @Test
@@ -286,7 +289,8 @@ class ProjectionApiTest extends ApiTestBase {
     @Test
     void excludeCancelledTransactions_is_optional_and_bound() throws Exception {
         project(new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, "t1-cancel",
-                java.time.Instant.parse("2034-02-13T10:00:00Z"), 10, null, null, (short) 1,
+                java.time.Instant.parse("2034-02-13T10:00:00Z"), "P10", "instants", null, null,
+                TxTypes.CANCEL,
                 new java.math.BigDecimal("12.5000"), "EUR", null, "t1", null));
         mvc.perform(cc("pageSize", "10"))
                 .andExpect(status().isOk())

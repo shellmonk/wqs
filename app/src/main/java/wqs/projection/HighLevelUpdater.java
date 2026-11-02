@@ -22,9 +22,9 @@ import wqs.domain.ViewKind;
  * unsessioned item.
  *
  * A session row is keyed and populated from the SESSION's current key in {@link RollupResult}
- * (its start and productId), never from the triggering item: a session's start moves earlier when
+ * (its start and product), never from the triggering item: a session's start moves earlier when
  * an earlier item arrives, so the row is MOVED (the start is in the primary key and the partition
- * key) and its productId updated in place when only the product changed. A transaction joining a
+ * key) and its productId / productType updated in place when only the product changed. A transaction joining a
  * session with an unchanged key inserts nothing in views that already hold the row, which keeps
  * page counts equal to the number of high-level items rather than the number of transactions.
  * Every sessioned item also ensures the row exists in each view its own source feeds, so the end
@@ -73,7 +73,7 @@ public class HighLevelUpdater {
         if (!item.isSessioned()) {
             return new HighLevelResult(
                     insertForSource(item, item.occurredAt(), (short) item.source().code(),
-                            item.sourceId(), item.productId(), item.currency()),
+                            item.sourceId(), item.productId(), item.productType(), item.currency()),
                     Set.of(), null, null, Map.of(), Set.of());
         }
         if (rollup.sessionStart() == null) {
@@ -98,7 +98,8 @@ public class HighLevelUpdater {
         // session's items arrived in (P-1). The item is live (cancellations return above), so
         // the session has a surviving item in that view and the row is visible.
         Set<ViewKind> inserted = insertForSource(item, rollup.sessionStart(), KIND_SESSION,
-                item.batchId(), rollup.sessionProductId(), rollup.sessionCurrency());
+                item.batchId(), rollup.sessionProductId(), rollup.sessionProductType(),
+                rollup.sessionCurrency());
         // Where the row already existed, it may have been hidden by cancels; this live item
         // makes the session visible again in the views its source feeds.
         Set<ViewKind> revived = HighLevelResult.newViewSet();
@@ -114,7 +115,7 @@ public class HighLevelUpdater {
         }
         return new HighLevelResult(inserted, moved,
                 moved.isEmpty() ? null : rollup.previousSessionStart(),
-                moved.isEmpty() ? null : rollup.previousSessionProductId(),
+                moved.isEmpty() ? null : rollup.previousSessionProductType(),
                 movedVisible, revived);
     }
 
@@ -143,10 +144,11 @@ public class HighLevelUpdater {
     }
 
     private Set<ViewKind> insertForSource(ProjectionItem item, Instant at, short kind,
-                                          String refId, Integer productId, String currency) {
+                                          String refId, String productId, String productType,
+                                          String currency) {
         Set<ViewKind> inserted = HighLevelResult.newViewSet();
         for (ViewKind view : item.source().views()) {
-            if (insert(view(view), item.userId(), at, kind, refId, productId,
+            if (insert(view(view), item.userId(), at, kind, refId, productId, productType,
                     currency, true) > 0) {
                 inserted.add(view);
             }
@@ -155,13 +157,14 @@ public class HighLevelUpdater {
     }
 
     private int insert(View v, long userId, Instant at, short kind, String refId,
-                       Integer productId, String currency, boolean visible) {
+                       String productId, String productType, String currency, boolean visible) {
         return dsl.insertInto(v.table)
                 .set(v.userId, userId)
                 .set(v.occurredAt, utc(at))
                 .set(v.kind, kind)
                 .set(v.refId, refId)
                 .set(v.productId, productId)
+                .set(v.productType, productType)
                 .set(v.currency, currency)
                 .set(v.visible, visible)
                 .onConflictDoNothing()
@@ -185,18 +188,20 @@ public class HighLevelUpdater {
             return null;
         }
         insert(v, item.userId(), rollup.sessionStart(), KIND_SESSION, item.batchId(),
-                rollup.sessionProductId(), rollup.sessionCurrency(), old.get(v.visible));
+                rollup.sessionProductId(), rollup.sessionProductType(), rollup.sessionCurrency(),
+                old.get(v.visible));
         return old.get(v.visible);
     }
 
     /**
-     * Updates productId in place.
+     * Updates productId and productType in place.
      *
      * @return the row's visibility, or null when this view held no row
      */
     private Boolean updateProduct(View v, ProjectionItem item, RollupResult rollup) {
         var row = dsl.update(v.table)
                 .set(v.productId, rollup.sessionProductId())
+                .set(v.productType, rollup.sessionProductType())
                 .where(v.userId.eq(item.userId()),
                        v.occurredAt.eq(utc(rollup.sessionStart())),
                        v.kind.eq(KIND_SESSION),
@@ -221,17 +226,20 @@ public class HighLevelUpdater {
             TableField<?, OffsetDateTime> occurredAt,
             TableField<?, Short> kind,
             TableField<?, String> refId,
-            TableField<?, Integer> productId,
+            TableField<?, String> productId,
+            TableField<?, String> productType,
             TableField<?, String> currency,
             TableField<?, Boolean> visible) {
 
         static final View WEB = new View(WQ_WEB_HIGH_LEVEL,
                 WQ_WEB_HIGH_LEVEL.userId, WQ_WEB_HIGH_LEVEL.occurredAt, WQ_WEB_HIGH_LEVEL.kind,
-                WQ_WEB_HIGH_LEVEL.refId, WQ_WEB_HIGH_LEVEL.productId, WQ_WEB_HIGH_LEVEL.currency,
+                WQ_WEB_HIGH_LEVEL.refId, WQ_WEB_HIGH_LEVEL.productId, WQ_WEB_HIGH_LEVEL.productType,
+                WQ_WEB_HIGH_LEVEL.currency,
                 WQ_WEB_HIGH_LEVEL.visibleExclCancelled);
         static final View CC = new View(WQ_CC_HIGH_LEVEL,
                 WQ_CC_HIGH_LEVEL.userId, WQ_CC_HIGH_LEVEL.occurredAt, WQ_CC_HIGH_LEVEL.kind,
-                WQ_CC_HIGH_LEVEL.refId, WQ_CC_HIGH_LEVEL.productId, WQ_CC_HIGH_LEVEL.currency,
+                WQ_CC_HIGH_LEVEL.refId, WQ_CC_HIGH_LEVEL.productId, WQ_CC_HIGH_LEVEL.productType,
+                WQ_CC_HIGH_LEVEL.currency,
                 WQ_CC_HIGH_LEVEL.visibleExclCancelled);
     }
 }

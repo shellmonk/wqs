@@ -1,10 +1,14 @@
 package wqs.read;
 
-/** Level-0 read filter. {@code productId == null} means all products. */
-public record Level0Filter(long userId, Integer productId, boolean excludeCancelled) {
+/**
+ * Level-0 read filter. Product and transaction-type list filters arrive with the phase-5
+ * contract (plan Task 5); until then a read covers every product type and type (ruling R2).
+ */
+public record Level0Filter(long userId, boolean excludeCancelled) {
 
-    /** The counter tables store the all-products total under product key 0. */
-    public int counterProductKey() {
-        return productId == null ? 0 : productId;
-    }
+    /** The counter key holding the ALL-product-types total ("productType" = '', V10). */
+    public static final String ALL_PRODUCT_TYPES = "";
+
+    /** The counter key holding the ALL-transaction-types total ("typeId" = 0, V10). */
+    public static final short ALL_TYPES = 0;
 }

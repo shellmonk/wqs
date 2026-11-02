@@ -53,6 +53,7 @@ public class PendingCancelStore {
                 .set(WQ_PENDING_CANCEL.userId, cancel.userId())
                 .set(WQ_PENDING_CANCEL.occurredAt, cancel.occurredAt().atOffset(ZoneOffset.UTC))
                 .set(WQ_PENDING_CANCEL.productId, cancel.productId())
+                .set(WQ_PENDING_CANCEL.productType, cancel.productType())
                 .set(WQ_PENDING_CANCEL.batchId, cancel.batchId())
                 .set(WQ_PENDING_CANCEL.subBatchId, cancel.subBatchId())
                 .set(WQ_PENDING_CANCEL.type, cancel.type())
@@ -108,6 +109,7 @@ public class PendingCancelStore {
                 r.getCancelSourceId(),
                 r.getOccurredAt().toInstant(),
                 r.getProductId(),
+                r.getProductType(),
                 r.getBatchId(),
                 r.getSubBatchId(),
                 r.getType(),

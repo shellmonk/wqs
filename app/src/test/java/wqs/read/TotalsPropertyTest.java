@@ -18,6 +18,7 @@ import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.gen.ReadGenerators;
 import wqs.gen.ReadGenerators.ReadQuery;
+import wqs.gen.TxTypes;
 import wqs.read.Segment.Tier;
 
 /**
@@ -48,7 +49,7 @@ class TotalsPropertyTest extends ReadPropertyBase {
                 item("a", "2034-02-10T00:00:00Z"),
                 item("b", "2034-02-10T09:30:00Z"),
                 item("c", "2034-02-10T23:59:59Z")));
-        Level0Filter f = new Level0Filter(1L, null, false);
+        Level0Filter f = new Level0Filter(1L, false);
         Instant from = Instant.parse("2034-02-10T00:00:00Z");
         Instant to = Instant.parse("2034-02-10T23:59:59Z");
 
@@ -68,7 +69,7 @@ class TotalsPropertyTest extends ReadPropertyBase {
                 item("b", "2034-01-17T12:00:00Z"),
                 item("c", "2034-02-28T23:59:59Z"),
                 item("d", "2034-03-01T00:00:00Z")));
-        Level0Filter f = new Level0Filter(1L, null, false);
+        Level0Filter f = new Level0Filter(1L, false);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
 
@@ -87,12 +88,12 @@ class TotalsPropertyTest extends ReadPropertyBase {
         reset();
         applyBatches(List.of(
                 new ProjectionItem(1L, SourceKind.PAYMENT, "p", Instant.parse("2034-01-05T10:00:00Z"), null,
-                        null, null, (short) 9, new BigDecimal("2.5000"), "USD", new BigDecimal("10.0000"), null,
+                        null, null, null, TxTypes.NEUTRAL, new BigDecimal("2.5000"), "USD", new BigDecimal("10.0000"), null,
                         "{\"gameCode\": \"x\"}"),
                 item("a", "2034-01-05T10:00:00Z"),
-                new ProjectionItem(1L, SourceKind.TRANSACTION, "a-c", Instant.parse("2034-01-06T00:00:00Z"), 11,
-                        null, null, (short) 2, new BigDecimal("-1.0000"), "EUR", null, "a", null)));
-        Level0Filter f = new Level0Filter(1L, null, false);
+                new ProjectionItem(1L, SourceKind.TRANSACTION, "a-c", Instant.parse("2034-01-06T00:00:00Z"), "P11",
+                        "instants", null, null, TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, "a", null)));
+        Level0Filter f = new Level0Filter(1L, false);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-02-01T00:00:00Z");
         for (ViewKind v : ViewKind.values()) {
@@ -118,7 +119,7 @@ class TotalsPropertyTest extends ReadPropertyBase {
     }
 
     private static ProjectionItem item(String id, String at) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), 11, null, null,
-                (short) 1, new BigDecimal("1.0000"), "EUR", null, null, null);
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "instants", null, null,
+                TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 }

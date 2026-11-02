@@ -18,6 +18,8 @@ import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
+import wqs.gen.Products;
+import wqs.gen.TxTypes;
 
 class HighLevelUpdaterTest extends PostgresTestBase {
 
@@ -67,8 +69,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     void a_session_row_is_keyed_by_batchId_and_an_item_row_by_sourceId() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
         ProjectionItem prize = new ProjectionItem(
-                1L, SourceKind.CLAIMABLE_PRIZE, "prize1", T0.plusSeconds(5), 11, null, null,
-                (short) 3, new BigDecimal("7.0000"), "EUR", null, null, null);
+                1L, SourceKind.CLAIMABLE_PRIZE, "prize1", T0.plusSeconds(5), "P11", "instants", null, null,
+                TxTypes.WIN, new BigDecimal("7.0000"), "EUR", null, null, null);
         apply(prize, RollupResult.NONE);
 
         assertThat(refIds("wqWebHighLevel")).containsExactlyInAnyOrder("b1", "prize1");
@@ -92,11 +94,11 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     @Test
     void a_cancellation_creates_no_row() {
         ProjectionItem sessionedCancel = new ProjectionItem(
-                1L, SourceKind.TRANSACTION, "t2", T0, 11, "b1", "p1",
-                (short) 2, new BigDecimal("-5.0000"), "EUR", null, "t1", null);
+                1L, SourceKind.TRANSACTION, "t2", T0, "P11", "instants", "b1", "p1",
+                TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, "t1", null);
         ProjectionItem unsessionedCancel = new ProjectionItem(
-                1L, SourceKind.PAYMENT, "pay2", T0, null, null, null,
-                (short) 9, new BigDecimal("-50.0000"), "EUR", null, "pay1", null);
+                1L, SourceKind.PAYMENT, "pay2", T0, null, null, null, null,
+                TxTypes.CANCEL, new BigDecimal("-50.0000"), "EUR", null, "pay1", null);
 
         assertThat(apply(sessionedCancel, RollupResult.NONE)).isEqualTo(HighLevelResult.NONE);
         assertThat(apply(unsessionedCancel, RollupResult.NONE)).isEqualTo(HighLevelResult.NONE);
@@ -114,7 +116,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.insertedCount()).isZero();
         assertThat(result.moved()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
         assertThat(result.movedFrom()).isEqualTo(T0);
-        assertThat(result.movedFromProductId()).isEqualTo(11);
+        assertThat(result.movedFromProductType()).isEqualTo(Products.type(11));
         assertThat(result.movedVisible())
                 .containsExactlyInAnyOrderEntriesOf(Map.of(ViewKind.WEB, true, ViewKind.CC, true));
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(earlier);
@@ -151,7 +153,9 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(visible("wqWebHighLevel")).isTrue();
         assertThat(visible("wqCcHighLevel")).isTrue();
         assertThat(dsl().fetchOne("select \"productId\" from \"wqWebHighLevel\"")
-                .get(0, Integer.class)).isEqualTo(7);
+                .get(0, String.class)).isEqualTo(Products.id(7));
+        assertThat(dsl().fetchOne("select \"productType\" from \"wqWebHighLevel\"")
+                .get(0, String.class)).isEqualTo(Products.type(7));
     }
 
     @Test
@@ -200,12 +204,16 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.insertedCount()).isZero();
         assertThat(result.moved()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
         assertThat(result.movedFrom()).isEqualTo(T0);
-        assertThat(result.movedFromProductId()).isEqualTo(11);
+        assertThat(result.movedFromProductType()).isEqualTo(Products.type(11));
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(T0);
         assertThat(dsl().fetchOne("select \"productId\" from \"wqWebHighLevel\"")
-                .get(0, Integer.class)).isEqualTo(7);
+                .get(0, String.class)).isEqualTo(Products.id(7));
+        assertThat(dsl().fetchOne("select \"productType\" from \"wqWebHighLevel\"")
+                .get(0, String.class)).isEqualTo(Products.type(7));
         assertThat(dsl().fetchOne("select \"productId\" from \"wqCcHighLevel\"")
-                .get(0, Integer.class)).isEqualTo(7);
+                .get(0, String.class)).isEqualTo(Products.id(7));
+        assertThat(dsl().fetchOne("select \"productType\" from \"wqCcHighLevel\"")
+                .get(0, String.class)).isEqualTo(Products.type(7));
     }
 
     @Test
@@ -271,7 +279,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         List<HighLevelResult> results = new java.util.ArrayList<>();
         for (ProjectionItem item : items) {
             results.add(dsl().transactionResult(cfg -> {
-                RollupResult rollup = new RollupUpdater(DSL.using(cfg)).applyItem(item);
+                RollupResult rollup = new RollupUpdater(DSL.using(cfg), txTypes()).applyItem(item);
                 return new HighLevelUpdater(DSL.using(cfg)).applyItem(item, rollup);
             }));
         }
@@ -293,7 +301,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     private List<String> snapshot() {
         return java.util.stream.Stream.of("wqWebHighLevel", "wqCcHighLevel")
                 .flatMap(t -> dsl().fetch("select \"userId\",\"occurredAt\",\"kind\",\"refId\","
-                        + "\"productId\",\"currency\",\"visibleExclCancelled\" from \"" + t
+                        + "\"productId\",\"productType\",\"currency\",\"visibleExclCancelled\" from \"" + t
                         + "\" order by 1,2,3,4").stream()
                         .map(r -> t + r.intoList()))
                 .toList();
@@ -301,8 +309,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
 
     private ProjectionItem ccOnly(String id, String batchId, Instant at) {
         return new ProjectionItem(
-                1L, SourceKind.MANUAL_ADJUSTMENT, id, at, 11, batchId, null,
-                (short) 9, new BigDecimal("5.0000"), "EUR", null, null, null);
+                1L, SourceKind.MANUAL_ADJUSTMENT, id, at, "P11", "instants", batchId, null,
+                TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private HighLevelResult apply(ProjectionItem item, RollupResult rollup) {
@@ -310,30 +318,32 @@ class HighLevelUpdaterTest extends PostgresTestBase {
                 cfg -> new HighLevelUpdater(DSL.using(cfg)).applyItem(item, rollup));
     }
 
-    private static RollupResult newSession(Instant start, Integer productId) {
-        return new RollupResult(true, true, start, productId, "EUR", null, null, false);
+    private static RollupResult newSession(Instant start, int product) {
+        return new RollupResult(true, true, start, Products.id(product), Products.type(product),
+                "EUR", null, null, false);
     }
 
-    private static RollupResult joined(Instant start, Integer productId) {
-        return new RollupResult(false, false, start, productId, "EUR", null, null, false);
+    private static RollupResult joined(Instant start, int product) {
+        return new RollupResult(false, false, start, Products.id(product), Products.type(product),
+                "EUR", null, null, false);
     }
 
-    private static RollupResult moved(Instant start, Integer productId,
-                                      Instant prevStart, Integer prevProductId) {
-        return new RollupResult(
-                false, false, start, productId, "EUR", prevStart, prevProductId, true);
+    private static RollupResult moved(Instant start, int product,
+                                      Instant prevStart, int prevProduct) {
+        return new RollupResult(false, false, start, Products.id(product), Products.type(product),
+                "EUR", prevStart, Products.type(prevProduct), true);
     }
 
     private ProjectionItem tx(String id, String batchId, Instant at) {
         return new ProjectionItem(
-                1L, SourceKind.TRANSACTION, id, at, 11, batchId, batchId + "-p",
-                (short) 1, new BigDecimal("5.0000"), "EUR", null, null, null);
+                1L, SourceKind.TRANSACTION, id, at, "P11", "instants", batchId, batchId + "-p",
+                TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private ProjectionItem payment(String id, Instant at) {
         return new ProjectionItem(
-                1L, SourceKind.PAYMENT, id, at, null, null, null,
-                (short) 9, new BigDecimal("50.0000"), "EUR", null, null, null);
+                1L, SourceKind.PAYMENT, id, at, null, null, null, null,
+                TxTypes.NEUTRAL, new BigDecimal("50.0000"), "EUR", null, null, null);
     }
 
     private int count(String table) {

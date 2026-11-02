@@ -22,6 +22,7 @@ import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import wqs.db.TxTypeRegistry;
 import wqs.db.generated.tables.records.WqCcItemRecord;
 import wqs.db.generated.tables.records.WqSessionRecord;
 import wqs.domain.MoneyDirection;
@@ -43,7 +44,7 @@ import wqs.domain.ViewKind;
  * <p><b>Effects</b>, each the exact inverse of what the original contributed when it arrived:
  * <ul>
  *   <li>Item rows: "cancelled" = true in every view the original's source feeds; the ITEM
- *       excl-cancelled counter loses one in each, at the original's own (occurredAt, productId).
+ *       excl-cancelled counter loses one in each, at the original's own (occurredAt, productType).
  *       cntAll is untouched -- a cancelled item is still returned when the filter is off.</li>
  *   <li>Rollups (sessioned original): txCountExclCancelled -1 and the original's own money
  *       (computed exactly as {@link RollupUpdater} added it) on its play and its session; the
@@ -52,11 +53,11 @@ import wqs.domain.ViewKind;
  *       one surviving (non-cancelled, non-cancellation) item whose source feeds V. For each view
  *       the original's source feeds, that is re-evaluated against the item table; if nothing
  *       survives, the row flips to hidden and the HIGH_LEVEL excl-cancelled counter loses one at
- *       the SESSION's key (start and productId from the session row, never the original's). An
+ *       the SESSION's key (start and productType from the session row, never the original's). An
  *       unsessioned original's own row flips at the item's key. A live item joining later
  *       revives the row ({@link HighLevelUpdater}).</li>
  * </ul>
- * The session's key is not touched: startedAt and productId fold over every item, cancelled or
+ * The session's key is not touched: startedAt and the product fold over every item, cancelled or
  * not, so a cancel never moves a row.
  *
  * <p><b>Idempotence.</b> The writer's locator gate stops a replayed cancel before it gets here.
@@ -76,12 +77,15 @@ public class CancellationApplier {
     private final DSLContext dsl;
     private final CounterUpdater counterUpdater;
     private final PendingCancelStore pendingCancelStore;
+    private final TxTypeRegistry txTypes;
 
     public CancellationApplier(
-            DSLContext dsl, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore) {
+            DSLContext dsl, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
+            TxTypeRegistry txTypes) {
         this.dsl = dsl;
         this.counterUpdater = counterUpdater;
         this.pendingCancelStore = pendingCancelStore;
+        this.txTypes = txTypes;
     }
 
     /**
@@ -112,7 +116,7 @@ public class CancellationApplier {
         Instant occurredAt = original.getOccurredAt().toInstant();
         for (ViewKind view : source.views()) {
             counterUpdater.uncountExclCancelled(
-                    userId, view, PageUnit.ITEM, original.getProductId(), occurredAt);
+                    userId, view, PageUnit.ITEM, original.getProductType(), occurredAt);
         }
 
         // A cancellation contributed to no rollup and no page unit, so cancelling one (should a
@@ -124,7 +128,7 @@ public class CancellationApplier {
         if (original.getBatchId() == null) {
             for (ViewKind view : source.views()) {
                 hide(view, userId, occurredAt, (short) source.code(), original.getSourceId(),
-                        original.getProductId());
+                        original.getProductType());
             }
             return true;
         }
@@ -133,7 +137,7 @@ public class CancellationApplier {
         for (ViewKind view : source.views()) {
             if (!sessionSurvivesIn(view, session)) {
                 hide(view, userId, session.getStartedAt().toInstant(), KIND_SESSION,
-                        session.getBatchId(), session.getProductId());
+                        session.getBatchId(), session.getProductType());
             }
         }
         return true;
@@ -199,7 +203,7 @@ public class CancellationApplier {
         long userId = original.getUserId();
         String batchId = original.getBatchId();
         // Mirrors RollupUpdater exactly: direction by type, magnitude by abs(amount).
-        MoneyDirection direction = MoneyDirection.ofType(original.getType());
+        MoneyDirection direction = txTypes.directionOf(original.getType());
         BigDecimal amount = original.getAmount().abs();
         BigDecimal plays = direction == MoneyDirection.PLAY ? amount : BigDecimal.ZERO;
         BigDecimal wins = direction == MoneyDirection.WIN ? amount : BigDecimal.ZERO;
@@ -272,7 +276,7 @@ public class CancellationApplier {
      * exactly one flip is a bug.
      */
     private void hide(ViewKind view, long userId, Instant at, short kind, String refId,
-                      Integer productId) {
+                      String productType) {
         PageTable p = PageTable.of(view);
         int rows = dsl.update(p.table())
                 .set(p.visible(), false)
@@ -287,7 +291,7 @@ public class CancellationApplier {
                     + " hid " + rows + ": view=" + view + " userId=" + userId + " at=" + at
                     + " kind=" + kind + " refId=" + refId);
         }
-        counterUpdater.uncountExclCancelled(userId, view, PageUnit.HIGH_LEVEL, productId, at);
+        counterUpdater.uncountExclCancelled(userId, view, PageUnit.HIGH_LEVEL, productType, at);
     }
 
     private static boolean isCancellation(String cancels) {

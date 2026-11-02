@@ -33,7 +33,7 @@ class GeneratedCodeTest {
 
         List<String> fields = fieldNames(table);
 
-        assertThat(fields).contains("userId", "occurredAt", "subBatchId", "productId");
+        assertThat(fields).contains("userId", "occurredAt", "subBatchId", "productId", "productType");
         assertThat(fields).doesNotContain("OCCURREDAT", "OCCURRED_AT", "Occurredat");
     }
 

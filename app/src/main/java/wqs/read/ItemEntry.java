@@ -9,7 +9,7 @@ public record ItemEntry(
         String kind,
         String sourceId,
         Instant occurredAt,
-        Integer productId,
+        String productId,
         String batchId,
         String subBatchId,
         short type,

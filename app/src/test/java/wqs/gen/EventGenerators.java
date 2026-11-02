@@ -30,6 +30,18 @@ public final class EventGenerators {
     /** Session starts are drawn from a day after WINDOW_START, leaving room for a day-earlier item. */
     private static final Instant SESSION_START_MIN = WINDOW_START.plus(1, ChronoUnit.DAYS);
 
+    /*
+     * The product pool, as (productId, productType). Ids and types are strings since V10, and
+     * each is LEAST over a session's items, so both orderings matter: P03 < P07 < P11 < P13 and
+     * "arcade" < "bingo" < "instants" < "lottery". A session's product TYPE -- the counter key --
+     * therefore moves exactly when its product id does.
+     */
+    private static final String[] P03 = {"P03", "arcade"};
+    private static final String[] P07 = {"P07", "bingo"};
+    private static final String[] P11 = {"P11", "instants"};
+    private static final String[] P13 = {"P13", "lottery"};
+    private static final String[] NO_PRODUCT = {null, null};
+
     /** Heavily skewed: user 1 appears far more often than user 20. */
     public static Arbitrary<Long> users() {
         return Arbitraries.frequency(
@@ -83,12 +95,12 @@ public final class EventGenerators {
      * A sequence of items clustered into sessions: each session gets a batchId, a product, and
      * between 1 and 4 plays, each play 1 to 3 transactions.
      *
-     * Products vary so that a session's key (startedAt, LEAST(productId)) depends on arrival
+     * Products vary so that a session's key (startedAt, LEAST(productType)) depends on arrival
      * order, which drives every product-changing path under permutation: even sessions use
-     * product 11, odd sessions 13 with a product-less FIRST play (so an early null-product
-     * arrival is later raised to 13 in place, or never seen as a change if it arrives last), and
-     * session 0 is joined by a /cc-only adjustment a day earlier at product 7 (start AND product
-     * move) and one after its last transaction at product 3 (product-only change, same start).
+     * product P11, odd sessions P13 with a product-less FIRST play (so an early null-product
+     * arrival is later raised to P13 in place, or never seen as a change if it arrives last), and
+     * session 0 is joined by a /cc-only adjustment a day earlier at product P07 (start AND product
+     * move) and one after its last transaction at product P03 (product-only change, same start).
      * Half the time those adjustments (and the claimable prize) are in USD or AUD rather than the
      * transactions' EUR, so session 0's LEAST currency -- which its page rows must carry in both
      * views -- also depends on arrival order.
@@ -176,9 +188,9 @@ public final class EventGenerators {
     private static ProjectionItem cancelOf(ProjectionItem item, String suffix, boolean grouped) {
         return new ProjectionItem(
                 item.userId(), item.source(), item.sourceId() + suffix,
-                item.occurredAt().plusSeconds(90), item.productId(),
+                item.occurredAt().plusSeconds(90), item.productId(), item.productType(),
                 grouped ? item.batchId() : null, grouped ? item.subBatchId() : null,
-                (short) 2, item.amount().negate(), item.currency(), null,
+                TxTypes.CANCEL, item.amount().negate(), item.currency(), null,
                 item.sourceId(), null);
     }
 
@@ -193,9 +205,9 @@ public final class EventGenerators {
 
         for (int s = 0; s < sessions; s++) {
             String batchId = "u" + userId + "-s" + s;
-            Integer sessionProduct = s % 2 == 0 ? 11 : 13;
+            String[] sessionProduct = s % 2 == 0 ? P11 : P13;
             for (int p = 0; p < plays; p++) {
-                Integer product = s % 2 == 1 && p == 0 ? null : sessionProduct;
+                String[] product = s % 2 == 1 && p == 0 ? NO_PRODUCT : sessionProduct;
                 String subBatchId = batchId + "-p" + p;
                 for (int t = 0; t < txPerPlay; t++) {
                     items.add(new ProjectionItem(
@@ -203,10 +215,11 @@ public final class EventGenerators {
                             SourceKind.TRANSACTION,
                             batchId + "-t" + (sequence++),
                             start.plusSeconds(sequence * 7L),
-                            product,
+                            product[0],
+                            product[1],
                             batchId,
                             subBatchId,
-                            (short) (t == 0 ? 1 : 2),
+                            t == 0 ? TxTypes.PLAY : TxTypes.WIN,
                             amount,
                             "EUR",
                             null,
@@ -224,32 +237,33 @@ public final class EventGenerators {
         // transaction at a lower product still, changes only the product.
         items.add(new ProjectionItem(
                 userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adj" + sequence,
-                start.minus(1, ChronoUnit.DAYS), 7,
-                "u" + userId + "-s0", null, (short) 9, amount, joiningCurrency, null, null, null));
+                start.minus(1, ChronoUnit.DAYS), P07[0], P07[1],
+                "u" + userId + "-s0", null, TxTypes.NEUTRAL, amount, joiningCurrency, null, null, null));
         items.add(new ProjectionItem(
                 userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adjlate" + sequence,
-                start.plusSeconds(sequence * 7L + 5), 3,
-                "u" + userId + "-s0", null, (short) 9, amount, joiningCurrency, null, null, null));
+                start.plusSeconds(sequence * 7L + 5), P03[0], P03[1],
+                "u" + userId + "-s0", null, TxTypes.NEUTRAL, amount, joiningCurrency, null, null, null));
 
         // Unsessioned items: payments carry no batchId (spec 7.4).
         items.add(new ProjectionItem(
                 userId, SourceKind.PAYMENT, "u" + userId + "-pay" + sequence,
-                start.plusSeconds(sequence * 7L + 1), null, null, null,
-                (short) 9, amount.abs(), "EUR", null, null, null));
+                start.plusSeconds(sequence * 7L + 1), null, null, null, null,
+                TxTypes.NEUTRAL, amount.abs(), "EUR", null, null, null));
 
         // Cross-source collisions: same user, same sourceId string as a TRANSACTION, different source.
         String shared = "u" + userId + "-x" + sequence;
         long at = sequence * 7L + 2;
         items.add(new ProjectionItem(userId, SourceKind.TRANSACTION, shared, start.plusSeconds(at),
-                11, "u" + userId + "-sx", "u" + userId + "-sx-p0", (short) 1, amount, "EUR", null, null, detail));
+                P11[0], P11[1], "u" + userId + "-sx", "u" + userId + "-sx-p0", TxTypes.PLAY, amount, "EUR", null, null, detail));
         for (SourceKind kind : colliding) {
             at += 3;
             boolean sessioned = kind == SourceKind.CLAIMABLE_PRIZE; // prizes carry a session; payments/adjustments do not
             items.add(new ProjectionItem(userId, kind, shared, start.plusSeconds(at),
-                    sessioned ? 11 : null,
+                    sessioned ? P11[0] : null,
+                    sessioned ? P11[1] : null,
                     sessioned ? "u" + userId + "-sprize" : null,
                     sessioned ? "u" + userId + "-sprize-p0" : null,
-                    (short) (kind == SourceKind.PAYMENT ? 9 : 3), amount,
+                    TxTypes.NEUTRAL, amount,
                     sessioned ? joiningCurrency : "EUR", null, null, detail));
         }
 

@@ -53,11 +53,10 @@ public final class ReadGenerators {
     private static final int MAX_ITEMS = 150;
 
     public record ReadQuery(
-            ViewKind view, long userId, Instant from, Instant to, Integer productId,
-            boolean excludeCancelled) {
+            ViewKind view, long userId, Instant from, Instant to, boolean excludeCancelled) {
 
         public Level0Filter filter() {
-            return new Level0Filter(userId, productId, excludeCancelled);
+            return new Level0Filter(userId, excludeCancelled);
         }
     }
 
@@ -72,7 +71,7 @@ public final class ReadGenerators {
     private record CancelSpec(long delaySeconds, boolean beforeOriginal, int positionPick) {}
 
     private record ItemSpec(
-            long userId, TimeSpec time, SourceKind source, Integer productId, CancelSpec cancel,
+            long userId, TimeSpec time, SourceKind source, String[] product, CancelSpec cancel,
             String detail, long amountCents) {}
 
     /** Users skewed {1: 60%, 2: 30%, 3: 10%}; user 4 never has data. */
@@ -115,7 +114,9 @@ public final class ReadGenerators {
                                 Tuple.of(5, SourceKind.TRANSACTION),
                                 Tuple.of(2, SourceKind.CLAIMABLE_PRIZE),
                                 Tuple.of(3, SourceKind.PAYMENT)),
-                        Arbitraries.of(11, 13).injectNull(0.3),
+                        Arbitraries.<String[]>of(new String[] {"P11", "instants"},
+                                        new String[] {"P13", "lottery"})
+                                .injectNull(0.3),
                         cancelSpecs().injectNull(0.8),
                         Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(4)
                                 .map(c -> "{\"gameCode\": \"" + c + "\"}").injectNull(0.5),
@@ -150,7 +151,9 @@ public final class ReadGenerators {
             ItemSpec s = specs.get(i);
             Instant at = resolveTime(s, dense.get(s.userId()), originals);
             originals.add(new ProjectionItem(
-                    s.userId(), s.source(), "h" + i, at, s.productId(), null, null,
+                    s.userId(), s.source(), "h" + i, at,
+                    s.product() == null ? null : s.product()[0],
+                    s.product() == null ? null : s.product()[1], null, null,
                     typeOf(s.source()), BigDecimal.valueOf(s.amountCents(), 4), "EUR", null, null,
                     s.detail()));
         }
@@ -169,8 +172,8 @@ public final class ReadGenerators {
                 at = WINDOW_END.minusSeconds(1);
             }
             ProjectionItem cancel = new ProjectionItem(
-                    o.userId(), o.source(), o.sourceId() + "-c", at, o.productId(), null, null,
-                    (short) 2, o.amount().negate(), o.currency(), null, o.sourceId(), null);
+                    o.userId(), o.source(), o.sourceId() + "-c", at, o.productId(), o.productType(),
+                    null, null, TxTypes.CANCEL, o.amount().negate(), o.currency(), null, o.sourceId(), null);
             // Arrival position strictly before (at a random earlier slot) or after the original.
             double order = c.beforeOriginal()
                     ? (c.positionPick() % (i + 1)) - 0.5
@@ -216,9 +219,9 @@ public final class ReadGenerators {
 
     private static short typeOf(SourceKind source) {
         return switch (source) {
-            case TRANSACTION -> 1;
-            case CLAIMABLE_PRIZE -> 3;
-            default -> 9;
+            case TRANSACTION -> TxTypes.PLAY;
+            case CLAIMABLE_PRIZE -> TxTypes.WIN;
+            default -> TxTypes.NEUTRAL;
         };
     }
 
@@ -276,9 +279,8 @@ public final class ReadGenerators {
                         Arbitraries.of(ViewKind.values()),
                         Arbitraries.of(1L, 2L, 3L, 4L),
                         ranges(),
-                        Arbitraries.of(11, 13, 99).injectNull(0.4),
                         Arbitraries.of(true, false))
-                .as((v, u, r, p, x) -> new ReadQuery(v, u, r[0], r[1], p, x));
+                .as((v, u, r, x) -> new ReadQuery(v, u, r[0], r[1], x));
     }
 
     private static Instant min(Instant a, Instant b) {

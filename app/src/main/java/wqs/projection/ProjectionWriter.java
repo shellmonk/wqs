@@ -136,25 +136,25 @@ public class ProjectionWriter {
         counterUpdater.countItem(item);
 
         // HIGH_LEVEL counters mirror the page index per view, at the row's CURRENT key: the
-        // session's (start, product) for a session row, the item's own for an unsessioned one.
+        // session's (start, product type) for a session row, the item's own for an unsessioned one.
         boolean sessioned = rollup.sessionStart() != null;
         Instant at = sessioned ? rollup.sessionStart() : item.occurredAt();
-        Integer productId = sessioned ? rollup.sessionProductId() : item.productId();
+        String productType = sessioned ? rollup.sessionProductType() : item.productType();
 
         for (ViewKind view : highLevel.inserted()) {
-            counterUpdater.countHighLevel(item.userId(), view, productId, at);
+            counterUpdater.countHighLevel(item.userId(), view, productType, at);
         }
         for (ViewKind view : highLevel.moved()) {
             counterUpdater.moveHighLevel(
                     item.userId(), view,
-                    highLevel.movedFromProductId(), highLevel.movedFrom(),
-                    productId, at,
+                    highLevel.movedFromProductType(), highLevel.movedFrom(),
+                    productType, at,
                     highLevel.movedVisible().get(view));
         }
         // After the move: a revived row is counted in cntAll already, at the current key.
         for (ViewKind view : highLevel.revived()) {
             counterUpdater.recountExclCancelled(
-                    item.userId(), view, PageUnit.HIGH_LEVEL, productId, at);
+                    item.userId(), view, PageUnit.HIGH_LEVEL, productType, at);
         }
     }
 }

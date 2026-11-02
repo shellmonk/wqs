@@ -21,6 +21,7 @@ import wqs.db.PartitionedTable;
 import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 import wqs.ingest.stream.StreamOffsetStore;
 
 /** Spring context test: the transaction boundary is the behaviour under test. */
@@ -80,7 +81,7 @@ class ProjectionWriterTest extends PostgresTestBase {
         // has been written in the same transaction.
         ProjectionItem unpartitioned = new ProjectionItem(
                 7L, SourceKind.TRANSACTION, "tx-bad\u0000", WHEN,
-                11, "b-1", "p-1", (short) 1, new BigDecimal("1.0000"), "EUR", null, null, null);
+                "P11", "instants", "b-1", "p-1", TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
 
         assertThatThrownBy(() -> writer.apply(
                 new ProjectionBatch(STREAM, List.of(tx("tx-3"), unpartitioned), 11L)))
@@ -133,8 +134,8 @@ class ProjectionWriterTest extends PostgresTestBase {
 
     private ProjectionItem tx(String sourceId, Instant at) {
         return new ProjectionItem(
-                7L, SourceKind.TRANSACTION, sourceId, at, 11, "b-" + sourceId, "p-1",
-                (short) 1, new BigDecimal("5.0000"), "EUR", null, null, null);
+                7L, SourceKind.TRANSACTION, sourceId, at, "P11", "instants", "b-" + sourceId, "p-1",
+                TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private int count(String table) {

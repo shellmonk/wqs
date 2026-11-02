@@ -14,6 +14,8 @@ import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.jooq.Record2;
+import wqs.db.TxTypeRegistry;
 import wqs.db.generated.tables.records.WqPlayRecord;
 import wqs.db.generated.tables.records.WqSessionRecord;
 import wqs.domain.MoneyDirection;
@@ -40,9 +42,9 @@ import wqs.domain.ProjectionItem;
  *       items: {@link CancellationApplier} subtracts a cancelled item's own contribution, and
  *       "playCountExclCancelled" counts plays with a surviving transaction -- so a live item
  *       joining a play that cancels had emptied brings it back, not only a new play.</li>
- *   <li>"productId" and "currency" = LEAST over the group's non-null values. A group's items are
- *       expected to agree; if they do not, the smallest value wins regardless of arrival order
- *       rather than whichever item happened to arrive first.</li>
+ *   <li>"productId", "productType" and "currency" = each LEAST over the group's non-null values.
+ *       A group's items are expected to agree; if they do not, the smallest value wins regardless
+ *       of arrival order rather than whichever item happened to arrive first.</li>
  * </ul>
  */
 @Component
@@ -55,9 +57,11 @@ public class RollupUpdater {
     private static final String SESSION_MARKER = "";
 
     private final DSLContext dsl;
+    private final TxTypeRegistry txTypes;
 
-    public RollupUpdater(DSLContext dsl) {
+    public RollupUpdater(DSLContext dsl, TxTypeRegistry txTypes) {
         this.dsl = dsl;
+        this.txTypes = txTypes;
     }
 
     /**
@@ -84,7 +88,7 @@ public class RollupUpdater {
             return RollupResult.NONE;
         }
 
-        MoneyDirection direction = MoneyDirection.ofType(item.type());
+        MoneyDirection direction = txTypes.directionOf(item.type());
         BigDecimal plays = direction == MoneyDirection.PLAY ? item.amount().abs() : BigDecimal.ZERO;
         BigDecimal wins = direction == MoneyDirection.WIN ? item.amount().abs() : BigDecimal.ZERO;
         Contribution contribution = new Contribution(
@@ -109,33 +113,36 @@ public class RollupUpdater {
         OffsetDateTime oldStart = session.previousStart() != null
                 ? session.previousStart()
                 : session.startedAt();
-        Integer oldProductId = session.isNew() ? null : sessionProductId(item, oldStart);
+        Record2<String, String> oldProduct = session.isNew() ? null : sessionProduct(item, oldStart);
         if (session.previousStart() != null) {
             moveSession(item, session.previousStart(), session.startedAt());
         }
         SessionLabel label = upsertSession(contribution, session.startedAt(), playIsNew, playIsLive);
-        Integer productId = label.productId();
 
         boolean keyChanged = !session.isNew()
-                && (session.previousStart() != null || !Objects.equals(oldProductId, productId));
+                && (session.previousStart() != null
+                        || !Objects.equals(oldProduct.value1(), label.productId())
+                        || !Objects.equals(oldProduct.value2(), label.productType()));
         return new RollupResult(
                 session.isNew(),
                 playIsNew,
                 session.startedAt().toInstant(),
-                productId,
+                label.productId(),
+                label.productType(),
                 label.currency(),
                 keyChanged ? oldStart.toInstant() : null,
-                keyChanged ? oldProductId : null,
+                keyChanged ? oldProduct.value2() : null,
                 keyChanged);
     }
 
-    private Integer sessionProductId(ProjectionItem item, OffsetDateTime startedAt) {
-        return dsl.select(WQ_SESSION.productId)
+    /** The session's (productId, productType) before this item is folded in. */
+    private Record2<String, String> sessionProduct(ProjectionItem item, OffsetDateTime startedAt) {
+        return dsl.select(WQ_SESSION.productId, WQ_SESSION.productType)
                 .from(WQ_SESSION)
                 .where(WQ_SESSION.userId.eq(item.userId()),
                        WQ_SESSION.startedAt.eq(startedAt),
                        WQ_SESSION.batchId.eq(item.batchId()))
-                .fetchSingle(WQ_SESSION.productId);
+                .fetchSingle();
     }
 
     /**
@@ -211,6 +218,7 @@ public class RollupUpdater {
                 .set(WQ_PLAY.startedAt, startedAt)
                 .set(WQ_PLAY.endedAt, c.at())
                 .set(WQ_PLAY.productId, item.productId())
+                .set(WQ_PLAY.productType, item.productType())
                 .set(WQ_PLAY.currency, item.currency())
                 .set(WQ_PLAY.txCount, 1)
                 .set(WQ_PLAY.txCountExclCancelled, 1)
@@ -224,6 +232,7 @@ public class RollupUpdater {
                 .doUpdate()
                 .set(WQ_PLAY.endedAt, latest(WQ_PLAY.endedAt))
                 .set(WQ_PLAY.productId, least(WQ_PLAY.productId))
+                .set(WQ_PLAY.productType, least(WQ_PLAY.productType))
                 .set(WQ_PLAY.currency, least(WQ_PLAY.currency))
                 .set(WQ_PLAY.txCount, summed(WQ_PLAY.txCount))
                 .set(WQ_PLAY.txCountExclCancelled, summed(WQ_PLAY.txCountExclCancelled))
@@ -242,7 +251,7 @@ public class RollupUpdater {
      * @param playIsNew  the item created its play: +1 playCount
      * @param playIsLive the item is its play's only surviving transaction (new, or emptied by
      *                   cancels): +1 playCountExclCancelled
-     * @return the session's productId and currency after the fold.
+     * @return the session's productId, productType and currency after the fold.
      */
     private SessionLabel upsertSession(
             Contribution c, OffsetDateTime startedAt, boolean playIsNew, boolean playIsLive) {
@@ -255,6 +264,7 @@ public class RollupUpdater {
                 .set(WQ_SESSION.startedAt, startedAt)
                 .set(WQ_SESSION.endedAt, c.at())
                 .set(WQ_SESSION.productId, item.productId())
+                .set(WQ_SESSION.productType, item.productType())
                 .set(WQ_SESSION.currency, item.currency())
                 .set(WQ_SESSION.txCount, 1)
                 .set(WQ_SESSION.txCountExclCancelled, 1)
@@ -270,6 +280,7 @@ public class RollupUpdater {
                 .doUpdate()
                 .set(WQ_SESSION.endedAt, latest(WQ_SESSION.endedAt))
                 .set(WQ_SESSION.productId, least(WQ_SESSION.productId))
+                .set(WQ_SESSION.productType, least(WQ_SESSION.productType))
                 .set(WQ_SESSION.currency, least(WQ_SESSION.currency))
                 .set(WQ_SESSION.txCount, summed(WQ_SESSION.txCount))
                 .set(WQ_SESSION.txCountExclCancelled, summed(WQ_SESSION.txCountExclCancelled))
@@ -281,14 +292,14 @@ public class RollupUpdater {
                 .set(WQ_SESSION.totalPlaysExclCancelled, summed(WQ_SESSION.totalPlaysExclCancelled))
                 .set(WQ_SESSION.totalWinsExclCancelled, summed(WQ_SESSION.totalWinsExclCancelled))
                 .set(WQ_SESSION.netExclCancelled, summed(WQ_SESSION.netExclCancelled))
-                .returning(WQ_SESSION.productId, WQ_SESSION.currency)
+                .returning(WQ_SESSION.productId, WQ_SESSION.productType, WQ_SESSION.currency)
                 .fetchSingle()
-                .map(r -> new SessionLabel(
-                        r.get(WQ_SESSION.productId), r.get(WQ_SESSION.currency)));
+                .map(r -> new SessionLabel(r.get(WQ_SESSION.productId),
+                        r.get(WQ_SESSION.productType), r.get(WQ_SESSION.currency)));
     }
 
-    /** The session's non-key labels after a fold: both LEAST over its items. */
-    private record SessionLabel(Integer productId, String currency) {
+    /** The session's labels after a fold: each LEAST over its items. */
+    private record SessionLabel(String productId, String productType, String currency) {
     }
 
     /** existing + incoming, for ON CONFLICT DO UPDATE. */

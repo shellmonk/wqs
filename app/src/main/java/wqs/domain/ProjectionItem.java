@@ -16,13 +16,19 @@ import java.time.Instant;
  * A blank {@code batchId} or {@code subBatchId} is normalised to null here, at the domain
  * boundary: "no session" and "no play" have exactly one representation, and the empty string --
  * which "wqGroupLocator" reserves as the session marker -- is unreachable from input.
+ *
+ * {@code productId} and {@code productType} are the wire strings (spec 4.1), normalised the same
+ * way. The empty string is the counters' ALL-product-types sentinel, so it too must be
+ * unreachable from input. {@code type} is a "wqTxType" id (plan D2), never 0 -- the
+ * ALL-transaction-types sentinel.
  */
 public record ProjectionItem(
         long userId,
         SourceKind source,
         String sourceId,
         Instant occurredAt,
-        Integer productId,
+        String productId,
+        String productType,
         String batchId,
         String subBatchId,
         short type,
@@ -42,6 +48,12 @@ public record ProjectionItem(
         if (amount == null) {
             throw new IllegalArgumentException("amount is required");
         }
+        if (type < 1) {
+            throw new IllegalArgumentException(
+                    "type " + type + " is not a transaction-type id (ids start at 1; 0 is ALL)");
+        }
+        productId = blankToNull(productId);
+        productType = blankToNull(productType);
         batchId = blankToNull(batchId);
         subBatchId = blankToNull(subBatchId);
         cancels = blankToNull(cancels);

@@ -94,8 +94,8 @@ class PartitionManagerTest extends PostgresTestBase {
         for (String day : List.of("2031-01-01", "2031-01-31", "2031-02-01", "2031-02-28")) {
             dsl().execute("""
                           insert into "wqCountDay"
-                            ("userId","viewKind","pageUnit","productId","period","cntAll","cntExclCancelled")
-                          values (1, 1, 0, 0, date '%s', 1, 1)
+                            ("userId","viewKind","pageUnit","productType","typeId","period","cntAll","cntExclCancelled")
+                          values (1, 1, 0, '', 0, date '%s', 1, 1)
                           """.formatted(day));
         }
 

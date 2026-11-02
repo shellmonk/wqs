@@ -45,10 +45,6 @@ public final class NaiveOffsetOracle {
         // ISO-8601 with Z: an explicit UTC instant, independent of the session TimeZone.
         binds.add(from.toString());
         binds.add(to.toString());
-        if (f.productId() != null) {
-            w.append(" and \"productId\" = ?");
-            binds.add(f.productId());
-        }
         if (f.excludeCancelled()) {
             w.append(" and not \"cancelled\"");
         }
@@ -61,7 +57,7 @@ public final class NaiveOffsetOracle {
                 SourceKind.ofCode(r.get("source", Integer.class)).name(),
                 r.get("sourceId", String.class),
                 r.get("occurredAt", OffsetDateTime.class).toInstant(),
-                r.get("productId", Integer.class),
+                r.get("productId", String.class),
                 r.get("batchId", String.class),
                 r.get("subBatchId", String.class),
                 r.get("type", Short.class),

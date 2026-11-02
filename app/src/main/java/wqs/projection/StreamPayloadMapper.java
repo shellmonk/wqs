@@ -24,6 +24,8 @@ public interface StreamPayloadMapper {
     @Mapping(target = "cancels", source = "cancelsTransactionId")
     @Mapping(target = "source", expression = "java(wqs.domain.SourceKind.TRANSACTION)")
     @Mapping(target = "detailJson", source = "extra", qualifiedByName = "extraToJson")
+    // The phase-4 wire shape carries no product type; the real decoder (phase 5 Task 2) does.
+    @Mapping(target = "productType", ignore = true)
     ProjectionItem toItem(StreamPayload payload);
 
     /** MapStruct cannot infer a mapping for an open-ended blob, so it is explicit (spec 2.3 rule 3). */

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 
 /**
  * Negative controls for {@link ProjectionInvariants}: a projection the writer built is clean, and
@@ -28,14 +29,14 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
         reset();
         invariants = new ProjectionInvariants(dsl());
         writer.apply(new ProjectionBatch("s", List.of(
-                tx("t1", "p1", T0, (short) 1, "5.0000"),
-                tx("t2", "p2", T0.plusSeconds(30), (short) 2, "-7.0000"),
+                tx("t1", "p1", T0, TxTypes.PLAY, "5.0000"),
+                tx("t2", "p2", T0.plusSeconds(30), TxTypes.WIN, "-7.0000"),
                 // A /cc-only item a day earlier at a lower product: the session's key moves.
                 new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a1",
-                        T0.minusSeconds(86_400), 7, "b1", null, (short) 9,
+                        T0.minusSeconds(86_400), "P07", "bingo", "b1", null, TxTypes.NEUTRAL,
                         new BigDecimal("1.0000"), "EUR", null, null, null),
                 new ProjectionItem(1L, SourceKind.PAYMENT, "pay1", T0.plusSeconds(3_600), null,
-                        null, null, (short) 9, new BigDecimal("20.0000"), "EUR", null, null, null),
+                        null, null, null, TxTypes.NEUTRAL, new BigDecimal("20.0000"), "EUR", null, null, null),
                 cancel(SourceKind.TRANSACTION, "c1", "t1"),
                 cancel(SourceKind.PAYMENT, "pc1", "pay1")), 1L));
 
@@ -48,27 +49,42 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     void a_bumped_month_tier_product_counter_is_counter_drift() {
         execute("""
                 update "wqCountMonth" set "cntAll" = "cntAll" + 1
-                where "viewKind" = 2 and "pageUnit" = 1 and "productId" = 7""");
+                where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
-                .startsWith("counter mismatch").contains("tier=month", "productId=7");
+                .startsWith("counter mismatch").contains("tier=month", "productType=bingo");
+    }
+
+    /**
+     * Ruling R1: the write path keys every counter at the ALL-types sentinel 0 for now, so a row
+     * at a real type id is drift -- the oracle compares "typeId" too, not only the product type.
+     */
+    @Test
+    void a_counter_row_at_a_real_type_id_is_counter_drift() {
+        execute("""
+                update "wqCountMonth" set "typeId" = 1
+                where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
+
+        assertThat(invariants.counterDrift()).hasSize(2)
+                .anySatisfy(d -> assertThat(d).startsWith("orphan counter row").contains("typeId=1"))
+                .anySatisfy(d -> assertThat(d).startsWith("missing counter row").contains("typeId=0"));
     }
 
     @Test
     void a_stored_zero_counter_row_is_counter_drift() {
         execute("""
                 insert into "wqCountDay"
-                values (1, 1, 1, 99, date '2034-03-30', 0, 0)""");
+                values (1, 1, 1, 'ghost', 0, date '2034-03-30', 0, 0)""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
-                .startsWith("orphan counter row").contains("productId=99");
+                .startsWith("orphan counter row").contains("productType=ghost");
     }
 
     @Test
     void a_deleted_counter_row_is_counter_drift() {
         execute("""
                 delete from "wqCountDay"
-                where "viewKind" = 2 and "pageUnit" = 0 and "productId" = 0
+                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "typeId" = 0
                   and "period" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
@@ -80,7 +96,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
         // /cc items on April 1: pay1 (cancelled), c1 and pc1 -- excl is 2 of 3.
         execute("""
                 update "wqCountDay" set "cntExclCancelled" = "cntExclCancelled" - 1
-                where "viewKind" = 2 and "pageUnit" = 0 and "productId" = 0
+                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "typeId" = 0
                   and "period" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
@@ -202,6 +218,26 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
                         "expectedCurrency=EUR", "storedCurrency=USD");
     }
 
+    /** The counter key is the session's product type, so the page row must carry the right one. */
+    @Test
+    void a_session_row_with_another_product_type_is_high_level_drift() {
+        execute("""
+                update "wqCcHighLevel" set "productType" = 'lottery' where "kind" = 0""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("page row key mismatch").contains("view=CC",
+                        "expectedProductType=bingo", "storedProductType=lottery");
+    }
+
+    @Test
+    void a_session_with_another_product_type_is_aggregation_drift() {
+        execute("""
+                update "wqSession" set "productType" = 'lottery'""");
+
+        assertThat(invariants.aggregationDrift()).singleElement().asString()
+                .startsWith("session mismatch").contains("batchId=b1");
+    }
+
     @Test
     void a_page_row_at_a_stale_key_is_high_level_drift() {
         execute("""
@@ -282,12 +318,12 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
     private static ProjectionItem tx(
             String id, String subBatchId, Instant at, short type, String amount) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, 11, "b1", subBatchId,
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, "P11", "instants", "b1", subBatchId,
                 type, new BigDecimal(amount), "EUR", null, null, null);
     }
 
     private static ProjectionItem cancel(SourceKind source, String id, String cancels) {
-        return new ProjectionItem(1L, source, id, T0.plusSeconds(7_200), 11, null, null,
-                (short) 2, new BigDecimal("-1.0000"), "EUR", null, cancels, null);
+        return new ProjectionItem(1L, source, id, T0.plusSeconds(7_200), "P11", "instants", null, null,
+                TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, cancels, null);
     }
 }

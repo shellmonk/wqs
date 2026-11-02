@@ -14,16 +14,16 @@ import wqs.domain.ViewKind;
  * @param inserted            views where a row was actually inserted this call: a new session, a
  *                            session row materialised in a view for the first time, or an
  *                            unsessioned item's own row. Counters increment by one in each view,
- *                            at the CURRENT key (the session's start and productId, or the item's
- *                            occurredAt and productId).
- * @param moved               views where an existing session row changed start and/or productId
+ *                            at the CURRENT key (the session's start and productType, or the
+ *                            item's occurredAt and productType).
+ * @param moved               views where an existing session row changed start and/or product
  *                            this call. Counters shift those views from the previous key to the
  *                            current one. A product-only change is included, because the counter
- *                            key contains productId although the index primary key does not.
+ *                            key contains productType although the index primary key does not.
  * @param movedFrom           the session's previous start; when only the product changed this is
  *                            the unchanged start. Null when {@code moved} is empty.
- * @param movedFromProductId  the session's previous productId (may be null); meaningful only
- *                            when {@code moved} is non-empty.
+ * @param movedFromProductType the session's previous productType (may be null); meaningful
+ *                            only when {@code moved} is non-empty.
  * @param movedVisible        for each view in {@code moved}, the moved row's
  *                            "visibleExclCancelled" -- whether the row is in the excl-cancelled
  *                            tally, which decides whether the counter move also shifts
@@ -38,7 +38,7 @@ public record HighLevelResult(
         Set<ViewKind> inserted,
         Set<ViewKind> moved,
         Instant movedFrom,
-        Integer movedFromProductId,
+        String movedFromProductType,
         Map<ViewKind, Boolean> movedVisible,
         Set<ViewKind> revived) {
 

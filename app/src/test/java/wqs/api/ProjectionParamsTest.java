@@ -13,7 +13,7 @@ class ProjectionParamsTest {
     private static final Instant DOMAIN_END = Instant.parse("2200-01-01T00:00:00Z");
 
     private static ProjectionParams params(String from, String to) {
-        return ProjectionParams.validate(Instant.parse(from), Instant.parse(to), 0, null, false, 1, 10);
+        return ProjectionParams.validate(Instant.parse(from), Instant.parse(to), 0, false, 1, 10);
     }
 
     @Test

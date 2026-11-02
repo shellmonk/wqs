@@ -28,7 +28,9 @@ class StreamPayloadMapperTest {
         assertThat(item.userId()).isEqualTo(7L);
         assertThat(item.source()).isEqualTo(SourceKind.TRANSACTION);
         assertThat(item.occurredAt()).isEqualTo(occurredAt);
-        assertThat(item.productId()).isEqualTo(11);
+        // The phase-4 wire carries an integer id and no product type (phase 5 Task 2 replaces it).
+        assertThat(item.productId()).isEqualTo("11");
+        assertThat(item.productType()).isNull();
         assertThat(item.batchId()).isEqualTo("b-1");
         assertThat(item.subBatchId()).isEqualTo("p-1");
         assertThat(item.type()).isEqualTo((short) 1);

@@ -19,8 +19,10 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
+import wqs.db.TxTypeRegistry;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 import wqs.ingest.stream.StreamOffsetStore;
 
 /**
@@ -53,8 +55,9 @@ class DrainedCancelFailureTest extends PostgresTestBase {
         @Bean
         @Primary
         CancellationApplier trappedCancellationApplier(
-                DSLContext dsl, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore) {
-            return new CancellationApplier(dsl, counterUpdater, pendingCancelStore) {
+                DSLContext dsl, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
+                TxTypeRegistry txTypes) {
+            return new CancellationApplier(dsl, counterUpdater, pendingCancelStore, txTypes) {
                 @Override
                 public boolean apply(ProjectionItem cancel) {
                     boolean result = super.apply(cancel);
@@ -108,13 +111,13 @@ class DrainedCancelFailureTest extends PostgresTestBase {
     }
 
     private static ProjectionItem tx(String id) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0, 11, "b1", "p-" + id,
-                (short) 1, new BigDecimal("5.0000"), "EUR", null, null, null);
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0, "P11", "instants", "b1", "p-" + id,
+                TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private static ProjectionItem cancel(String id, String cancels) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0.plusSeconds(60), 11, null, null,
-                (short) 1, new BigDecimal("5.0000"), "EUR", null, cancels, null);
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0.plusSeconds(60), "P11", "instants", null, null,
+                TxTypes.CANCEL, new BigDecimal("5.0000"), "EUR", null, cancels, null);
     }
 
     private static boolean cancelled(String sourceId) {

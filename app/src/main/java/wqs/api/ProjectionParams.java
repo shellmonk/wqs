@@ -15,6 +15,9 @@ import wqs.domain.DataDomain;
  * agree), then clamped into {@link DataDomain} (ruling C1: an expanded ISO year such as +1000000
  * would otherwise decompose into millions of month segments and reach Postgres out of range).
  *
+ * <p>The phase-4 {@code productId} filter is gone (ruling R2): products are strings since V10
+ * and the counters key on product type. The contract's list filters arrive in phase 5 Task 7.
+ *
  * <p>Every 400 rule is checked before {@link #requireLevel0}'s 501, so a malformed request is
  * reported as malformed whatever level it asks for.
  */
@@ -22,20 +25,19 @@ public record ProjectionParams(
         Instant from,
         Instant to,
         AggregationLevel level,
-        Integer productId,
         boolean excludeCancelled,
         long page,
         long pageSize) {
 
     /**
      * @throws InvalidParameterException {@code aggregationLevel} outside 0..2; {@code from > to}
-     *         (D6; {@code from == to} is a valid empty range); {@code productId <= 0} (D5: 0 is
-     *         the counter sentinel); {@code page < 1}; {@code pageSize < 1}. The {@code from > to}
+     *         (D6; {@code from == to} is a valid empty range); {@code page < 1};
+     *         {@code pageSize < 1}. The {@code from > to}
      *         check sees the original values; bounds beyond the same domain edge clamp to an
      *         empty range ({@code from == to}).
      */
     public static ProjectionParams validate(Instant from, Instant to, int aggregationLevel,
-            Integer productId, boolean excludeCancelled, long page, long pageSize) {
+            boolean excludeCancelled, long page, long pageSize) {
         AggregationLevel level;
         try {
             level = AggregationLevel.of(aggregationLevel);
@@ -45,16 +47,13 @@ public record ProjectionParams(
         if (from.isAfter(to)) {
             throw new InvalidParameterException("from", "must not be after to");
         }
-        if (productId != null && productId < 1) {
-            throw new InvalidParameterException("productId", "must be >= 1 when given");
-        }
         if (page < 1) {
             throw new InvalidParameterException("page", "must be >= 1");
         }
         if (pageSize < 1) {
             throw new InvalidParameterException("pageSize", "must be >= 1");
         }
-        return new ProjectionParams(normalise(from), normalise(to), level, productId, excludeCancelled, page, pageSize);
+        return new ProjectionParams(normalise(from), normalise(to), level, excludeCancelled, page, pageSize);
     }
 
     /** Truncates to microseconds (M3), then clamps into the data domain (C1). */

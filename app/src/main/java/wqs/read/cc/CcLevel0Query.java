@@ -94,9 +94,6 @@ public class CcLevel0Query implements Level0Query {
         Condition c = WQ_CC_ITEM.userId.eq(f.userId())
                 .and(WQ_CC_ITEM.occurredAt.ge(utc(lo)))
                 .and(WQ_CC_ITEM.occurredAt.lt(utc(hi)));
-        if (f.productId() != null) {
-            c = c.and(WQ_CC_ITEM.productId.eq(f.productId()));
-        }
         if (f.excludeCancelled()) {
             c = c.and(DSL.not(WQ_CC_ITEM.cancelled));
         }

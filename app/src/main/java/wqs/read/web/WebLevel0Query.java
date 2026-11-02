@@ -94,9 +94,6 @@ public class WebLevel0Query implements Level0Query {
         Condition c = WQ_WEB_ITEM.userId.eq(f.userId())
                 .and(WQ_WEB_ITEM.occurredAt.ge(utc(lo)))
                 .and(WQ_WEB_ITEM.occurredAt.lt(utc(hi)));
-        if (f.productId() != null) {
-            c = c.and(WQ_WEB_ITEM.productId.eq(f.productId()));
-        }
         if (f.excludeCancelled()) {
             c = c.and(DSL.not(WQ_WEB_ITEM.cancelled));
         }

@@ -20,11 +20,12 @@ import org.springframework.test.context.TestPropertySource;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
+import wqs.gen.TxTypes;
 
 @SpringBootTest
 class ProjectionReaderTest extends ReadPropertyBase {
 
-    private static final Level0Filter ALL = new Level0Filter(1L, null, false);
+    private static final Level0Filter ALL = new Level0Filter(1L, false);
 
     @BeforeEach
     void clean() {
@@ -89,7 +90,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
                     .hasSize(5);
         }
         ProjectionPage empty = reader.readLevel0(webQuery,
-                new Level0Request(new Level0Filter(4L, null, false), from, to, Integer.MAX_VALUE, Integer.MAX_VALUE));
+                new Level0Request(new Level0Filter(4L, false), from, to, Integer.MAX_VALUE, Integer.MAX_VALUE));
         assertThat(empty.items()).isEmpty();
         assertThat(empty.totalItems()).isZero();
         assertThat(empty.totalPages()).isZero();
@@ -332,7 +333,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     static ProjectionItem item(String id, String at) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), 11, null, null,
-                (short) 1, new BigDecimal("1.0000"), "EUR", null, null, null);
+        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "instants", null, null,
+                TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 }

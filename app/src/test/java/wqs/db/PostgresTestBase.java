@@ -42,6 +42,21 @@ public abstract class PostgresTestBase {
         return DSL.using(dataSource, SQLDialect.POSTGRES);
     }
 
+    private static volatile TxTypeRegistry txTypes;
+
+    /**
+     * A transaction-type registry over the shared container, for tests that build updaters by
+     * hand. Lookups of seeded types never write; an unseen code is registered in its own
+     * transaction, as in the app.
+     */
+    protected static TxTypeRegistry txTypes() {
+        if (txTypes == null) {
+            txTypes = new TxTypeRegistry(dsl(),
+                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+        }
+        return txTypes;
+    }
+
     /**
      * Empties every table the projection writer maintains, including the stream offset it
      * commits and the dead letters the ingest path records. The container is shared by all test classes, so clearing only some of them leaves

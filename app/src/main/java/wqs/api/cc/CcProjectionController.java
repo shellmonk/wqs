@@ -36,14 +36,13 @@ public class CcProjectionController {
             @RequestParam("from") @DateTimeFormat(iso = ISO.DATE_TIME) Instant from,
             @RequestParam("to") @DateTimeFormat(iso = ISO.DATE_TIME) Instant to,
             @RequestParam("aggregationLevel") int aggregationLevel,
-            @RequestParam(name = "productId", required = false) Integer productId,
             @RequestParam(name = "excludeCancelledTransactions", defaultValue = "false") boolean excludeCancelled,
             @RequestParam("page") long page,
             @RequestParam("pageSize") long pageSize) {
         long user = ProjectionParams.requireUserId(userId);
         ProjectionParams p = ProjectionParams.validate(
-                from, to, aggregationLevel, productId, excludeCancelled, page, pageSize).requireLevel0();
+                from, to, aggregationLevel, excludeCancelled, page, pageSize).requireLevel0();
         return metrics.timeRequest(ENDPOINT, p.level().value(), p.page(), () -> service.level0(
-                user, p.from(), p.to(), p.productId(), p.excludeCancelled(), p.page(), p.pageSize()));
+                user, p.from(), p.to(), p.excludeCancelled(), p.page(), p.pageSize()));
     }
 }

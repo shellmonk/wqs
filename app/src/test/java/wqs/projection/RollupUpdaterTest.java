@@ -23,6 +23,8 @@ import wqs.db.generated.tables.records.WqPlayRecord;
 import wqs.db.generated.tables.records.WqSessionRecord;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.Products;
+import wqs.gen.TxTypes;
 
 class RollupUpdaterTest extends PostgresTestBase {
 
@@ -139,7 +141,7 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         RollupResult result = apply(win("t3", "b1", "p2", "1.0000", T0.plusSeconds(30)));
 
-        assertThat(result).isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
+        assertThat(result).isEqualTo(rr(false, false, T0, 11, null, null, false));
         assertThat(play("b1", "p2").getStartedAt()).isEqualTo(utc(T0.plusSeconds(30)));
         assertThat(play("b1", "p2").getEndedAt()).isEqualTo(utc(T0.plusSeconds(50)));
         assertThat(session("b1").getStartedAt()).isEqualTo(utc(T0));
@@ -153,7 +155,7 @@ class RollupUpdaterTest extends PostgresTestBase {
                 wager("t1", "b1", "p1", "5.0000", T0, 12),
                 win("t2", "b1", "p1", "7.5000", T0.plusSeconds(20)),
                 wager("t3", "b1", "p2", "2.0000", T0.plusSeconds(40)),
-                item("t4", "b1", "p2", "0.5000", T0.plusSeconds(50), (short) 7, 11),
+                item("t4", "b1", "p2", "0.5000", T0.plusSeconds(50), TxTypes.NEUTRAL, 11),
                 win("t5", "b1", "p2", "1.2500", T0.plusSeconds(80)));
         List<ProjectionItem> shuffled = List.of(
                 chronological.get(3), chronological.get(1), chronological.get(4),
@@ -172,7 +174,8 @@ class RollupUpdaterTest extends PostgresTestBase {
         assertThat(session.getEndedAt()).isEqualTo(utc(T0.plusSeconds(80)));
         assertThat(session.getTxCount()).isEqualTo(5);
         assertThat(session.getPlayCount()).isEqualTo(2);
-        assertThat(session.getProductId()).isEqualTo(11);
+        assertThat(session.getProductId()).isEqualTo(Products.id(11));
+        assertThat(session.getProductType()).isEqualTo(Products.type(11));
         assertThat(session.getTotalPlays()).isEqualByComparingTo("7.0000");
         assertThat(session.getTotalWins()).isEqualByComparingTo("8.7500");
         assertThat(session.getNet()).isEqualByComparingTo("1.7500");
@@ -182,13 +185,13 @@ class RollupUpdaterTest extends PostgresTestBase {
     void the_result_reports_new_groups_and_re_anchoring() {
         Instant start = T0.plusSeconds(100);
         assertThat(apply(wager("t1", "b1", "p1", "5.0000", start)))
-                .isEqualTo(new RollupResult(true, true, start, 11, "EUR", null, null, false));
+                .isEqualTo(rr(true, true, start, 11, null, null, false));
         assertThat(apply(win("t2", "b1", "p1", "1.0000", T0.plusSeconds(150))))
-                .isEqualTo(new RollupResult(false, false, start, 11, "EUR", null, null, false));
+                .isEqualTo(rr(false, false, start, 11, null, null, false));
         assertThat(apply(wager("t3", "b1", "p2", "1.0000", T0.plusSeconds(160))))
-                .isEqualTo(new RollupResult(false, true, start, 11, "EUR", null, null, false));
+                .isEqualTo(rr(false, true, start, 11, null, null, false));
         assertThat(apply(wager("t4", "b1", "p1", "1.0000", T0)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", start, 11, true));
+                .isEqualTo(rr(false, false, T0, 11, start, 11, true));
         assertThat(apply(payment())).isEqualTo(RollupResult.NONE);
     }
 
@@ -197,10 +200,10 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0, 12));
 
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", T0, 12, true));
-        // A higher productId does not displace the LEAST: no key change.
+                .isEqualTo(rr(false, false, T0, 11, T0, 12, true));
+        // A higher product does not displace the LEAST: no key change.
         assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), 13)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
+                .isEqualTo(rr(false, false, T0, 11, null, null, false));
     }
 
     @Test
@@ -208,10 +211,10 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0, null));
 
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", T0, null, true));
-        // A null productId later does not displace the value.
+                .isEqualTo(rr(false, false, T0, 11, T0, null, true));
+        // A null product later does not displace the value.
         assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), null)))
-                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
+                .isEqualTo(rr(false, false, T0, 11, null, null, false));
     }
 
     @Test
@@ -219,8 +222,7 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100), 11));
 
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0, 11)))
-                .isEqualTo(new RollupResult(
-                        false, false, T0, 11, "EUR", T0.plusSeconds(100), 11, true));
+                .isEqualTo(rr(false, false, T0, 11, T0.plusSeconds(100), 11, true));
     }
 
     @Test
@@ -228,8 +230,7 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100), 12));
 
         assertThat(apply(wager("t2", "b1", "p2", "1.0000", T0, 11)))
-                .isEqualTo(new RollupResult(
-                        false, true, T0, 11, "EUR", T0.plusSeconds(100), 12, true));
+                .isEqualTo(rr(false, true, T0, 11, T0.plusSeconds(100), 12, true));
     }
 
     @Test
@@ -237,14 +238,14 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0, 11));
 
         assertThat(apply(win("t2", "b1", "p1", "1.0000", T0.plusSeconds(10))))
-                .isEqualTo(new RollupResult(false, false, T0, 11, "EUR", null, null, false));
+                .isEqualTo(rr(false, false, T0, 11, null, null, false));
     }
 
     @Test
     void a_cancellation_touches_no_rollup() {
         ProjectionItem cancel = new ProjectionItem(
-                1L, SourceKind.TRANSACTION, "tx-2", T0, 11, "b1", "p1",
-                (short) 2, new BigDecimal("-5.0000"), "EUR", null, "tx-1", null);
+                1L, SourceKind.TRANSACTION, "tx-2", T0, "P11", "instants", "b1", "p1",
+                TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, "tx-1", null);
 
         assertThat(apply(cancel)).isEqualTo(RollupResult.NONE);
 
@@ -256,13 +257,13 @@ class RollupUpdaterTest extends PostgresTestBase {
     @ParameterizedTest
     @ValueSource(strings = {"", "  "})
     void a_blank_sub_batch_id_rolls_up_into_the_session_only(String blank) {
-        RollupResult first = apply(item("t1", "b1", blank, "5.0000", T0.plusSeconds(100), (short) 1, 11));
-        RollupResult earlier = apply(item("t2", "b1", blank, "1.0000", T0, (short) 1, 11));
+        RollupResult first = apply(item("t1", "b1", blank, "5.0000", T0.plusSeconds(100), TxTypes.PLAY, 11));
+        RollupResult earlier = apply(item("t2", "b1", blank, "1.0000", T0, TxTypes.PLAY, 11));
 
         assertThat(first).isEqualTo(
-                new RollupResult(true, false, T0.plusSeconds(100), 11, "EUR", null, null, false));
+                rr(true, false, T0.plusSeconds(100), 11, null, null, false));
         assertThat(earlier).isEqualTo(
-                new RollupResult(false, false, T0, 11, "EUR", T0.plusSeconds(100), 11, true));
+                rr(false, false, T0, 11, T0.plusSeconds(100), 11, true));
         assertThat(dsl().fetchCount(WQ_SESSION)).isEqualTo(1);
         assertThat(dsl().fetchCount(WQ_PLAY)).isZero();
         WqSessionRecord session = session("b1");
@@ -286,7 +287,7 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     private RollupResult apply(ProjectionItem item) {
-        return dsl().transactionResult(cfg -> new RollupUpdater(DSL.using(cfg)).applyItem(item));
+        return dsl().transactionResult(cfg -> new RollupUpdater(DSL.using(cfg), txTypes()).applyItem(item));
     }
 
     private void clean() {
@@ -309,29 +310,41 @@ class RollupUpdaterTest extends PostgresTestBase {
 
     private static ProjectionItem payment() {
         return new ProjectionItem(
-                1L, SourceKind.PAYMENT, "pay1", T0, null, null, null,
-                (short) 9, new BigDecimal("50.0000"), "EUR", null, null, null);
+                1L, SourceKind.PAYMENT, "pay1", T0, null, null, null, null,
+                TxTypes.NEUTRAL, new BigDecimal("50.0000"), "EUR", null, null, null);
     }
 
     private static ProjectionItem wager(String id, String batch, String play, String amount, Instant at) {
-        return item(id, batch, play, amount, at, (short) 1, 11);
+        return item(id, batch, play, amount, at, TxTypes.PLAY, 11);
     }
 
     private static ProjectionItem wager(
             String id, String batch, String play, String amount, Instant at, Integer productId) {
-        return item(id, batch, play, amount, at, (short) 1, productId);
+        return item(id, batch, play, amount, at, TxTypes.PLAY, productId);
     }
 
     private static ProjectionItem win(String id, String batch, String play, String amount, Instant at) {
-        return item(id, batch, play, amount, at, (short) 2, 11);
+        return item(id, batch, play, amount, at, TxTypes.WIN, 11);
     }
 
     private static ProjectionItem item(
             String id, String batch, String play, String amount, Instant at, short type,
             Integer productId) {
         return new ProjectionItem(
-                1L, SourceKind.TRANSACTION, id, at, productId, batch, play,
+                1L, SourceKind.TRANSACTION, id, at,
+                productId == null ? null : Products.id(productId),
+                productId == null ? null : Products.type(productId), batch, play,
                 type, new BigDecimal(amount), "EUR", null, null, null);
+    }
+
+    /** A RollupResult for test product numbers (see {@link Products}); null is no product. */
+    private static RollupResult rr(boolean sessionIsNew, boolean playIsNew, Instant start,
+                                   Integer product, Instant previousStart, Integer previousProduct,
+                                   boolean keyChanged) {
+        return new RollupResult(sessionIsNew, playIsNew, start,
+                product == null ? null : Products.id(product),
+                product == null ? null : Products.type(product), "EUR", previousStart,
+                previousProduct == null ? null : Products.type(previousProduct), keyChanged);
     }
 
     private static OffsetDateTime utc(Instant instant) {

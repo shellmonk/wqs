@@ -3,12 +3,13 @@ package wqs.read;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import org.jooq.DSLContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.jooq.DSLContext;
 import wqs.config.ReaderDsl;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 import wqs.projection.ProjectionBatch;
 import wqs.projection.ProjectionPropertyBase;
 
@@ -20,8 +21,9 @@ abstract class Level0TestSupport extends ProjectionPropertyBase {
     @Autowired @ReaderDsl protected DSLContext readerDsl;
 
     protected static ProjectionItem item(
-            SourceKind source, String id, String at, Integer product, String cancels, String detail) {
-        return new ProjectionItem(USER, source, id, Instant.parse(at), product, null, null, (short) 1,
+            SourceKind source, String id, String at, String product, String cancels, String detail) {
+        return new ProjectionItem(USER, source, id, Instant.parse(at), product,
+                product == null ? null : "instants", null, null, TxTypes.PLAY,
                 new BigDecimal("1.0000"), "EUR", null, cancels, detail);
     }
 

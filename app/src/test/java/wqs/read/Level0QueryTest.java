@@ -28,15 +28,14 @@ class Level0QueryTest extends Level0TestSupport {
     }
 
     @Test
-    void count_respects_half_open_bounds_product_and_excl() {
+    void count_respects_half_open_bounds_and_excl() {
         project(
-                item(TRANSACTION, "a", "2034-02-01T00:00:00Z", 11, null, null),
-                item(TRANSACTION, "b", "2034-01-31T23:59:59Z", 13, null, null),
-                item(TRANSACTION, "c", "2034-01-31T12:00:00Z", 11, null, null),
-                item(TRANSACTION, "x", "2034-01-31T13:00:00Z", 11, "c", null));
-        Level0Filter all = new Level0Filter(USER, null, false);
-        Level0Filter excl = new Level0Filter(USER, null, true);
-        Level0Filter p11 = new Level0Filter(USER, 11, false);
+                item(TRANSACTION, "a", "2034-02-01T00:00:00Z", "P11", null, null),
+                item(TRANSACTION, "b", "2034-01-31T23:59:59Z", "P13", null, null),
+                item(TRANSACTION, "c", "2034-01-31T12:00:00Z", "P11", null, null),
+                item(TRANSACTION, "x", "2034-01-31T13:00:00Z", "P11", "c", null));
+        Level0Filter all = new Level0Filter(USER, false);
+        Level0Filter excl = new Level0Filter(USER, true);
 
         assertThat(web.count(readerDsl, all, t("2034-02-01T00:00:00Z"), t("2034-02-02T00:00:00Z"))).isEqualTo(1);
         // the boundary item at 02-01T00:00 is excluded by the exclusive upper bound
@@ -44,10 +43,7 @@ class Level0QueryTest extends Level0TestSupport {
         assertThat(web.count(readerDsl, all, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(4);
         // c is cancelled; the cancellation row x is itself an ITEM row and counts
         assertThat(web.count(readerDsl, excl, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(3);
-        assertThat(web.count(readerDsl, p11, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(3);
-        assertThat(web.count(readerDsl, new Level0Filter(USER, 13, true),
-                t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(1);
-        assertThat(web.count(readerDsl, new Level0Filter(USER + 1, null, false),
+        assertThat(web.count(readerDsl, new Level0Filter(USER + 1, false),
                 t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isZero();
     }
 
@@ -56,9 +52,9 @@ class Level0QueryTest extends Level0TestSupport {
         // Ascending itemIds, and the plan is forced to seq-scan + sort so index order cannot
         // mask a missing tie-break.
         for (int i = 0; i < 12; i++) {
-            project(item(TRANSACTION, "t" + i, "2034-02-10T10:00:00Z", 11, null, null));
+            project(item(TRANSACTION, "t" + i, "2034-02-10T10:00:00Z", "P11", null, null));
         }
-        Level0Filter f = new Level0Filter(USER, null, false);
+        Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
         List<ItemKey> all = readerDsl.transactionResult(cfg -> {
@@ -93,7 +89,7 @@ class Level0QueryTest extends Level0TestSupport {
                            timestamptz '2034-05-01T00:00:00Z' + i * interval '1 second', 1, 1, 'EUR'
                     from generate_series(0, 39999) as i
                     """, USER);
-            Level0Filter f = new Level0Filter(USER, null, false);
+            Level0Filter f = new Level0Filter(USER, false);
             List<ItemKey> keys = web.keys(readerDsl, f, base, base.plusSeconds(50_000), 0, 50_000);
             assertThat(keys).hasSize(40_000);
             List<ItemEntry> entries = web.fetch(readerDsl, USER, keys);
@@ -114,9 +110,9 @@ class Level0QueryTest extends Level0TestSupport {
     @Test
     void fetch_joins_the_key_array_through_unnest_not_a_per_row_any() {
         project(
-                item(TRANSACTION, "a", "2034-02-01T01:00:00Z", 11, null, null),
-                item(PAYMENT, "b", "2034-02-02T01:00:00Z", 11, null, null));
-        Level0Filter f = new Level0Filter(USER, null, false);
+                item(TRANSACTION, "a", "2034-02-01T01:00:00Z", "P11", null, null),
+                item(PAYMENT, "b", "2034-02-02T01:00:00Z", "P11", null, null));
+        Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
         for (Level0Query q : List.of(web, cc)) {
@@ -139,10 +135,10 @@ class Level0QueryTest extends Level0TestSupport {
     @Test
     void fetch_returns_payload_in_key_order_with_raw_detail() throws Exception {
         project(
-                item(TRANSACTION, "jan", "2034-01-31T23:00:00Z", 11, null, "{\"gameCode\": \"x\"}"),
-                item(TRANSACTION, "feb1", "2034-02-01T01:00:00Z", 11, null, null),
-                item(TRANSACTION, "feb2", "2034-02-02T01:00:00Z", 11, null, null));
-        Level0Filter f = new Level0Filter(USER, null, false);
+                item(TRANSACTION, "jan", "2034-01-31T23:00:00Z", "P11", null, "{\"gameCode\": \"x\"}"),
+                item(TRANSACTION, "feb1", "2034-02-01T01:00:00Z", "P11", null, null),
+                item(TRANSACTION, "feb2", "2034-02-02T01:00:00Z", "P11", null, null));
+        Level0Filter f = new Level0Filter(USER, false);
         List<ItemKey> keys = web.keys(readerDsl, f, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"), 0, 10);
         assertThat(keys).hasSize(3);
 
@@ -163,8 +159,8 @@ class Level0QueryTest extends Level0TestSupport {
 
     @Test
     void web_query_never_sees_cc_only_sources() {
-        project(item(PAYMENT, "pay", "2034-02-10T10:00:00Z", 11, null, null));
-        Level0Filter f = new Level0Filter(USER, null, false);
+        project(item(PAYMENT, "pay", "2034-02-10T10:00:00Z", "P11", null, null));
+        Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
         assertThat(web.count(readerDsl, f, lo, hi)).isZero();

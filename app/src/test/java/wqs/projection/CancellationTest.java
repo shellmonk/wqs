@@ -20,6 +20,8 @@ import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.Products;
+import wqs.gen.TxTypes;
 
 /**
  * Cancellation (spec 6.3): marking the original, subtracting its own contribution from the
@@ -113,7 +115,7 @@ class CancellationTest extends PostgresTestBase {
 
     @Test
     void cancelling_a_win_subtracts_it_from_wins_not_plays() {
-        apply(tx("t1", "b1", "p1"), txTyped("w1", "b1", "p1", (short) 2, "-7.0000"));
+        apply(tx("t1", "b1", "p1"), txTyped("w1", "b1", "p1", TxTypes.WIN, "-7.0000"));
 
         apply(cancelOf("c1", "w1"));
 
@@ -130,7 +132,7 @@ class CancellationTest extends PostgresTestBase {
         apply(payment("pay1", T0));
 
         apply(new ProjectionItem(1L, SourceKind.PAYMENT, "payc", T0.plusSeconds(60), null,
-                null, null, (short) 9, new BigDecimal("-20.0000"), "EUR", null, "pay1", null));
+                null, null, null, TxTypes.CANCEL, new BigDecimal("-20.0000"), "EUR", null, "pay1", null));
 
         assertThat(rowVisible(CC, SourceKind.PAYMENT.code(), "pay1")).isFalse();
         assertThat(highLevelSentinel(CC, "cntExclCancelled")).isZero();
@@ -255,7 +257,7 @@ class CancellationTest extends PostgresTestBase {
         apply(tx("x1", "b1", "p1"), payment("x1", T0.plusSeconds(5)));
 
         apply(new ProjectionItem(1L, SourceKind.PAYMENT, "payc", T0.plusSeconds(60), null,
-                null, null, (short) 9, new BigDecimal("-20.0000"), "EUR", null, "x1", null));
+                null, null, null, TxTypes.CANCEL, new BigDecimal("-20.0000"), "EUR", null, "x1", null));
 
         assertThat(cancelledOf(CC, SourceKind.PAYMENT, "x1")).isTrue();
         assertThat(cancelledOf(CC, SourceKind.TRANSACTION, "x1")).isFalse();
@@ -284,8 +286,8 @@ class CancellationTest extends PostgresTestBase {
 
     @Test
     void a_parked_cancel_is_rebuilt_faithfully_with_its_real_source() {
-        ProjectionItem cancel = new ProjectionItem(7L, SourceKind.PAYMENT, "pc1", T0, 4, "b9",
-                "p9", (short) 9, new BigDecimal("-3.5000"), "USD", new BigDecimal("1.2500"),
+        ProjectionItem cancel = new ProjectionItem(7L, SourceKind.PAYMENT, "pc1", T0, "P04", "keno", "b9",
+                "p9", TxTypes.CANCEL, new BigDecimal("-3.5000"), "USD", new BigDecimal("1.2500"),
                 "pay9", "{\"why\": \"chargeback\"}");
         writer.apply(new ProjectionBatch("s", List.of(cancel), 1L));
 
@@ -377,7 +379,7 @@ class CancellationTest extends PostgresTestBase {
         apply(txProduct("t9", "b1", "p9", T0.plusSeconds(500), 3));
 
         assertThat(sessionVisible(WEB)).isTrue();
-        assertThat(highLevelProduct(WEB)).isEqualTo(3);
+        assertThat(highLevelProduct(WEB)).isEqualTo("P03");
         assertNoDrift();
 
         // And cancelling within the re-anchored session uncounts at the session's NEW key.
@@ -497,16 +499,16 @@ class CancellationTest extends PostgresTestBase {
     }
 
     private ProjectionItem txProduct(
-            String id, String batchId, String subBatchId, Instant at, Integer productId) {
+            String id, String batchId, String subBatchId, Instant at, int product) {
         return new ProjectionItem(
-                1L, SourceKind.TRANSACTION, id, at, productId, batchId, subBatchId,
-                (short) 1, new BigDecimal("5.0000"), "EUR", null, null, null);
+                1L, SourceKind.TRANSACTION, id, at, Products.id(product), Products.type(product),
+                batchId, subBatchId, TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private ProjectionItem txTyped(
             String id, String batchId, String subBatchId, short type, String amount) {
         return new ProjectionItem(
-                1L, SourceKind.TRANSACTION, id, T0.plusSeconds(1), 11, batchId, subBatchId,
+                1L, SourceKind.TRANSACTION, id, T0.plusSeconds(1), "P11", "instants", batchId, subBatchId,
                 type, new BigDecimal(amount), "EUR", null, null, null);
     }
 
@@ -516,20 +518,20 @@ class CancellationTest extends PostgresTestBase {
 
     private ProjectionItem cancelOfUser(long userId, String id, String cancels) {
         return new ProjectionItem(
-                userId, SourceKind.TRANSACTION, id, T0.plusSeconds(120), 11, null, null,
-                (short) 2, new BigDecimal("-5.0000"), "EUR", null, cancels, null);
+                userId, SourceKind.TRANSACTION, id, T0.plusSeconds(120), "P11", "instants", null, null,
+                TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, cancels, null);
     }
 
-    private ProjectionItem adjustment(String id, String batchId, Instant at, int productId) {
+    private ProjectionItem adjustment(String id, String batchId, Instant at, int product) {
         return new ProjectionItem(
-                1L, SourceKind.MANUAL_ADJUSTMENT, id, at, productId, batchId, null,
-                (short) 9, new BigDecimal("5.0000"), "EUR", null, null, null);
+                1L, SourceKind.MANUAL_ADJUSTMENT, id, at, Products.id(product), Products.type(product),
+                batchId, null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private ProjectionItem payment(String id, Instant at) {
         return new ProjectionItem(
-                1L, SourceKind.PAYMENT, id, at, null, null, null,
-                (short) 9, new BigDecimal("20.0000"), "EUR", null, null, null);
+                1L, SourceKind.PAYMENT, id, at, null, null, null, null,
+                TxTypes.NEUTRAL, new BigDecimal("20.0000"), "EUR", null, null, null);
     }
 
     private static String itemTable(int view) {
@@ -591,9 +593,9 @@ class CancellationTest extends PostgresTestBase {
                 + "\" where \"kind\" = 0").get(0, Boolean.class);
     }
 
-    private int highLevelProduct(int view) {
+    private String highLevelProduct(int view) {
         return dsl().fetchOne("select \"productId\" from \"" + pageTable(view)
-                + "\" where \"kind\" = 0").get(0, Integer.class);
+                + "\" where \"kind\" = 0").get(0, String.class);
     }
 
     private boolean rowVisible(int view, int kind, String refId) {
@@ -613,7 +615,7 @@ class CancellationTest extends PostgresTestBase {
     private int sentinel(int view, int pageUnit, String column) {
         return dsl().fetchOne("""
                 select coalesce(sum("%s"),0)::int from "wqCountDay"
-                where "viewKind" = ? and "pageUnit" = ? and "productId" = 0
+                where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "typeId" = 0
                 """.formatted(column), (short) view, (short) pageUnit).get(0, Integer.class);
     }
 }

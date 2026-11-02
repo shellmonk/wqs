@@ -2,7 +2,6 @@ package wqs.projection;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import wqs.domain.MoneyDirection;
@@ -23,8 +22,9 @@ import wqs.domain.MoneyDirection;
  * <ul>
  *   <li>A cancellation is an item row ("cancels" non-blank). It is counted at the ITEM page unit
  *       like any row, but never rolls up and never gets a page-index row.</li>
- *   <li>A session's key is (MIN occurredAt, LEAST non-null productId) over its non-cancellation
- *       items, cancelled or not -- a cancel never moves a row. Its currency is LEAST likewise.</li>
+ *   <li>A session's key is (MIN occurredAt, LEAST non-null productType) over its non-cancellation
+ *       items, cancelled or not -- a cancel never moves a row. Its productId and currency are
+ *       LEAST likewise.</li>
  *   <li>Counters are sparse: a stored row with cntAll = 0 is itself drift.</li>
  * </ul>
  */
@@ -113,50 +113,55 @@ public final class ProjectionInvariants {
     /**
      * P-2: every counter row in both tiers equals a live COUNT, and no other counter row exists.
      *
-     * Expected rows, per view, page unit, tier, product key and UTC period (day, or first of the
-     * month): ITEM from the view's item rows (cancellation rows included; excl = not cancelled);
-     * HIGH_LEVEL from the view's page-index rows at each row's own (occurredAt, productId) -- a
-     * session row already sits at the session key -- with excl = "visibleExclCancelled". Each row
-     * counts under its own product (when it has one) and the sentinel 0. A productId of 0 counts
-     * once, as the write path's key set does.
+     * Expected rows, per view, page unit, tier, product-type key, type key and UTC period (day,
+     * or first of the month): ITEM from the view's item rows (cancellation rows included; excl =
+     * not cancelled); HIGH_LEVEL from the view's page-index rows at each row's own (occurredAt,
+     * productType) -- a session row already sits at the session key -- with excl =
+     * "visibleExclCancelled". Each row counts under its own product type (when it has one) and the
+     * ALL sentinel ''. A productType of '' counts once, as the write path's key set does.
+     *
+     * The type key is the ALL sentinel 0 on every row: the per-type ITEM fan-out is not written
+     * yet (plan Task 4, ruling R1), and HIGH_LEVEL rows never carry a type (D4).
      */
     public List<String> counterDrift() {
         return dsl.fetch("""
                 with src as (
-                    select 1 as v, 0 as u, "userId", "occurredAt" as t, "productId" as p,
+                    select 1 as v, 0 as u, "userId", "occurredAt" as t, "productType" as p,
                            not "cancelled" as vis from "wqWebItem"
                   union all
-                    select 2, 0, "userId", "occurredAt", "productId", not "cancelled" from "wqCcItem"
+                    select 2, 0, "userId", "occurredAt", "productType", not "cancelled" from "wqCcItem"
                   union all
-                    select 1, 1, "userId", "occurredAt", "productId", "visibleExclCancelled"
+                    select 1, 1, "userId", "occurredAt", "productType", "visibleExclCancelled"
                     from "wqWebHighLevel"
                   union all
-                    select 2, 1, "userId", "occurredAt", "productId", "visibleExclCancelled"
+                    select 2, 1, "userId", "occurredAt", "productType", "visibleExclCancelled"
                     from "wqCcHighLevel"
                 ),
                 keyed as (
-                    select v, u, "userId", p as prod, t, vis from src where p is not null and p <> 0
+                    select v, u, "userId", p as prod, 0 as typ, t, vis from src
+                    where p is not null and p <> ''
                   union all
-                    select v, u, "userId", 0, t, vis from src
+                    select v, u, "userId", '', 0, t, vis from src
                 ),
                 expected as (
-                    select 'day' as tier, "userId", v, u, prod,
+                    select 'day' as tier, "userId", v, u, prod, typ,
                            (t at time zone 'UTC')::date as period,
                            count(*) as "cntAll", count(*) filter (where vis) as "cntExcl"
-                    from keyed group by 1, 2, 3, 4, 5, 6
+                    from keyed group by 1, 2, 3, 4, 5, 6, 7
                   union all
-                    select 'month', "userId", v, u, prod,
+                    select 'month', "userId", v, u, prod, typ,
                            date_trunc('month', t at time zone 'UTC')::date,
                            count(*), count(*) filter (where vis)
-                    from keyed group by 1, 2, 3, 4, 5, 6
+                    from keyed group by 1, 2, 3, 4, 5, 6, 7
                 ),
                 stored as (
                     select 'day' as tier, "userId", "viewKind"::int as v, "pageUnit"::int as u,
-                           "productId" as prod, "period", "cntAll", "cntExclCancelled" as "cntExcl"
+                           "productType" as prod, "typeId"::int as typ, "period", "cntAll",
+                           "cntExclCancelled" as "cntExcl"
                     from "wqCountDay"
                   union all
-                    select 'month', "userId", "viewKind", "pageUnit", "productId", "period",
-                           "cntAll", "cntExclCancelled"
+                    select 'month', "userId", "viewKind", "pageUnit", "productType", "typeId",
+                           "period", "cntAll", "cntExclCancelled"
                     from "wqCountMonth"
                 )
                 select case when e.tier is null then 'orphan counter row'
@@ -166,17 +171,18 @@ public final class ProjectionInvariants {
                        coalesce(e."userId", s."userId") as "userId",
                        coalesce(e.v, s.v) as "viewKind",
                        case coalesce(e.u, s.u) when 0 then 'ITEM' else 'HIGH_LEVEL' end as "pageUnit",
-                       coalesce(e.prod, s.prod) as "productId",
+                       coalesce(e.prod, s.prod) as "productType",
+                       coalesce(e.typ, s.typ) as "typeId",
                        coalesce(e.period, s.period) as period,
                        e."cntAll" as "expectedAll", s."cntAll" as "storedAll",
                        e."cntExcl" as "expectedExcl", s."cntExcl" as "storedExcl"
                 from expected e
                 full outer join stored s
                   on s.tier = e.tier and s."userId" = e."userId" and s.v = e.v and s.u = e.u
-                 and s.prod = e.prod and s.period = e.period
+                 and s.prod = e.prod and s.typ = e.typ and s.period = e.period
                 where e.tier is null or s.tier is null
                    or e."cntAll" <> s."cntAll" or e."cntExcl" <> s."cntExcl"
-                order by 2, 3, 4, 5, 6, 7
+                order by 2, 3, 4, 5, 6, 7, 8
                 """)
                 .map(ProjectionInvariants::describe);
     }
@@ -188,9 +194,9 @@ public final class ProjectionInvariants {
      * Expected from the non-cancellation sessioned rows of "wqCcItem" (every source feeds /cc):
      * txCount and its ExclCancelled form; playCount = distinct non-null subBatchId,
      * playCountExclCancelled = plays with at least one non-cancelled item; totalPlays, totalWins
-     * (abs(amount) by {@link MoneyDirection}, exactly as {@link RollupUpdater}) and net = wins -
-     * plays, each with its ExclCancelled form; startedAt = MIN occurredAt, endedAt = MAX,
-     * productId and currency = LEAST non-null. Session and play locators sit at the row's
+     * (abs(amount) by the type's "wqTxType" direction, exactly as {@link RollupUpdater}) and net
+     * = wins - plays, each with its ExclCancelled form; startedAt = MIN occurredAt, endedAt = MAX,
+     * productId, productType and currency = LEAST non-null. Session and play locators sit at the row's
      * startedAt. Orphan rows (no items) and missing rows are reported too.
      */
     public List<String> aggregationDrift() {
@@ -198,7 +204,7 @@ public final class ProjectionInvariants {
         String wins = money(MoneyDirection.WIN);
         String sessioned = """
                 select i."userId", i."batchId", i."subBatchId", i."occurredAt", i."productId",
-                       i."currency"::text as currency, i."cancelled",
+                       i."productType", i."currency"::text as currency, i."cancelled",
                        %s as plays, %s as wins
                 from "wqCcItem" i
                 where i."batchId" is not null and %s
@@ -213,7 +219,8 @@ public final class ProjectionInvariants {
                 coalesce(sum(wins) filter (where not "cancelled"), 0)
                   - coalesce(sum(plays) filter (where not "cancelled"), 0) as "netExclCancelled",
                 min("occurredAt") as "startedAt", max("occurredAt") as "endedAt",
-                min("productId") as "productId", min(currency) as currency
+                min("productId") as "productId", min("productType") as "productType",
+                min(currency) as currency
                 """;
         String compared = """
                 e."txCount" is distinct from s."txCount"
@@ -227,6 +234,7 @@ public final class ProjectionInvariants {
                 or e."startedAt" is distinct from s."startedAt"
                 or e."endedAt" is distinct from s."endedAt"
                 or e."productId" is distinct from s."productId"
+                or e."productType" is distinct from s."productType"
                 or e.currency is distinct from s.currency::text
                 """;
 
@@ -311,10 +319,12 @@ public final class ProjectionInvariants {
      *
      * Per view V (its item table holds exactly the items whose source feeds V): one session row
      * for each session with at least one non-cancellation item in V, at the session key
-     * (startedAt, productId) folded over ALL the session's non-cancellation items, visible iff at
+     * (startedAt, productType) folded over ALL the session's non-cancellation items (productId
+     * folded likewise and carried on the row), visible iff at
      * least one of its non-cancellation items in V is not cancelled, carrying the session's
      * currency (LEAST over the same items as the key); and one row per non-cancellation
-     * unsessioned item in V, at the item's own (occurredAt, productId) with its own currency,
+     * unsessioned item in V, at the item's own (occurredAt, productType) with its own productId
+     * and currency,
      * visible iff the item is not cancelled. Rows are matched on (userId, kind, refId), so a row at the
      * wrong key reads as a key mismatch rather than an orphan plus a missing row.
      */
@@ -326,6 +336,7 @@ public final class ProjectionInvariants {
                     with session_key as (
                         select i."userId", i."batchId", min(i."occurredAt") as "startedAt",
                                min(i."productId") as "productId",
+                               min(i."productType") as "productType",
                                min(i."currency"::text) as currency
                         from "wqCcItem" i
                         where i."batchId" is not null and %3$s
@@ -333,15 +344,15 @@ public final class ProjectionInvariants {
                     ),
                     expected as (
                         select k."userId", k."startedAt" as "occurredAt", 0::smallint as kind,
-                               k."batchId" as "refId", k."productId", k.currency,
+                               k."batchId" as "refId", k."productId", k."productType", k.currency,
                                bool_or(not i."cancelled") as visible
                         from "%1$s" i
                         join session_key k on k."userId" = i."userId" and k."batchId" = i."batchId"
                         where %3$s
-                        group by 1, 2, 3, 4, 5, 6
+                        group by 1, 2, 3, 4, 5, 6, 7
                       union all
                         select i."userId", i."occurredAt", i."source", i."sourceId", i."productId",
-                               i."currency"::text, not i."cancelled"
+                               i."productType", i."currency"::text, not i."cancelled"
                         from "%1$s" i
                         where i."batchId" is null and %3$s
                     )
@@ -349,6 +360,7 @@ public final class ProjectionInvariants {
                                 when h."refId" is null then 'missing page row'
                                 when e."occurredAt" <> h."occurredAt"
                                   or e."productId" is distinct from h."productId"
+                                  or e."productType" is distinct from h."productType"
                                   then 'page row key mismatch'
                                 when e.currency is distinct from h."currency"::text
                                   then 'page row currency mismatch'
@@ -359,6 +371,8 @@ public final class ProjectionInvariants {
                            coalesce(e."refId", h."refId") as "refId",
                            e."occurredAt" as "expectedAt", h."occurredAt" as "storedAt",
                            e."productId" as "expectedProductId", h."productId" as "storedProductId",
+                           e."productType" as "expectedProductType",
+                           h."productType" as "storedProductType",
                            e.currency as "expectedCurrency", h."currency" as "storedCurrency",
                            e.visible as "expectedVisible", h."visibleExclCancelled" as "storedVisible"
                     from expected e
@@ -367,6 +381,7 @@ public final class ProjectionInvariants {
                     where e."refId" is null or h."refId" is null
                        or e."occurredAt" <> h."occurredAt"
                        or e."productId" is distinct from h."productId"
+                       or e."productType" is distinct from h."productType"
                        or e.currency is distinct from h."currency"::text
                        or e.visible <> h."visibleExclCancelled"
                     order by 3, 4, 5
@@ -377,20 +392,13 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * abs(amount) for the item types {@link MoneyDirection} maps to {@code direction}, else 0.
-     * The type list is read from the data and classified by MoneyDirection itself, so this can
+     * abs(amount) for the item types whose "wqTxType" direction is {@code direction}, else 0.
+     * The direction is read from the same table the write path's registry reads, so this can
      * never disagree with the write path's mapping.
      */
-    private String money(MoneyDirection direction) {
-        List<Short> types = dsl.fetch("select distinct \"type\" from \"wqCcItem\"")
-                .getValues(0, Short.class).stream()
-                .filter(type -> MoneyDirection.ofType(type) == direction)
-                .toList();
-        if (types.isEmpty()) {
-            return "0::numeric";
-        }
-        String in = types.stream().map(String::valueOf).collect(Collectors.joining(", "));
-        return "case when i.\"type\" in (" + in + ") then abs(i.\"amount\") else 0 end";
+    private static String money(MoneyDirection direction) {
+        return "case when i.\"type\" in (select t.\"typeId\" from \"wqTxType\" t where t.\"direction\" = "
+                + direction.code() + ") then abs(i.\"amount\") else 0 end";
     }
 
     private static String describe(Record r) {

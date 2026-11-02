@@ -26,7 +26,8 @@ public class CounterReader {
                 .where(WQ_COUNT_MONTH.userId.eq(f.userId()))
                 .and(WQ_COUNT_MONTH.viewKind.eq((short) v.code()))
                 .and(WQ_COUNT_MONTH.pageUnit.eq(PageUnit.ITEM.code()))
-                .and(WQ_COUNT_MONTH.productId.eq(f.counterProductKey()))
+                .and(WQ_COUNT_MONTH.productType.eq(Level0Filter.ALL_PRODUCT_TYPES))
+                .and(WQ_COUNT_MONTH.typeId.eq(Level0Filter.ALL_TYPES))
                 .and(WQ_COUNT_MONTH.period.between(firstPeriod, lastPeriod))
                 .fetch();
         return toMap(rows);
@@ -40,7 +41,8 @@ public class CounterReader {
                 .where(WQ_COUNT_DAY.userId.eq(f.userId()))
                 .and(WQ_COUNT_DAY.viewKind.eq((short) v.code()))
                 .and(WQ_COUNT_DAY.pageUnit.eq(PageUnit.ITEM.code()))
-                .and(WQ_COUNT_DAY.productId.eq(f.counterProductKey()))
+                .and(WQ_COUNT_DAY.productType.eq(Level0Filter.ALL_PRODUCT_TYPES))
+                .and(WQ_COUNT_DAY.typeId.eq(Level0Filter.ALL_TYPES))
                 .and(WQ_COUNT_DAY.period.between(firstPeriod, lastPeriod))
                 .fetch();
         return toMap(rows);

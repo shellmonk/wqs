@@ -136,7 +136,7 @@ class WebProjectionSecurityTest extends ApiTestBase {
     @Test
     void web_controller_binds_only_allowlisted_parameters() {
         Set<String> allowedNames = Set.of(
-                "from", "to", "aggregationLevel", "productId", "excludeCancelledTransactions", "page", "pageSize");
+                "from", "to", "aggregationLevel", "excludeCancelledTransactions", "page", "pageSize");
         Set<Class<?>> simpleTypes = Set.of(
                 java.time.Instant.class, int.class, Integer.class, long.class, Long.class, boolean.class, Boolean.class);
         List<Method> handlers = new ArrayList<>();

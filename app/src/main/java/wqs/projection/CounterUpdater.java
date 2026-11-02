@@ -23,16 +23,20 @@ import wqs.domain.ViewKind;
  * Maintains the two-tier pagination counters (spec 5.7): "wqCountMonth" for whole months and
  * "wqCountDay" for the partial months at each end of a range. Periods are UTC.
  *
- * productId = 0 is the all-products sentinel, so the common unfiltered query reads one row
- * rather than summing across products. A counted row therefore touches two product keys per
- * tier: its own product (when it has one) and the sentinel. A row with no product touches the
- * sentinel only.
+ * Keys are (productType, typeId) per tier (V10). productType = '' is the ALL-product-types
+ * sentinel, so the common unfiltered query reads one row rather than summing across product
+ * types. A counted row therefore touches two product keys per tier: its own product type (when it
+ * has one) and the sentinel. A row with no product type touches the sentinel only.
+ *
+ * typeId = 0 is the ALL-transaction-types sentinel. Every key written here uses it: the
+ * per-type fan-out of ITEM counters is not maintained yet (plan Task 4; ruling R1), and HIGH_LEVEL
+ * counters never carry a type (plan D4).
  *
  * ITEM counters are per item, in each view the item's source feeds. HIGH_LEVEL counters mirror
  * the page index per view, so they are driven per view from {@link HighLevelResult}:
  * {@link #countHighLevel} for each view in {@code inserted()} at the current key, and
  * {@link #moveHighLevel} for each view in {@code moved()} from
- * (movedFrom, movedFromProductId) to the current key, with that row's visibility.
+ * (movedFrom, movedFromProductType) to the current key, with that row's visibility.
  *
  * An excl-only change ({@link #uncountExclCancelled}, {@link #recountExclCancelled}) never
  * creates or deletes a row. A decrement that empties a row (cntAll reaches 0) deletes it, keeping rows sparse and stored
@@ -50,7 +54,11 @@ import wqs.domain.ViewKind;
 @Component
 public class CounterUpdater {
 
-    private static final int ALL_PRODUCTS = 0;
+    /** The ALL-product-types sentinel; unreachable from input (blank is normalised to null). */
+    static final String ALL_PRODUCT_TYPES = "";
+
+    /** The ALL-transaction-types sentinel; real "wqTxType" ids start at 1. */
+    static final short ALL_TYPES = 0;
 
     private final DSLContext dsl;
 
@@ -62,7 +70,7 @@ public class CounterUpdater {
     @Transactional(propagation = Propagation.MANDATORY)
     public void countItem(ProjectionItem item) {
         for (ViewKind view : item.source().views()) {
-            apply(keys(item.productId(), item.occurredAt()), item.userId(), view, PageUnit.ITEM,
+            apply(keys(item.productType(), item.occurredAt()), item.userId(), view, PageUnit.ITEM,
                     +1, true);
         }
     }
@@ -70,28 +78,28 @@ public class CounterUpdater {
     /**
      * Counts one high-level page unit in ONE view: +1 cntAll and +1 cntExclCancelled (a newly
      * inserted page-index row is visible), at the day and month of {@code at}, for the row's own
-     * product and the sentinel.
+     * product type and the sentinel.
      */
     @Transactional(propagation = Propagation.MANDATORY)
-    public void countHighLevel(long userId, ViewKind view, Integer productId, Instant at) {
-        apply(keys(productId, at), userId, view, PageUnit.HIGH_LEVEL, +1, true);
+    public void countHighLevel(long userId, ViewKind view, String productType, Instant at) {
+        apply(keys(productType, at), userId, view, PageUnit.HIGH_LEVEL, +1, true);
     }
 
     /**
      * Moves one high-level page unit between counter keys in ONE view: -1 cntAll (and -1
      * cntExclCancelled iff {@code visibleExclCancelled}) at keys only the old position has, +1
-     * at keys only the new position has. Keys shared by both (same day / month / product, and
+     * at keys only the new position has. Keys shared by both (same day / month / product type, and
      * the sentinel on a product-only change) are left untouched, so a move that maps to the same
      * key set is a no-op.
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void moveHighLevel(
             long userId, ViewKind view,
-            Integer fromProductId, Instant from,
-            Integer toProductId, Instant to,
+            String fromProductType, Instant from,
+            String toProductType, Instant to,
             boolean visibleExclCancelled) {
-        Set<Key> oldKeys = keys(fromProductId, from);
-        Set<Key> newKeys = keys(toProductId, to);
+        Set<Key> oldKeys = keys(fromProductType, from);
+        Set<Key> newKeys = keys(toProductType, to);
         Set<Key> removed = new LinkedHashSet<>(oldKeys);
         removed.removeAll(newKeys);
         Set<Key> added = new LinkedHashSet<>(newKeys);
@@ -106,8 +114,8 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void uncountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, Integer productId, Instant at) {
-        for (Key key : keys(productId, at)) {
+            long userId, ViewKind view, PageUnit unit, String productType, Instant at) {
+        for (Key key : keys(productType, at)) {
             decrementExcl(tier(key.month()), userId, view, unit, key);
         }
     }
@@ -121,8 +129,8 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void recountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, Integer productId, Instant at) {
-        for (Key key : keys(productId, at)) {
+            long userId, ViewKind view, PageUnit unit, String productType, Instant at) {
+        for (Key key : keys(productType, at)) {
             incrementExcl(tier(key.month()), userId, view, unit, key);
         }
     }
@@ -130,18 +138,18 @@ public class CounterUpdater {
     // --- internals -----------------------------------------------------------------------
 
     /** One counter row address within a tier. */
-    private record Key(boolean month, int productId, LocalDate period) {}
+    private record Key(boolean month, String productType, short typeId, LocalDate period) {}
 
-    private static Set<Key> keys(Integer productId, Instant at) {
+    private static Set<Key> keys(String productType, Instant at) {
         LocalDate day = LocalDate.ofInstant(at, ZoneOffset.UTC);
         LocalDate monthStart = day.withDayOfMonth(1);
         Set<Key> keys = new LinkedHashSet<>();
-        if (productId != null) {
-            keys.add(new Key(false, productId, day));
-            keys.add(new Key(true, productId, monthStart));
+        if (productType != null) {
+            keys.add(new Key(false, productType, ALL_TYPES, day));
+            keys.add(new Key(true, productType, ALL_TYPES, monthStart));
         }
-        keys.add(new Key(false, ALL_PRODUCTS, day));
-        keys.add(new Key(true, ALL_PRODUCTS, monthStart));
+        keys.add(new Key(false, ALL_PRODUCT_TYPES, ALL_TYPES, day));
+        keys.add(new Key(true, ALL_PRODUCT_TYPES, ALL_TYPES, monthStart));
         return keys;
     }
 
@@ -160,10 +168,12 @@ public class CounterUpdater {
     private Tier<?> tier(boolean month) {
         return month
                 ? new Tier<>(WQ_COUNT_MONTH, WQ_COUNT_MONTH.userId, WQ_COUNT_MONTH.viewKind,
-                        WQ_COUNT_MONTH.pageUnit, WQ_COUNT_MONTH.productId, WQ_COUNT_MONTH.period,
+                        WQ_COUNT_MONTH.pageUnit, WQ_COUNT_MONTH.productType, WQ_COUNT_MONTH.typeId,
+                        WQ_COUNT_MONTH.period,
                         WQ_COUNT_MONTH.cntAll, WQ_COUNT_MONTH.cntExclCancelled)
                 : new Tier<>(WQ_COUNT_DAY, WQ_COUNT_DAY.userId, WQ_COUNT_DAY.viewKind,
-                        WQ_COUNT_DAY.pageUnit, WQ_COUNT_DAY.productId, WQ_COUNT_DAY.period,
+                        WQ_COUNT_DAY.pageUnit, WQ_COUNT_DAY.productType, WQ_COUNT_DAY.typeId,
+                        WQ_COUNT_DAY.period,
                         WQ_COUNT_DAY.cntAll, WQ_COUNT_DAY.cntExclCancelled);
     }
 
@@ -173,7 +183,8 @@ public class CounterUpdater {
             TableField<R, Long> userId,
             TableField<R, Short> viewKind,
             TableField<R, Short> pageUnit,
-            TableField<R, Integer> productId,
+            TableField<R, String> productType,
+            TableField<R, Short> typeId,
             TableField<R, LocalDate> period,
             TableField<R, Long> cntAll,
             TableField<R, Long> cntExclCancelled) {}
@@ -185,11 +196,13 @@ public class CounterUpdater {
                 .set(t.userId(), userId)
                 .set(t.viewKind(), (short) view.code())
                 .set(t.pageUnit(), unit.code())
-                .set(t.productId(), key.productId())
+                .set(t.productType(), key.productType())
+                .set(t.typeId(), key.typeId())
                 .set(t.period(), key.period())
                 .set(t.cntAll(), 1L)
                 .set(t.cntExclCancelled(), exclDelta)
-                .onConflict(t.userId(), t.viewKind(), t.pageUnit(), t.productId(), t.period())
+                .onConflict(t.userId(), t.viewKind(), t.pageUnit(), t.productType(), t.typeId(),
+                        t.period())
                 .doUpdate()
                 .set(t.cntAll(), t.cntAll().plus(1L))
                 .set(t.cntExclCancelled(), t.cntExclCancelled().plus(exclDelta))
@@ -244,7 +257,8 @@ public class CounterUpdater {
             throw new IllegalStateException(
                     "counter update hit " + rows + " rows, expected 1: table="
                             + t.table().getName() + " userId=" + userId + " view=" + view
-                            + " unit=" + unit + " productId=" + key.productId()
+                            + " unit=" + unit + " productType='" + key.productType() + "'"
+                            + " typeId=" + key.typeId()
                             + " period=" + key.period());
         }
     }
@@ -254,7 +268,8 @@ public class CounterUpdater {
         return t.userId().eq(userId)
                 .and(t.viewKind().eq((short) view.code()))
                 .and(t.pageUnit().eq(unit.code()))
-                .and(t.productId().eq(key.productId()))
+                .and(t.productType().eq(key.productType()))
+                .and(t.typeId().eq(key.typeId()))
                 .and(t.period().eq(key.period()));
     }
 }

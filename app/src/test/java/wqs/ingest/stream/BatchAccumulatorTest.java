@@ -9,6 +9,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 import wqs.projection.ProjectionBatch;
 
 class BatchAccumulatorTest {
@@ -92,7 +93,7 @@ class BatchAccumulatorTest {
     private static ProjectionItem item(String sourceId) {
         return new ProjectionItem(
                 1L, SourceKind.TRANSACTION, sourceId, Instant.parse("2033-01-01T00:00:00Z"),
-                1, "b", "p", (short) 1, BigDecimal.ONE, "EUR", null, null, null);
+                "P1", "instants", "b", "p", TxTypes.PLAY, BigDecimal.ONE, "EUR", null, null, null);
     }
 
     /** Minimal mutable clock; Clock.fixed cannot advance. */

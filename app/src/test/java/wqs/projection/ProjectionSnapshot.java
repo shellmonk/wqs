@@ -42,12 +42,12 @@ public record ProjectionSnapshot(
     }
 
     private static final String COUNTER_KEY =
-            "\"userId\", \"viewKind\", \"pageUnit\", \"productId\", \"period\"";
+            "\"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"typeId\", \"period\"";
 
     private static List<String> rows(DSLContext dsl, String table) {
         return dsl.fetch("""
                          select "userId", "source", "sourceId", "occurredAt", "productId",
-                                "batchId", "subBatchId", "type", "amount", "currency",
+                                "productType", "batchId", "subBatchId", "type", "amount", "currency",
                                 "balanceAfter", "cancelled", "cancelledBy", "cancels", "detail"
                          from "%s"
                          order by "userId", "occurredAt", "source", "sourceId"
@@ -68,7 +68,7 @@ public record ProjectionSnapshot(
     private static List<String> pendingCancelRows(DSLContext dsl) {
         return dsl.fetch("""
                          select "source", "cancelSourceId", "cancelsSourceId", "userId",
-                                "occurredAt", "productId", "batchId", "subBatchId", "type",
+                                "occurredAt", "productId", "productType", "batchId", "subBatchId", "type",
                                 "amount", "currency", "balanceAfter", "detail"
                          from "wqPendingCancel"
                          order by "source", "cancelSourceId"

@@ -23,10 +23,10 @@ public class CcProjectionService {
         this.query = query;
     }
 
-    /** Arguments are validated by the caller: page and pageSize >= 1, from <= to, productId null or >= 1. */
-    public ProjectionPage level0(long userId, Instant from, Instant to, Integer productId,
+    /** Arguments are validated by the caller: page and pageSize >= 1, from <= to. */
+    public ProjectionPage level0(long userId, Instant from, Instant to,
             boolean excludeCancelled, long page, long pageSize) {
         return reader.readLevel0(query, new Level0Request(
-                new Level0Filter(userId, productId, excludeCancelled), from, to, page, pageSize));
+                new Level0Filter(userId, excludeCancelled), from, to, page, pageSize));
     }
 }

@@ -41,14 +41,13 @@ public class WebProjectionController {
             @RequestParam("from") @DateTimeFormat(iso = ISO.DATE_TIME) Instant from,
             @RequestParam("to") @DateTimeFormat(iso = ISO.DATE_TIME) Instant to,
             @RequestParam("aggregationLevel") int aggregationLevel,
-            @RequestParam(name = "productId", required = false) Integer productId,
             @RequestParam(name = "excludeCancelledTransactions", defaultValue = "false") boolean excludeCancelled,
             @RequestParam("page") long page,
             @RequestParam("pageSize") long pageSize) {
         long userId = principals.resolveUserId(request).orElseThrow(UnauthenticatedException::new);
         ProjectionParams p = ProjectionParams.validate(
-                from, to, aggregationLevel, productId, excludeCancelled, page, pageSize).requireLevel0();
+                from, to, aggregationLevel, excludeCancelled, page, pageSize).requireLevel0();
         return metrics.timeRequest(ENDPOINT, p.level().value(), p.page(), () -> service.level0(
-                userId, p.from(), p.to(), p.productId(), p.excludeCancelled(), p.page(), p.pageSize()));
+                userId, p.from(), p.to(), p.excludeCancelled(), p.page(), p.pageSize()));
     }
 }

@@ -51,8 +51,8 @@ class CoveringIndexTest extends PostgresTestBase {
      */
     @Test
     void cover_index_key_and_include_columns() {
-        String items = "(userId, occurredAt DESC, itemId DESC) INCLUDE (cancelled, productId)";
-        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productId, visibleExclCancelled)";
+        String items = "(userId, occurredAt DESC, itemId DESC) INCLUDE (cancelled, productType, type)";
+        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled)";
         for (String parent : PARENTS) {
             String def = dsl().fetchOne("select pg_get_indexdef(to_regclass(?)::oid)",
                     "\"" + parent + "_cover\"").get(0, String.class).replace("\"", "");
@@ -71,7 +71,7 @@ class CoveringIndexTest extends PostgresTestBase {
                     where "userId" = 1
                       and "occurredAt" >= timestamptz '2036-07-01T00:00:00Z'
                       and "occurredAt" < timestamptz '2036-08-01T00:00:00Z'
-                      and "productId" = 11 and not "cancelled"
+                      and "productType" = 'instants' and "type" = 1 and not "cancelled"
                     order by "occurredAt" desc, "itemId" desc limit 10
                     """)) {
                 while (rs.next()) plan.add(rs.getString(1));

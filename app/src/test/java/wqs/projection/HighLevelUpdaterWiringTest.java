@@ -13,6 +13,7 @@ import org.springframework.transaction.IllegalTransactionStateException;
 import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 
 @SpringBootTest
 class HighLevelUpdaterWiringTest extends PostgresTestBase {
@@ -31,7 +32,7 @@ class HighLevelUpdaterWiringTest extends PostgresTestBase {
     void applying_an_item_outside_a_transaction_is_rejected() {
         ProjectionItem item = new ProjectionItem(
                 1L, SourceKind.PAYMENT, "pay1", Instant.parse("2034-08-03T09:00:00Z"), null, null,
-                null, (short) 9, new BigDecimal("50.0000"), "EUR", null, null, null);
+                null, null, TxTypes.NEUTRAL, new BigDecimal("50.0000"), "EUR", null, null, null);
 
         assertThatThrownBy(() -> updater.applyItem(item, RollupResult.NONE))
                 .isInstanceOf(IllegalTransactionStateException.class);

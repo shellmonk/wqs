@@ -10,6 +10,7 @@ import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
+import wqs.gen.TxTypes;
 
 class ItemInserterTest extends PostgresTestBase {
 
@@ -37,8 +38,8 @@ class ItemInserterTest extends PostgresTestBase {
     @Test
     void a_payment_lands_only_in_the_operator_table() {
         ProjectionItem payment = new ProjectionItem(
-                7L, SourceKind.PAYMENT, "pay-1", WHEN, null, null, null,
-                (short) 9, new BigDecimal("100.0000"), "EUR", null, null, null);
+                7L, SourceKind.PAYMENT, "pay-1", WHEN, null, null, null, null,
+                TxTypes.NEUTRAL, new BigDecimal("100.0000"), "EUR", null, null, null);
 
         assertThat(inserter.insertIfAbsent(payment)).isTrue();
 
@@ -73,8 +74,8 @@ class ItemInserterTest extends PostgresTestBase {
     @Test
     void detail_json_is_stored_as_jsonb() {
         ProjectionItem withDetail = new ProjectionItem(
-                7L, SourceKind.TRANSACTION, "tx-detail", WHEN, 11, "b-1", "p-1",
-                (short) 1, new BigDecimal("2.5000"), "EUR", null, null,
+                7L, SourceKind.TRANSACTION, "tx-detail", WHEN, "P11", "instants", "b-1", "p-1",
+                TxTypes.PLAY, new BigDecimal("2.5000"), "EUR", null, null,
                 "{\"gameCode\":\"CRZ8\"}");
 
         inserter.insertIfAbsent(withDetail);
@@ -90,8 +91,8 @@ class ItemInserterTest extends PostgresTestBase {
     @Test
     void every_field_is_written_to_both_views_with_the_locator_item_id() {
         ProjectionItem item = new ProjectionItem(
-                7L, SourceKind.TRANSACTION, "tx-full", WHEN, 11, "batch-A", "sub-B",
-                (short) 3, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"),
+                7L, SourceKind.TRANSACTION, "tx-full", WHEN, "P11", "instants", "batch-A", "sub-B",
+                TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"),
                 "tx-cancelled", "{\"gameCode\":\"CRZ8\"}");
         assertThat(inserter.insertIfAbsent(item)).isTrue();
 
@@ -102,7 +103,7 @@ class ItemInserterTest extends PostgresTestBase {
         for (String table : new String[] {"wqWebItem", "wqCcItem"}) {
             var row = dsl().fetchOne(
                     "select \"userId\", \"itemId\", \"source\", \"sourceId\", \"occurredAt\", "
-                            + "\"productId\", \"batchId\", \"subBatchId\", \"type\", \"amount\", "
+                            + "\"productId\", \"productType\", \"batchId\", \"subBatchId\", \"type\", \"amount\", "
                             + "\"currency\", \"balanceAfter\", \"cancels\", \"cancelled\", "
                             + "\"detail\" ->> 'gameCode' as game from \"" + table + "\" where \"sourceId\" = ?",
                     "tx-full");
@@ -110,7 +111,8 @@ class ItemInserterTest extends PostgresTestBase {
             assertThat(row.get("itemId", Long.class)).as(table).isEqualTo(locatorId);
             assertThat(row.get("source", Integer.class)).as(table).isEqualTo(SourceKind.TRANSACTION.code());
             assertThat(row.get("occurredAt", Instant.class)).as(table).isEqualTo(WHEN);
-            assertThat(row.get("productId", Integer.class)).as(table).isEqualTo(item.productId());
+            assertThat(row.get("productId", String.class)).as(table).isEqualTo("P11");
+            assertThat(row.get("productType", String.class)).as(table).isEqualTo("instants");
             assertThat(row.get("batchId", String.class)).as(table).isEqualTo(item.batchId());
             assertThat(row.get("subBatchId", String.class)).as(table).isEqualTo(item.subBatchId());
             assertThat(row.get("type", Integer.class)).as(table).isEqualTo((int) item.type());
@@ -126,8 +128,8 @@ class ItemInserterTest extends PostgresTestBase {
 
     private ProjectionItem transaction(String sourceId) {
         return new ProjectionItem(
-                7L, SourceKind.TRANSACTION, sourceId, WHEN, 11, "b-1", "p-1",
-                (short) 1, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"), null, null);
+                7L, SourceKind.TRANSACTION, sourceId, WHEN, "P11", "instants", "b-1", "p-1",
+                TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"), null, null);
     }
 
     private int count(String table) {
