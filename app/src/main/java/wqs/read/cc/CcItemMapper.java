@@ -2,12 +2,14 @@ package wqs.read.cc;
 
 import java.time.OffsetDateTime;
 import org.jooq.JSONB;
+import org.mapstruct.Context;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Named;
 import wqs.db.generated.tables.records.WqCcItemRecord;
 import wqs.domain.SourceKind;
 import wqs.read.ItemEntry;
+import wqs.read.TypeCodes;
 
 @Mapper(componentModel = "spring")
 public interface CcItemMapper {
@@ -15,7 +17,13 @@ public interface CcItemMapper {
     @Mapping(target = "kind", source = "source", qualifiedByName = "kindName")
     @Mapping(target = "occurredAt", source = "occurredAt")
     @Mapping(target = "detail", source = "detail", qualifiedByName = "detailJson")
-    ItemEntry toEntry(WqCcItemRecord r);
+    @Mapping(target = "transactionType", source = "type", qualifiedByName = "typeCode")
+    ItemEntry toEntry(WqCcItemRecord r, @Context TypeCodes codes);
+
+    @Named("typeCode")
+    default String typeCode(Short type, @Context TypeCodes codes) {
+        return codes.codeOf(type);
+    }
 
     @Named("kindName")
     default String kindName(Short source) {

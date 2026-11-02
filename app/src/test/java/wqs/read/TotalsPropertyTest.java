@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import net.jqwik.api.Arbitrary;
 import net.jqwik.api.Example;
 import net.jqwik.api.ForAll;
@@ -36,9 +37,18 @@ class TotalsPropertyTest extends ReadPropertyBase {
         reset();
         applyBatches(items);
         for (ReadQuery q : queries) {
-            assertThat(reader.total(queryFor(q.view()), q.filter(), q.from(), q.to()))
-                    .as(q.toString())
-                    .isEqualTo(oracle.count(q.view(), q.filter(), q.from(), q.to()));
+            long expected = oracle.count(q.view(), q.filter(), q.transactionTypes(), q.from(), q.to());
+            // The reader resolves type codes itself; the envelope's total is the one clients see.
+            assertThat(reader.readLevel0(queryFor(q.view()), q.request(1, 1)).totalItems())
+                    .as(q.toString()).isEqualTo(expected);
+            // The direct total takes resolved ids; a list that resolves to nothing is the reader's
+            // short-circuit, covered above, not expressible as a filter.
+            Set<Short> ids = txTypes().idsOf(q.transactionTypes());
+            if (q.transactionTypes().isEmpty() || !ids.isEmpty()) {
+                Level0Filter f = new Level0Filter(q.userId(), q.productTypes(), ids, q.excludeCancelled());
+                assertThat(reader.total(queryFor(q.view()), f, q.from(), q.to()))
+                        .as(q.toString()).isEqualTo(expected);
+            }
         }
     }
 

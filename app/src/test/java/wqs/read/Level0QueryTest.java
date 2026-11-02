@@ -10,6 +10,8 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import wqs.domain.ProjectionItem;
+import wqs.gen.TxTypes;
 import wqs.read.cc.CcLevel0Query;
 import wqs.read.web.WebLevel0Query;
 
@@ -167,5 +169,72 @@ class Level0QueryTest extends Level0TestSupport {
         assertThat(cc.count(readerDsl, f, lo, hi)).isEqualTo(1);
         assertThat(cc.fetch(readerDsl, USER, cc.keys(readerDsl, f, lo, hi, 0, 10)))
                 .extracting(ItemEntry::kind).containsExactly("PAYMENT");
+    }
+
+    private static ProjectionItem typed(String id, String at, String productType, short type) {
+        return new ProjectionItem(USER, TRANSACTION, id, Instant.parse(at), productType == null ? null : "id-" + id,
+                productType, null, null, type, new java.math.BigDecimal("1.0000"), "EUR", null, null, null);
+    }
+
+    @Test
+    void list_filters_narrow_by_product_type_and_transaction_type_and_name_the_type() {
+        project(
+                typed("a", "2034-02-01T01:00:00Z", "keno", TxTypes.PLAY),
+                typed("b", "2034-02-01T02:00:00Z", "keno", TxTypes.WIN),
+                typed("c", "2034-02-01T03:00:00Z", "lottery", TxTypes.PLAY),
+                typed("d", "2034-02-01T04:00:00Z", null, TxTypes.PLAY));
+        Instant lo = t("2034-02-01T00:00:00Z");
+        Instant hi = t("2034-03-01T00:00:00Z");
+        for (Level0Query q : List.of(web, cc)) {
+            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of("keno"), java.util.Set.of(), false), lo, hi))
+                    .as(q.view() + " productTypes").isEqualTo(2);
+            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of(), java.util.Set.of(TxTypes.PLAY), false), lo, hi))
+                    .as(q.view() + " typeIds").isEqualTo(3);
+            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of("keno", "lottery"),
+                    java.util.Set.of(TxTypes.PLAY), false), lo, hi)).as(q.view() + " both").isEqualTo(2);
+            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of("nope"), java.util.Set.of(), false), lo, hi))
+                    .as(q.view() + " unknown product type matches nothing").isZero();
+            Level0Filter f = new Level0Filter(USER, java.util.Set.of("keno"), java.util.Set.of(TxTypes.WIN), false);
+            List<ItemEntry> got = q.fetch(readerDsl, USER, q.keys(readerDsl, f, lo, hi, 0, 10));
+            assertThat(got).extracting(ItemEntry::sourceId).containsExactly("b");
+            assertThat(got.get(0).productType()).isEqualTo("keno");
+            assertThat(got.get(0).productId()).isEqualTo("id-b");
+            assertThat(got.get(0).transactionType()).isEqualTo("PRIZE");
+        }
+    }
+
+    /**
+     * Plan D4/Task 5: after ANALYZE on realistic data, the default plan (no planner setting
+     * touched) for a filtered key query is an index-only scan of the V10 covering index -- the
+     * filter columns ride in INCLUDE -- not a seq scan.
+     */
+    @Test
+    void list_filters_use_covering_index() {
+        partitionManager.ensurePartitionsAhead(java.time.YearMonth.of(2034, 5), 0);
+        try {
+            // 60 users x 2000 rows over May 2034; USER is one of them. Set-based, like the bulk test.
+            dsl().execute("""
+                    insert into "wqWebItem" ("userId", "itemId", "source", "sourceId", "occurredAt",
+                                             "type", "amount", "currency", "productType")
+                    select ?::bigint + (i % 60), 9100000000 + i, 1, 'cov' || i,
+                           timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '20 minutes' + (i % 60) * interval '1 second',
+                           1 + (i % 3), 1, 'EUR', (array['keno','lottery','bingo'])[1 + (i % 3)]
+                    from generate_series(0, 119999) as i
+                    """, USER);
+            // vacuum sets the visibility map, which an index-only scan needs; no planner setting is touched.
+            dsl().execute("vacuum (analyze) \"wqWebItem\"");
+            Level0Filter f = new Level0Filter(USER, java.util.Set.of("keno", "bingo"),
+                    java.util.Set.of(TxTypes.PLAY), false);
+            List<org.jooq.Query> executed = new java.util.ArrayList<>();
+            org.jooq.DSLContext recording = org.jooq.impl.DSL.using(readerDsl.configuration().derive(
+                    org.jooq.ExecuteListener.onExecuteStart(ctx -> executed.add(ctx.query()))));
+            web.keys(recording, f, t("2034-05-10T00:00:00Z"), t("2034-05-17T00:00:00Z"), 0, 50);
+            assertThat(executed).hasSize(1);
+            String plan = String.join("\n", readerDsl.fetch(org.jooq.impl.DSL.resultQuery("explain {0}", executed.get(0)))
+                    .getValues(0, String.class));
+            assertThat(plan).containsPattern("Index Only Scan using \"wqWebItem_\\d+_\\d+_userId_occurredAt_itemId_cancelled_produc").doesNotContain("Seq Scan");
+        } finally {
+            clearProjection();
+        }
     }
 }

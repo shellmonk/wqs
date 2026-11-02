@@ -136,9 +136,12 @@ class WebProjectionSecurityTest extends ApiTestBase {
     @Test
     void web_controller_binds_only_allowlisted_parameters() {
         Set<String> allowedNames = Set.of(
-                "from", "to", "aggregationLevel", "excludeCancelledTransactions", "page", "pageSize");
+                "from", "to", "aggregationLevel", "excludeCancelledTransactions", "productTypes", "transactionTypes", "page",
+                "pageSize");
         Set<Class<?>> simpleTypes = Set.of(
-                java.time.Instant.class, int.class, Integer.class, long.class, Long.class, boolean.class, Boolean.class);
+                java.time.Instant.class, int.class, Integer.class, long.class, Long.class, boolean.class, Boolean.class,
+                // the two D10 list filters, List<String> (checked below); Task 7 moves them
+                List.class);
         List<Method> handlers = new ArrayList<>();
         for (Method m : WebProjectionController.class.getDeclaredMethods()) {
             if (AnnotatedElementUtils.hasAnnotation(m, RequestMapping.class)) {
@@ -158,6 +161,9 @@ class WebProjectionSecurityTest extends ApiTestBase {
                 assertThat(p.getAnnotations()).as("%s carries only @RequestParam/@DateTimeFormat", where)
                         .allMatch(an -> an instanceof RequestParam || an instanceof DateTimeFormat);
                 assertThat(simpleTypes).as("%s is a simple type", where).contains(p.getType());
+                if (p.getType() == List.class) {
+                    assertThat(p.getParameterizedType().getTypeName()).as(where).isEqualTo("java.util.List<java.lang.String>");
+                }
                 // Explicit name (no reliance on -parameters), and both aliases agree.
                 String name = rp.name().isEmpty() ? rp.value() : rp.name();
                 assertThat(name).as("%s @RequestParam name", where).isIn(allowedNames);

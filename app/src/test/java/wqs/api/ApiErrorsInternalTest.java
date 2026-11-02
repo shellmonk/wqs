@@ -23,7 +23,7 @@ class ApiErrorsInternalTest extends ApiTestBase {
 
     @Test
     void unexpected_exception_is_a_fixed_text_500() throws Exception {
-        when(failing.level0(anyLong(), any(), any(), anyBoolean(), anyLong(), anyLong()))
+        when(failing.level0(anyLong(), any(), any(), anyBoolean(), any(), any(), anyLong(), anyLong()))
                 .thenThrow(new IllegalStateException("SECRET amount=12.50 userId=1 detail={}"));
         mvc.perform(get("/cc/v1/projection").param("userId", "1").param("from", FROM).param("to", TO)
                         .param("aggregationLevel", "0").param("page", "1").param("pageSize", "10"))

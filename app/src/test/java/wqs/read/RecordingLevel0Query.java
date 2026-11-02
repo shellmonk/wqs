@@ -13,6 +13,8 @@ final class RecordingLevel0Query implements Level0Query {
 
     private final Level0Query delegate;
     final List<KeysCall> keysCalls = new ArrayList<>();
+    int countCalls;
+    int fetchCalls;
 
     RecordingLevel0Query(Level0Query delegate) {
         this.delegate = delegate;
@@ -25,6 +27,7 @@ final class RecordingLevel0Query implements Level0Query {
 
     @Override
     public long count(DSLContext tx, Level0Filter f, Instant lo, Instant hi) {
+        countCalls++;
         return delegate.count(tx, f, lo, hi);
     }
 
@@ -36,6 +39,7 @@ final class RecordingLevel0Query implements Level0Query {
 
     @Override
     public List<ItemEntry> fetch(DSLContext tx, long userId, List<ItemKey> keys) {
+        fetchCalls++;
         return delegate.fetch(tx, userId, keys);
     }
 }

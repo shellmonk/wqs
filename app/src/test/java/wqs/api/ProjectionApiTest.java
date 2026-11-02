@@ -369,4 +369,74 @@ class ProjectionApiTest extends ApiTestBase {
         params.forEach(b::param);
         return b;
     }
+
+    private void projectFilterFixtures() {
+        project(
+                new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, "x1", java.time.Instant.parse("2034-02-13T10:00:00Z"),
+                        "idx1", "lottery", null, null, TxTypes.WIN, new java.math.BigDecimal("1.0000"), "EUR", null, null, null),
+                new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, "x2", java.time.Instant.parse("2034-02-14T10:00:00Z"),
+                        "idx2", "bingo", null, null, TxTypes.PLAY, new java.math.BigDecimal("1.0000"), "EUR", null, null, null));
+    }
+
+    /** D10: repeated and comma-separated forms bind alike; values are trimmed and blanks dropped. */
+    @Test
+    void list_filters_bind_repeated_and_comma_forms_trimmed_with_blanks_dropped() throws Exception {
+        projectFilterFixtures();
+        // cc sees all 5 items: keno x3 (t1, p1, l1), lottery x1, bingo x1.
+        mvc.perform(cc().param("productTypes", "lottery", "bingo"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(2));
+        mvc.perform(cc().param("productTypes", "lottery,bingo"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(2));
+        mvc.perform(cc().param("productTypes", " lottery , bingo ,, "))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(2));
+        // Blank-only is "no filter" (blank is the counters' ALL sentinel), never "match blank".
+        mvc.perform(cc().param("productTypes", " , "))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(5));
+        mvc.perform(cc().param("productTypes", ""))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(5));
+        mvc.perform(cc().param("transactionTypes", "PRIZE"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalItems").value(1))
+                .andExpect(jsonPath("$.items[0].sourceId").value("x1"))
+                .andExpect(jsonPath("$.items[0].productType").value("lottery"))
+                .andExpect(jsonPath("$.items[0].productId").value("idx1"))
+                .andExpect(jsonPath("$.items[0].transactionType").value("PRIZE"));
+        mvc.perform(cc().param("transactionTypes", "TT_BUY").param("productTypes", "bingo,lottery"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(1))
+                .andExpect(jsonPath("$.items[0].sourceId").value("x2"));
+        mvc.perform(web().param("productTypes", "bingo"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(1));
+    }
+
+    /** An unknown value is not an error: it matches nothing. */
+    @Test
+    void unknown_list_filter_values_give_an_empty_200() throws Exception {
+        projectFilterFixtures();
+        mvc.perform(cc().param("transactionTypes", "TT_DOES_NOT_EXIST"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(0))
+                .andExpect(jsonPath("$.totalItems").value(0))
+                .andExpect(jsonPath("$.totalPages").value(0));
+        mvc.perform(cc().param("productTypes", "nope"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(0));
+        // One known code among unknown ones filters by the known one.
+        mvc.perform(cc().param("transactionTypes", "TT_DOES_NOT_EXIST,PRIZE"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalItems").value(1));
+    }
+
+    /** D10: at most 50 values per list. */
+    @Test
+    void more_than_fifty_values_in_a_list_is_400() throws Exception {
+        for (String name : new String[] {"productTypes", "transactionTypes"}) {
+            String fifty = java.util.stream.IntStream.range(0, 50).mapToObj(i -> "v" + i)
+                    .collect(java.util.stream.Collectors.joining(","));
+            mvc.perform(cc().param(name, fifty)).andExpect(status().isOk());
+            expectProblem(cc().param(name, fifty + ",v50"), 400).andExpect(jsonPath("$.detail", containsString(name)));
+            // repeated form counts the same
+            MockHttpServletRequestBuilder repeated = cc();
+            repeated.param(name, java.util.stream.IntStream.range(0, 51).mapToObj(i -> "r" + i).toArray(String[]::new));
+            expectProblem(repeated, 400);
+            expectProblem(web().param(name, fifty + ",v50"), 400);
+        }
+    }
 }

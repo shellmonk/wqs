@@ -17,15 +17,20 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
+import wqs.db.TxTypeRegistry;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
+import wqs.read.web.WebItemMapper;
+import wqs.read.web.WebLevel0Query;
 
 @SpringBootTest
 class ProjectionReaderTest extends ReadPropertyBase {
 
     private static final Level0Filter ALL = new Level0Filter(1L, false);
+
+    @Autowired WebItemMapper webMapper;
 
     @BeforeEach
     void clean() {
@@ -158,7 +163,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveItems());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerDsl, new CounterReader(), new ReadProperties(null), new ReadMetrics(registry));
+                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry));
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
 
@@ -190,7 +195,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveItems());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerDsl, new CounterReader(), new ReadProperties(null), new ReadMetrics(registry));
+                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry));
         RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
@@ -301,6 +306,73 @@ class ProjectionReaderTest extends ReadPropertyBase {
         }
     }
 
+    /**
+     * A non-empty transactionTypes list that resolves to no registered code can match nothing:
+     * an empty page with totals 0, and no counter, count, key or fetch query is run.
+     */
+    @Test
+    void unknown_type_only_filter_returns_empty_without_query() {
+        applyBatches(fiveItems());
+        RowCountingCounterReader counting = new RowCountingCounterReader();
+        RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
+        Instant from = Instant.parse("2034-01-01T00:00:00Z");
+        Instant to = Instant.parse("2034-03-01T00:00:00Z");
+
+        ProjectionPage page = probeReader(counting).readLevel0(recording, new Level0Request(
+                ALL, java.util.Set.of("TT_NEVER_REGISTERED", "TT_ALSO_NOT"), from, to, 1, 10));
+
+        assertThat(page.items()).isEmpty();
+        assertThat(page.totalItems()).isZero();
+        assertThat(page.totalPages()).isZero();
+        assertThat(recording.countCalls).isZero();
+        assertThat(recording.keysCalls).isEmpty();
+        assertThat(recording.fetchCalls).isZero();
+        assertThat(counting.dayCalls).isZero();
+        assertThat(counting.monthCalls).isZero();
+        // Control: a list with one known code is an ordinary read.
+        RecordingLevel0Query ok = new RecordingLevel0Query(webQuery);
+        ProjectionPage some = probeReader(counting).readLevel0(ok, new Level0Request(
+                ALL, java.util.Set.of("TT_BUY", "TT_NEVER_REGISTERED"), from, to, 1, 10));
+        assertThat(some.totalItems()).isEqualTo(5);
+        assertThat(ok.keysCalls).hasSize(1);
+    }
+
+    @Test
+    void both_id_and_code_type_filters_are_refused() {
+        Level0Filter ids = new Level0Filter(1L, java.util.Set.of(), java.util.Set.of(TxTypes.PLAY), false);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new Level0Request(
+                        ids, java.util.Set.of("TT_BUY"), Instant.EPOCH, Instant.EPOCH, 1, 1))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * M2: resolving transaction-type codes (filter) and ids (response) uses the reader's single
+     * transaction. The registry here has a writer DSL that cannot get a connection: any read-path
+     * touch of it fails the request.
+     */
+    @Test
+    void type_resolution_stays_on_the_reader_transaction() {
+        applyBatches(fiveItems());
+        javax.sql.DataSource dead = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+        try {
+            org.mockito.Mockito.when(dead.getConnection()).thenThrow(new java.sql.SQLException("writer pool touched"));
+        } catch (java.sql.SQLException e) {
+            throw new AssertionError(e);
+        }
+        TxTypeRegistry isolated = new TxTypeRegistry(
+                DSL.using(dead, org.jooq.SQLDialect.POSTGRES),
+                org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class));
+        WebLevel0Query web = new WebLevel0Query(webMapper, isolated);
+        ProjectionReader probe = new ProjectionReader(readerDsl, isolated, new CounterReader(),
+                new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()));
+
+        ProjectionPage page = probe.readLevel0(web, new Level0Request(ALL, java.util.Set.of("TT_BUY"),
+                Instant.parse("2034-01-01T00:00:00Z"), Instant.parse("2034-03-01T00:00:00Z"), 1, 10));
+
+        assertThat(page.totalItems()).isEqualTo(5);
+        assertThat(page.items()).hasSize(5).allSatisfy(e -> assertThat(e.transactionType()).isEqualTo("TT_BUY"));
+    }
+
     /** 3 items in Feb 2034, 2 in Jan 2034, all user 1. */
     private static List<ProjectionItem> fiveItems() {
         return List.of(
@@ -314,13 +386,24 @@ class ProjectionReaderTest extends ReadPropertyBase {
     /** Builds a reader around a test counter reader, with no ceiling and a private registry. */
     private ProjectionReader probeReader(CounterReader counters) {
         return new ProjectionReader(
-                readerDsl, counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()));
+                readerDsl, txTypes(), counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()));
     }
 
     /** Records every day row {@link CounterReader#dayCounts} returns, without a mocking framework. */
     static final class RowCountingCounterReader extends CounterReader {
         final List<LocalDate> dayKeys = new ArrayList<>();
         int dayCalls;
+        int monthCalls;
+
+        @Override
+        public Map<LocalDate, Long> monthCounts(
+                DSLContext tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
+                java.util.Set<String> productTypes, java.util.Set<Short> typeIds,
+                boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
+            monthCalls++;
+            return super.monthCounts(tx, userId, v, unit, productTypes, typeIds, excludeCancelled,
+                    firstPeriod, lastPeriod);
+        }
 
         @Override
         public Map<LocalDate, Long> dayCounts(

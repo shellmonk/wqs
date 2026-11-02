@@ -1,6 +1,7 @@
 package wqs.api.cc;
 
 import java.time.Instant;
+import java.util.List;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.format.annotation.DateTimeFormat.ISO;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -37,12 +38,15 @@ public class CcProjectionController {
             @RequestParam("to") @DateTimeFormat(iso = ISO.DATE_TIME) Instant to,
             @RequestParam("aggregationLevel") int aggregationLevel,
             @RequestParam(name = "excludeCancelledTransactions", defaultValue = "false") boolean excludeCancelled,
+            @RequestParam(name = "productTypes", required = false) List<String> productTypes,
+            @RequestParam(name = "transactionTypes", required = false) List<String> transactionTypes,
             @RequestParam("page") long page,
             @RequestParam("pageSize") long pageSize) {
         long user = ProjectionParams.requireUserId(userId);
         ProjectionParams p = ProjectionParams.validate(
-                from, to, aggregationLevel, excludeCancelled, page, pageSize).requireLevel0();
+                from, to, aggregationLevel, excludeCancelled, productTypes, transactionTypes, page, pageSize).requireLevel0();
         return metrics.timeRequest(ENDPOINT, p.level().value(), p.page(), () -> service.level0(
-                user, p.from(), p.to(), p.excludeCancelled(), p.page(), p.pageSize()));
+                user, p.from(), p.to(), p.excludeCancelled(), p.productTypes(), p.transactionTypes(),
+                p.page(), p.pageSize()));
     }
 }

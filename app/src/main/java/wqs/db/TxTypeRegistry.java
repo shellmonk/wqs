@@ -70,14 +70,25 @@ public class TxTypeRegistry {
 
     /**
      * The ids of those {@code codes} that are registered. An unknown code contributes nothing and
-     * is never registered: filters must not grow the table.
+     * is never registered: filters must not grow the table. A cache miss reads through this
+     * registry's own (writer) DSL -- the write path's overload; the read path uses
+     * {@link #idsOf(DSLContext, Collection)}.
      */
     public Set<Short> idsOf(Collection<String> codes) {
+        return idsOf(dsl, codes);
+    }
+
+    /**
+     * As {@link #idsOf(Collection)}, but a cache miss is read through {@code reader}: the read
+     * path's single REPEATABLE READ transaction, so resolving a filter never touches the writer
+     * pool nor steps outside the reader's snapshot (M2).
+     */
+    public Set<Short> idsOf(DSLContext reader, Collection<String> codes) {
         Set<Short> ids = new LinkedHashSet<>();
         for (String code : codes) {
             Short id = idsByCode.get(code);
             if (id == null) {
-                WqTxTypeRecord row = find(code);
+                WqTxTypeRecord row = find(reader, code);
                 id = row == null ? null : remember(row).typeId();
             }
             if (id != null) {
@@ -89,20 +100,25 @@ public class TxTypeRegistry {
 
     /** @throws IllegalArgumentException if no type has this id -- a stored id always exists */
     public MoneyDirection directionOf(short typeId) {
-        return entry(typeId).direction();
+        return entry(dsl, typeId).direction();
     }
 
     /** @throws IllegalArgumentException if no type has this id -- a stored id always exists */
     public String codeOf(short typeId) {
-        return entry(typeId).code();
+        return entry(dsl, typeId).code();
     }
 
-    private Entry entry(short typeId) {
+    /** As {@link #codeOf(short)}, a cache miss read through {@code reader} (the read path's tx; M2). */
+    public String codeOf(DSLContext reader, short typeId) {
+        return entry(reader, typeId).code();
+    }
+
+    private Entry entry(DSLContext source, short typeId) {
         Entry cached = byId.get(typeId);
         if (cached != null) {
             return cached;
         }
-        WqTxTypeRecord row = dsl.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.typeId.eq(typeId)).fetchOne();
+        WqTxTypeRecord row = source.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.typeId.eq(typeId)).fetchOne();
         if (row == null) {
             throw new IllegalArgumentException("no transaction type with id " + typeId);
         }
@@ -110,7 +126,11 @@ public class TxTypeRegistry {
     }
 
     private WqTxTypeRecord find(String code) {
-        return dsl.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.code.eq(code)).fetchOne();
+        return find(dsl, code);
+    }
+
+    private static WqTxTypeRecord find(DSLContext source, String code) {
+        return source.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.code.eq(code)).fetchOne();
     }
 
     private Entry remember(WqTxTypeRecord row) {

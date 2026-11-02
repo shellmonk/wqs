@@ -1,6 +1,7 @@
 package wqs.read.cc;
 
 import java.time.Instant;
+import java.util.Set;
 import org.springframework.stereotype.Service;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Request;
@@ -25,8 +26,10 @@ public class CcProjectionService {
 
     /** Arguments are validated by the caller: page and pageSize >= 1, from <= to. */
     public ProjectionPage level0(long userId, Instant from, Instant to,
-            boolean excludeCancelled, long page, long pageSize) {
+            boolean excludeCancelled, Set<String> productTypes, Set<String> transactionTypes,
+            long page, long pageSize) {
         return reader.readLevel0(query, new Level0Request(
-                new Level0Filter(userId, excludeCancelled), from, to, page, pageSize));
+                new Level0Filter(userId, productTypes, Set.of(), excludeCancelled), transactionTypes,
+                from, to, page, pageSize));
     }
 }

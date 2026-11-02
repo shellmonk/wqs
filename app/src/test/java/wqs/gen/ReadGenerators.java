@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.jqwik.api.Arbitraries;
 import net.jqwik.api.Arbitrary;
 import net.jqwik.api.Combinators;
@@ -17,6 +18,7 @@ import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.read.Level0Filter;
+import wqs.read.Level0Request;
 
 /**
  * Read-side generators (spec 8.1): small level-0 histories shaped to stress the counter/live
@@ -52,12 +54,34 @@ public final class ReadGenerators {
 
     private static final int MAX_ITEMS = 150;
 
+    /**
+     * {@code productTypes} and {@code transactionTypes} (codes) are empty (no filter) or a subset
+     * of the values the histories use plus one value no item has.
+     */
     public record ReadQuery(
-            ViewKind view, long userId, Instant from, Instant to, boolean excludeCancelled) {
+            ViewKind view, long userId, Instant from, Instant to, boolean excludeCancelled,
+            Set<String> productTypes, Set<String> transactionTypes) {
 
+        /** The filter with the product list; the type list stays codes, see {@link #request}. */
         public Level0Filter filter() {
-            return new Level0Filter(userId, excludeCancelled);
+            return new Level0Filter(userId, productTypes, Set.of(), excludeCancelled);
         }
+
+        public Level0Request request(long page, long pageSize) {
+            return new Level0Request(filter(), transactionTypes, from, to, page, pageSize);
+        }
+    }
+
+    /** Product types the histories use, and one no item has. */
+    static final List<String> PRODUCT_TYPE_POOL = List.of("keno", "lottery", "absent-product");
+    /** Type codes the histories use (PLAY, WIN, NEUTRAL, CANCEL), and one no table has. */
+    static final List<String> TYPE_CODE_POOL =
+            List.of("TT_BUY", "PRIZE", "TT_TRANSFER_OUT", "TT_CANCEL", "TT_ABSENT_FILTER_CODE");
+
+    private static Arbitrary<Set<String>> listFilter(List<String> pool) {
+        return Arbitraries.frequencyOf(
+                Tuple.of(4, Arbitraries.just(Set.<String>of())),
+                Tuple.of(6, Arbitraries.of(pool).set().ofMinSize(1).ofMaxSize(pool.size())));
     }
 
     // ------------------------------------------------------------------ histories
@@ -280,8 +304,10 @@ public final class ReadGenerators {
                         Arbitraries.of(ViewKind.values()),
                         Arbitraries.of(1L, 2L, 3L, 4L),
                         ranges(),
-                        Arbitraries.of(true, false))
-                .as((v, u, r, x) -> new ReadQuery(v, u, r[0], r[1], x));
+                        Arbitraries.of(true, false),
+                        listFilter(PRODUCT_TYPE_POOL),
+                        listFilter(TYPE_CODE_POOL))
+                .as((v, u, r, x, p, t) -> new ReadQuery(v, u, r[0], r[1], x, p, t));
     }
 
     private static Instant min(Instant a, Instant b) {

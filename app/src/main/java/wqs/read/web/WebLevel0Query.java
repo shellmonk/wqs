@@ -16,20 +16,24 @@ import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.springframework.stereotype.Component;
+import wqs.db.TxTypeRegistry;
 import wqs.domain.ViewKind;
 import wqs.read.ItemEntry;
 import wqs.read.ItemKey;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
+import wqs.read.TypeCodes;
 
 /** Level-0 reads of the web view; touches only WQ_WEB_ITEM. */
 @Component
 public class WebLevel0Query implements Level0Query {
 
     private final WebItemMapper mapper;
+    private final TxTypeRegistry txTypes;
 
-    public WebLevel0Query(WebItemMapper mapper) {
+    public WebLevel0Query(WebItemMapper mapper, TxTypeRegistry txTypes) {
         this.mapper = mapper;
+        this.txTypes = txTypes;
     }
 
     @Override
@@ -71,6 +75,8 @@ public class WebLevel0Query implements Level0Query {
         // global sequence, so within the user and the occurredAt window it identifies one row.
         Long[] ids = keys.stream().map(ItemKey::itemId).toArray(Long[]::new);
         Table<?> wanted = DSL.unnest(DSL.val(ids, SQLDataType.BIGINT.getArrayDataType())).as("wanted", "id");
+        // Codes resolve through the caller's transaction (M2), never the registry's writer DSL.
+        TypeCodes codes = id -> txTypes.codeOf(tx, id);
         Map<ItemKey, ItemEntry> byKey = new HashMap<>();
         tx.select(WQ_WEB_ITEM.fields())
                 .from(WQ_WEB_ITEM)
@@ -79,7 +85,7 @@ public class WebLevel0Query implements Level0Query {
                 .and(WQ_WEB_ITEM.occurredAt.between(utc(min), utc(max)))
                 .fetchInto(WQ_WEB_ITEM)
                 .forEach(r -> byKey.put(
-                        new ItemKey(r.getOccurredAt().toInstant(), r.getItemId()), mapper.toEntry(r)));
+                        new ItemKey(r.getOccurredAt().toInstant(), r.getItemId()), mapper.toEntry(r, codes)));
         List<ItemEntry> out = new ArrayList<>(keys.size());
         for (ItemKey k : keys) {
             ItemEntry e = byKey.get(k);
@@ -96,6 +102,12 @@ public class WebLevel0Query implements Level0Query {
                 .and(WQ_WEB_ITEM.occurredAt.lt(utc(hi)));
         if (f.excludeCancelled()) {
             c = c.and(DSL.not(WQ_WEB_ITEM.cancelled));
+        }
+        if (!f.productTypes().isEmpty()) {
+            c = c.and(WQ_WEB_ITEM.productType.in(f.productTypes()));
+        }
+        if (!f.typeIds().isEmpty()) {
+            c = c.and(WQ_WEB_ITEM.type.in(f.typeIds()));
         }
         return c;
     }

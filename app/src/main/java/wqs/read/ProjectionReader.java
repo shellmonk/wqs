@@ -14,6 +14,7 @@ import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
 import wqs.config.ReaderDsl;
+import wqs.db.TxTypeRegistry;
 import wqs.domain.PageUnit;
 import wqs.read.Segment.Tier;
 
@@ -24,13 +25,16 @@ public class ProjectionReader {
     private static final int LEVEL_0 = 0;
 
     private final DSLContext readerDsl;
+    private final TxTypeRegistry txTypes;
     private final CounterReader counters;
     private final ReadProperties properties;
     private final ReadMetrics metrics;
 
     public ProjectionReader(
-            @ReaderDsl DSLContext readerDsl, CounterReader counters, ReadProperties properties, ReadMetrics metrics) {
+            @ReaderDsl DSLContext readerDsl, TxTypeRegistry txTypes, CounterReader counters,
+            ReadProperties properties, ReadMetrics metrics) {
         this.readerDsl = readerDsl;
+        this.txTypes = txTypes;
         this.counters = counters;
         this.properties = properties;
         this.metrics = metrics;
@@ -46,9 +50,18 @@ public class ProjectionReader {
     public ProjectionPage readLevel0(Level0Query q, Level0Request r) {
         long effective = properties.maxPageSize() == null
                 ? r.pageSize() : Math.min(r.pageSize(), properties.maxPageSize());
-        Level0Filter f = r.filter();
         Outcome out = readerDsl.transactionResult(cfg -> {
             DSLContext tx = DSL.using(cfg);
+            Level0Filter f = r.filter();
+            if (!r.transactionTypes().isEmpty()) {
+                // Resolved through the reader's own tx (M2): never the writer pool.
+                Set<Short> ids = txTypes.idsOf(tx, r.transactionTypes());
+                if (ids.isEmpty()) {
+                    // Nothing can match: no slice, no totals, no SQL beyond the lookup.
+                    return new Outcome(0, 0, -1, List.of(), 0);
+                }
+                f = f.withTypeIds(ids);
+            }
             SegmentCounts sc = segmentCounts(tx, q, f, r.from(), r.to());
             long total = sc.total();
             long offset = offset(r.page(), effective);
@@ -121,10 +134,10 @@ public class ProjectionReader {
             LocalDate newest = period(run.get(0));
             LocalDate oldest = period(run.get(run.size() - 1));
             if (run.get(0).tier() == Tier.MONTH) {
-                months.putAll(counters.monthCounts(tx, f.userId(), q.view(), PageUnit.ITEM, Set.of(), Set.of(),
+                months.putAll(counters.monthCounts(tx, f.userId(), q.view(), PageUnit.ITEM, f.productTypes(), f.typeIds(),
                         f.excludeCancelled(), oldest, newest));
             } else {
-                days.putAll(counters.dayCounts(tx, f.userId(), q.view(), PageUnit.ITEM, Set.of(), Set.of(),
+                days.putAll(counters.dayCounts(tx, f.userId(), q.view(), PageUnit.ITEM, f.productTypes(), f.typeIds(),
                         f.excludeCancelled(), oldest, newest));
             }
         }

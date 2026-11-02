@@ -34,16 +34,16 @@ class OffsetPropertyTest extends ReadPropertyBase {
         applyBatches(items);
         for (PagedQuery pq : queries) {
             ReadQuery q = pq.query();
-            long count = oracle.count(q.view(), q.filter(), q.from(), q.to());
+            long count = oracle.count(q.view(), q.filter(), q.transactionTypes(), q.from(), q.to());
             // page in [1, ceil(count / pageSize) + 2]: inside, on the last page and beyond it.
             long page = 1 + pq.pagePick() % (Math.ceilDiv(count, pq.pageSize()) + 2);
             RecordingLevel0Query recording = new RecordingLevel0Query(queryFor(q.view()));
             ProjectionPage got = reader.readLevel0(recording,
-                    new Level0Request(q.filter(), q.from(), q.to(), page, pq.pageSize()));
+                    q.request(page, pq.pageSize()));
             String as = pq + " page=" + page;
             assertThat(got.totalItems()).as(as).isEqualTo(count);
             assertThat(got.items()).as(as).isEqualTo(oracle.page(
-                    q.view(), q.filter(), q.from(), q.to(), (page - 1) * pq.pageSize(), pq.pageSize()));
+                    q.view(), q.filter(), q.transactionTypes(), q.from(), q.to(), (page - 1) * pq.pageSize(), pq.pageSize()));
             assertWalkLandsInsideOneSegment(q, got, recording, as);
         }
     }
@@ -67,7 +67,7 @@ class OffsetPropertyTest extends ReadPropertyBase {
                 .filter(s -> s.end().equals(call.hi()))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError(as + ": key query hi " + call.hi() + " is no segment end"));
-        long segmentCount = oracle.count(q.view(), q.filter(), target.start(), call.hi());
+        long segmentCount = oracle.count(q.view(), q.filter(), q.transactionTypes(), target.start(), call.hi());
         assertThat(call.offset()).as(as + " residual inside " + target).isGreaterThanOrEqualTo(0).isLessThan(segmentCount);
     }
 

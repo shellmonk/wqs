@@ -35,7 +35,7 @@ class PaginationPropertyTest extends ReadPropertyBase {
         for (SizedQuery sq : queries) {
             ReadQuery q = sq.query();
             Level0Query lq = queryFor(q.view());
-            List<ItemEntry> full = oracle.page(q.view(), q.filter(), q.from(), q.to(), 0, Integer.MAX_VALUE);
+            List<ItemEntry> full = oracle.page(q.view(), q.filter(), q.transactionTypes(), q.from(), q.to(), 0, Integer.MAX_VALUE);
 
             ProjectionPage first = read(lq, q, 1, sq.pageSize());
             long totalPages = first.totalPages();
@@ -60,7 +60,7 @@ class PaginationPropertyTest extends ReadPropertyBase {
     }
 
     private ProjectionPage read(Level0Query lq, ReadQuery q, long page, int pageSize) {
-        return reader.readLevel0(lq, new Level0Request(q.filter(), q.from(), q.to(), page, pageSize));
+        return reader.readLevel0(lq, q.request(page, pageSize));
     }
 
     @Provide
