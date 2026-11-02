@@ -1,0 +1,289 @@
+package wqs.gen;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import net.jqwik.api.Arbitraries;
+import net.jqwik.api.Arbitrary;
+import net.jqwik.api.Combinators;
+import net.jqwik.api.Tuple;
+import wqs.domain.ProjectionItem;
+import wqs.domain.SourceKind;
+import wqs.domain.ViewKind;
+import wqs.read.Level0Filter;
+
+/**
+ * Read-side generators (spec 8.1): small level-0 histories shaped to stress the counter/live
+ * split -- sparse days and months, ties on "occurredAt", items exactly on day and month
+ * boundaries, /cc-only payments, null and non-null products, and cancels on both sides of their
+ * originals in arrival order -- plus boundary-heavy level-0 queries over them.
+ */
+public final class ReadGenerators {
+
+    /** Items lie in [WINDOW_START, WINDOW_END); partitions 2033-12 through 2034-03 cover it. */
+    public static final Instant WINDOW_START = Instant.parse("2033-12-20T00:00:00Z");
+    public static final Instant WINDOW_END = Instant.parse("2034-03-10T00:00:00Z");
+
+    /** Queries range 10 days beyond the data on both sides. */
+    public static final Instant QUERY_START = WINDOW_START.minus(10, ChronoUnit.DAYS);
+    public static final Instant QUERY_END = WINDOW_END.plus(10, ChronoUnit.DAYS);
+
+    /** Month boundaries inside the window; always part of the boundary pool. */
+    static final List<Instant> MONTH_BOUNDARIES = List.of(
+            Instant.parse("2034-01-01T00:00:00Z"),
+            Instant.parse("2034-02-01T00:00:00Z"),
+            Instant.parse("2034-03-01T00:00:00Z"));
+
+    private static final int WINDOW_DAYS = (int) ChronoUnit.DAYS.between(WINDOW_START, WINDOW_END);
+    private static final int QUERY_DAYS = (int) ChronoUnit.DAYS.between(QUERY_START, QUERY_END);
+
+    /**
+     * Days next to a month boundary (Dec 31 / Jan 1, Jan 31 / Feb 1, Feb 28 / Mar 1), as offsets
+     * from WINDOW_START. Dense days are biased towards them so whole-month and partial-month
+     * segments both see data.
+     */
+    private static final List<Integer> EDGE_DAYS = List.of(11, 12, 42, 43, 70, 71);
+
+    private static final int MAX_ITEMS = 150;
+
+    public record ReadQuery(
+            ViewKind view, long userId, Instant from, Instant to, Integer productId,
+            boolean excludeCancelled) {
+
+        public Level0Filter filter() {
+            return new Level0Filter(userId, productId, excludeCancelled);
+        }
+    }
+
+    // ------------------------------------------------------------------ histories
+
+    private enum TimeKind { BOUNDARY, TIE, CLUSTER }
+
+    /** How one original item picks its "occurredAt"; resolved against the items before it. */
+    private record TimeSpec(TimeKind kind, int pick, int secondOfDay) {}
+
+    /** A cancel of the item: its delay after the original and its place in arrival order. */
+    private record CancelSpec(long delaySeconds, boolean beforeOriginal, int positionPick) {}
+
+    private record ItemSpec(
+            long userId, TimeSpec time, SourceKind source, Integer productId, CancelSpec cancel,
+            String detail, long amountCents) {}
+
+    /** Users skewed {1: 60%, 2: 30%, 3: 10%}; user 4 never has data. */
+    private static Arbitrary<Long> historyUsers() {
+        return Arbitraries.frequency(Tuple.of(6, 1L), Tuple.of(3, 2L), Tuple.of(1, 3L));
+    }
+
+    private static Arbitrary<TimeSpec> timeSpecs() {
+        Arbitrary<Integer> picks = Arbitraries.integers().between(0, 10_000);
+        Arbitrary<Integer> seconds = Arbitraries.integers().between(0, 86_399);
+        return Arbitraries.frequencyOf(
+                Tuple.of(15, picks.map(p -> new TimeSpec(TimeKind.BOUNDARY, p, 0))),
+                Tuple.of(15, picks.map(p -> new TimeSpec(TimeKind.TIE, p, 0))),
+                Tuple.of(70, Combinators.combine(picks, seconds)
+                        .as((p, s) -> new TimeSpec(TimeKind.CLUSTER, p, s))));
+    }
+
+    /**
+     * Delay of a cancel after its original: a tie (0) a fifth of the time, otherwise seconds,
+     * hours or days, so cancels often land in a different day or month than their original.
+     */
+    private static Arbitrary<CancelSpec> cancelSpecs() {
+        Arbitrary<Long> delays = Arbitraries.frequencyOf(
+                Tuple.of(1, Arbitraries.just(0L)),
+                Tuple.of(1, Arbitraries.longs().between(1, 120)),
+                Tuple.of(1, Arbitraries.longs().between(3_600, 86_400)),
+                Tuple.of(1, Arbitraries.longs().between(86_400, 20 * 86_400L)));
+        return Combinators.combine(
+                        delays,
+                        Arbitraries.frequency(Tuple.of(1, true), Tuple.of(2, false)),
+                        Arbitraries.integers().between(0, 10_000))
+                .as(CancelSpec::new);
+    }
+
+    private static Arbitrary<ItemSpec> itemSpecs() {
+        return Combinators.combine(
+                        historyUsers(),
+                        timeSpecs(),
+                        Arbitraries.frequency(
+                                Tuple.of(5, SourceKind.TRANSACTION),
+                                Tuple.of(2, SourceKind.CLAIMABLE_PRIZE),
+                                Tuple.of(3, SourceKind.PAYMENT)),
+                        Arbitraries.of(11, 13).injectNull(0.3),
+                        cancelSpecs().injectNull(0.8),
+                        Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(4)
+                                .map(c -> "{\"gameCode\": \"" + c + "\"}").injectNull(0.5),
+                        Arbitraries.longs().between(-50_000, 50_000))
+                .as(ItemSpec::new);
+    }
+
+    /** 2-4 dense days per user, offsets from WINDOW_START, a quarter next to a month boundary. */
+    private static Arbitrary<List<Integer>> denseDays() {
+        Arbitrary<Integer> day = Arbitraries.frequencyOf(
+                Tuple.of(1, Arbitraries.of(EDGE_DAYS)),
+                Tuple.of(3, Arbitraries.integers().between(0, WINDOW_DAYS - 1)));
+        return day.list().ofMinSize(2).ofMaxSize(4);
+    }
+
+    /**
+     * 20-150 level-0 items (at most 125 originals plus their cancels, capped at 150). Every
+     * "batchId" is null: level 0 ignores sessions, and this keeps rollups out of the way.
+     */
+    public static Arbitrary<List<ProjectionItem>> history() {
+        return Combinators.combine(
+                        denseDays(), denseDays(), denseDays(),
+                        itemSpecs().list().ofMinSize(20).ofMaxSize(125))
+                .as((d1, d2, d3, specs) -> build(Map.of(1L, d1, 2L, d2, 3L, d3), specs));
+    }
+
+    private record Placed(ProjectionItem item, double order) {}
+
+    private static List<ProjectionItem> build(Map<Long, List<Integer>> dense, List<ItemSpec> specs) {
+        List<ProjectionItem> originals = new ArrayList<>();
+        for (int i = 0; i < specs.size(); i++) {
+            ItemSpec s = specs.get(i);
+            Instant at = resolveTime(s, dense.get(s.userId()), originals);
+            originals.add(new ProjectionItem(
+                    s.userId(), s.source(), "h" + i, at, s.productId(), null, null,
+                    typeOf(s.source()), BigDecimal.valueOf(s.amountCents(), 4), "EUR", null, null,
+                    s.detail()));
+        }
+
+        List<Placed> placed = new ArrayList<>();
+        int total = originals.size();
+        for (int i = 0; i < originals.size(); i++) {
+            ProjectionItem o = originals.get(i);
+            placed.add(new Placed(o, i));
+            CancelSpec c = specs.get(i).cancel();
+            if (c == null || total >= MAX_ITEMS) {
+                continue;
+            }
+            Instant at = o.occurredAt().plusSeconds(c.delaySeconds());
+            if (!at.isBefore(WINDOW_END)) {
+                at = WINDOW_END.minusSeconds(1);
+            }
+            ProjectionItem cancel = new ProjectionItem(
+                    o.userId(), o.source(), o.sourceId() + "-c", at, o.productId(), null, null,
+                    (short) 2, o.amount().negate(), o.currency(), null, o.sourceId(), null);
+            // Arrival position strictly before (at a random earlier slot) or after the original.
+            double order = c.beforeOriginal()
+                    ? (c.positionPick() % (i + 1)) - 0.5
+                    : i + 0.5 + (c.positionPick() % (originals.size() - i));
+            placed.add(new Placed(cancel, order));
+            total++;
+        }
+        placed.sort(Comparator.comparingDouble(Placed::order));
+        return placed.stream().map(Placed::item).toList();
+    }
+
+    private static Instant resolveTime(ItemSpec s, List<Integer> dense, List<ProjectionItem> earlier) {
+        TimeSpec t = s.time();
+        switch (t.kind()) {
+            case BOUNDARY -> {
+                // Half the time a month boundary, otherwise the start of any day in the window.
+                if (t.pick() % 2 == 0) {
+                    return MONTH_BOUNDARIES.get((t.pick() / 2) % MONTH_BOUNDARIES.size());
+                }
+                return WINDOW_START.plus((t.pick() / 2) % WINDOW_DAYS, ChronoUnit.DAYS);
+            }
+            case TIE -> {
+                // Reuse an earlier item's instant -- the same user's when there is one.
+                List<Instant> same = earlier.stream()
+                        .filter(e -> e.userId() == s.userId()).map(ProjectionItem::occurredAt).toList();
+                List<Instant> pool = same.isEmpty()
+                        ? earlier.stream().map(ProjectionItem::occurredAt).toList() : same;
+                if (!pool.isEmpty()) {
+                    return pool.get(t.pick() % pool.size());
+                }
+                return cluster(dense, t.pick(), t.secondOfDay());
+            }
+            default -> {
+                return cluster(dense, t.pick(), t.secondOfDay());
+            }
+        }
+    }
+
+    private static Instant cluster(List<Integer> dense, int pick, int secondOfDay) {
+        int day = dense.get(pick % dense.size());
+        return WINDOW_START.plus(day, ChronoUnit.DAYS).plusSeconds(secondOfDay);
+    }
+
+    private static short typeOf(SourceKind source) {
+        return switch (source) {
+            case TRANSACTION -> 1;
+            case CLAIMABLE_PRIZE -> 3;
+            default -> 9;
+        };
+    }
+
+    // ------------------------------------------------------------------ queries
+
+    /** Boundary-heavy instants over [QUERY_START, QUERY_END]. */
+    private static Arbitrary<Instant> queryInstants() {
+        return Arbitraries.frequencyOf(
+                Tuple.of(3, Arbitraries.of(MONTH_BOUNDARIES)),
+                Tuple.of(3, Arbitraries.integers().between(0, QUERY_DAYS)
+                        .map(d -> QUERY_START.plus(d, ChronoUnit.DAYS))),
+                Tuple.of(4, Arbitraries.longs().between(0, ChronoUnit.SECONDS.between(QUERY_START, QUERY_END))
+                        .map(QUERY_START::plusSeconds)));
+    }
+
+    /** A sub-day instant pair inside one UTC day, either end possibly on the day boundary. */
+    private static Arbitrary<Instant[]> sameDay() {
+        return Combinators.combine(
+                        Arbitraries.integers().between(0, QUERY_DAYS - 1),
+                        Arbitraries.integers().between(0, 86_400),
+                        Arbitraries.integers().between(0, 86_400))
+                .as((d, a, b) -> {
+                    Instant day = QUERY_START.plus(d, ChronoUnit.DAYS);
+                    return new Instant[] {day.plusSeconds(Math.min(a, b)), day.plusSeconds(Math.max(a, b))};
+                });
+    }
+
+    /** A pair inside one UTC month (Dec 2033 - Mar 2034), ends often on day boundaries. */
+    private static Arbitrary<Instant[]> sameMonth() {
+        Arbitrary<Integer> offsets = Arbitraries.frequencyOf(
+                Tuple.of(1, Arbitraries.integers().between(0, 31).map(d -> d * 86_400)),
+                Tuple.of(1, Arbitraries.integers().between(0, 31 * 86_400)));
+        return Combinators.combine(Arbitraries.integers().between(0, 3), offsets, offsets)
+                .as((m, a, b) -> {
+                    LocalDate first = LocalDate.of(2033, 12, 1).plusMonths(m);
+                    Instant start = first.atStartOfDay(ZoneOffset.UTC).toInstant();
+                    Instant end = first.plusMonths(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+                    Instant x = min(start.plusSeconds(a), end);
+                    Instant y = min(start.plusSeconds(b), end);
+                    return x.isAfter(y) ? new Instant[] {y, x} : new Instant[] {x, y};
+                });
+    }
+
+    private static Arbitrary<Instant[]> ranges() {
+        return Arbitraries.frequencyOf(
+                Tuple.of(10, queryInstants().map(i -> new Instant[] {i, i})),
+                Tuple.of(10, sameDay()),
+                Tuple.of(15, sameMonth()),
+                Tuple.of(65, Combinators.combine(queryInstants(), queryInstants())
+                        .as((a, b) -> a.isAfter(b) ? new Instant[] {b, a} : new Instant[] {a, b})));
+    }
+
+    public static Arbitrary<ReadQuery> queries() {
+        return Combinators.combine(
+                        Arbitraries.of(ViewKind.values()),
+                        Arbitraries.of(1L, 2L, 3L, 4L),
+                        ranges(),
+                        Arbitraries.of(11, 13, 99).injectNull(0.4),
+                        Arbitraries.of(true, false))
+                .as((v, u, r, p, x) -> new ReadQuery(v, u, r[0], r[1], p, x));
+    }
+
+    private static Instant min(Instant a, Instant b) {
+        return a.isBefore(b) ? a : b;
+    }
+
+    private ReadGenerators() {}
+}
