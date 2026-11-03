@@ -2,13 +2,9 @@ package wqs.db;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.time.YearMonth;
 import java.util.List;
 import java.util.Map;
-import org.flywaydb.core.Flyway;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.junit.jupiter.api.Test;
-import org.postgresql.ds.PGSimpleDataSource;
 
 class MigrationTest extends PostgresTestBase {
 
@@ -58,24 +54,24 @@ class MigrationTest extends PostgresTestBase {
         assertThat(columns).contains("occurredAt", "subBatchId", "userId");
     }
 
-    // --- V10: source contract (phase 5, spec 4.1, plan D1-D3) ---------------------------------
+    // --- Final schema (baseline migration) ---------------------------------------------------
 
     private static final List<String> PRODUCT_TABLES = List.of(
             "wqWebItem", "wqCcItem", "wqSession", "wqPlay", "wqWebHighLevel", "wqCcHighLevel",
             "wqPendingCancel");
 
     @Test
-    void v10_rekeys_products_to_text() {
+    void products_are_text_and_there_is_no_product_table() {
         for (String table : PRODUCT_TABLES) {
             assertThat(columnType(table, "productId")).as(table + ".productId").isEqualTo("text");
             assertThat(columnType(table, "productType")).as(table + ".productType").isEqualTo("text");
         }
         assertThat(db().value("select to_regclass('\"wqProduct\"')::text", String.class))
-                .as("wqProduct dropped").isNull();
+                .as("no product table").isNull();
     }
 
     @Test
-    void v10_counter_pk_is_user_view_unit_productType_typeId_period() {
+    void counter_pk_is_user_view_unit_productType_typeId_period() {
         for (String table : List.of("wqCountMonth", "wqCountDay")) {
             List<String> pk = db().column("""
                     select a.attname
@@ -92,11 +88,12 @@ class MigrationTest extends PostgresTestBase {
             assertThat(columnType(table, "typeId")).as(table).isEqualTo("smallint");
             assertThat(columnType(table, "productId")).as(table + " has no productId").isNull();
         }
-        // wqCountDay stays range-partitioned by "period" (R5).
+        // wqCountDay is range-partitioned by "period"; wqCountMonth is not partitioned.
         assertThat(db().value("""
                 select pg_get_partkeydef(to_regclass('"wqCountDay"')::oid)
                 """, String.class)).isEqualTo("RANGE (period)");
-        // The counter CHECKs survive the rebuild.
+        assertThat(db().value("select relkind::text from pg_class where relname = 'wqCountMonth'", String.class))
+                .isEqualTo("r");
         for (String table : List.of("wqCountMonth", "wqCountDay")) {
             assertThat(db().value("""
                     select count(*) from pg_constraint
@@ -106,7 +103,7 @@ class MigrationTest extends PostgresTestBase {
     }
 
     @Test
-    void v10_seeds_tx_types() {
+    void tx_types_are_seeded_and_the_identity_continues_after_them() {
         Map<String, Short> direction = db().rows("select \"code\", \"direction\" from \"wqTxType\"").stream()
                 .collect(java.util.stream.Collectors.toMap(
                         r -> r.get("code", String.class), r -> r.get("direction", Short.class)));
@@ -124,90 +121,58 @@ class MigrationTest extends PostgresTestBase {
         assertThat(direction.values().stream().filter(d -> d != 0)).hasSize(6);
         assertThat(db().value("select min(\"typeId\") from \"wqTxType\"", Short.class))
                 .as("real type ids start at 1; 0 is the ALL sentinel").isEqualTo((short) 1);
+        // The seed sets the identity past its explicit ids (other tests may register more codes).
+        assertThat(db().value("""
+                select last_value from pg_sequences
+                where schemaname = 'public' and sequencename = 'wqTxType_typeId_seq'
+                """, Long.class)).isGreaterThanOrEqualTo(56L);
     }
 
-    /**
-     * D1: V10 empties every projection table and the stream offset, so the stream re-ingests from
-     * offset 0; dead letters are kept. Runs V1..V9 on a fresh database, seeds every table the way
-     * phase 4 left it, then applies V10.
-     */
+    /** D8: the locator-only columns and the CHECK that "cancels" appears only on locator-only rows. */
     @Test
-    void v10_resets_stream_offset_and_projection() {
-        TestSql db = freshDatabase("wqsV10Reset");
-        PGSimpleDataSource ds = dataSourceFor("wqsV10Reset");
-        Flyway.configure().dataSource(ds).locations("classpath:db/migration").target("9").load().migrate();
-        // Phase-4 provisioning, then one row in every projection table.
-        new PartitionManager(JdbcClient.create(dataSourceFor("wqsV10Reset"))).ensurePartitionsAhead(YearMonth.of(2030, 1), 0);
-        db.execute("""
-                insert into "wqProduct" values (11, 'p11', 'P 11', 1);
-                insert into "wqItemLocator" values (1, 's1', 7, '2030-01-05T00:00:00Z', 1);
-                insert into "wqWebItem" ("userId","itemId","source","sourceId","occurredAt","productId","type","amount","currency")
-                  values (7, 1, 1, 's1', '2030-01-05T00:00:00Z', 11, 1, 1, 'EUR');
-                insert into "wqCcItem" ("userId","itemId","source","sourceId","occurredAt","productId","type","amount","currency")
-                  values (7, 1, 1, 's1', '2030-01-05T00:00:00Z', 11, 1, 1, 'EUR');
-                insert into "wqGroupLocator" values (7, 'b1', '', '2030-01-05T00:00:00Z');
-                insert into "wqSession" ("userId","batchId","startedAt","endedAt","productId","currency")
-                  values (7, 'b1', '2030-01-05T00:00:00Z', '2030-01-05T00:00:00Z', 11, 'EUR');
-                insert into "wqPlay" ("userId","batchId","subBatchId","startedAt","endedAt","productId","currency")
-                  values (7, 'b1', 'p1', '2030-01-05T00:00:00Z', '2030-01-05T00:00:00Z', 11, 'EUR');
-                insert into "wqWebHighLevel" ("userId","occurredAt","kind","refId","productId","currency")
-                  values (7, '2030-01-05T00:00:00Z', 0, 'b1', 11, 'EUR');
-                insert into "wqCcHighLevel" ("userId","occurredAt","kind","refId","productId","currency")
-                  values (7, '2030-01-05T00:00:00Z', 0, 'b1', 11, 'EUR');
-                insert into "wqCountMonth" values (7, 1, 0, 0, '2030-01-01', 1, 1);
-                insert into "wqCountDay" values (7, 1, 0, 0, '2030-01-05', 1, 1);
-                insert into "wqPendingCancel" ("source","cancelSourceId","cancelsSourceId","userId","occurredAt","productId","type","amount","currency")
-                  values (1, 'c1', 'x1', 7, '2030-01-05T00:00:00Z', 11, 2, 1, 'EUR');
-                insert into "wqStreamOffset" ("stream","offsetVal") values ('wallet', 42);
-                insert into "wqDeadLetter" ("payload","error","attempts") values ('{}', 'poison', 3);
-                """);
-
-        Flyway.configure().dataSource(ds).locations("classpath:db/migration").load().migrate();
-
-        for (String table : List.of("wqItemLocator", "wqWebItem", "wqCcItem", "wqGroupLocator",
-                "wqSession", "wqPlay", "wqWebHighLevel", "wqCcHighLevel", "wqCountMonth",
-                "wqCountDay", "wqPendingCancel", "wqStreamOffset")) {
-            assertThat(db.count("\"" + table + "\"")).as(table + " emptied").isZero();
+    void locator_carries_zero_amount_and_cancels_with_their_check() {
+        assertThat(columnType("wqItemLocator", "zeroAmount")).isEqualTo("boolean");
+        assertThat(nullable("wqItemLocator", "zeroAmount")).isFalse();
+        assertThat(columnType("wqItemLocator", "cancels")).isEqualTo("text");
+        assertThat(db().value("""
+                select pg_get_constraintdef(oid) from pg_constraint
+                where conname = 'wqItemLocator_cancels_locator_only'
+                """, String.class)).contains("cancels IS NULL").contains("\"zeroAmount\"");
+        for (String table : List.of("wqSession", "wqPlay")) {
+            assertThat(columnType(table, "firstSourceId")).as(table).isEqualTo("text");
+            assertThat(columnType(table, "firstSource")).as(table).isEqualTo("smallint");
         }
-        assertThat(db.count("\"wqDeadLetter\"")).as("dead letters kept").isEqualTo(1);
     }
 
-    /**
-     * R5: V10 recreates "wqCountDay", which drops its partitions with the old table. The app's
-     * existing provisioning must recreate them -- it checks each table separately, so the other
-     * tables' surviving partitions do not hide the missing ones.
-     */
+    /** Covering indexes INCLUDE the filter columns; the session-member indexes are on the batch id. */
     @Test
-    void v10_count_day_partitions_are_reprovisioned_by_partition_manager() {
-        TestSql db = freshDatabase("wqsV10Partitions");
-        PGSimpleDataSource ds = dataSourceFor("wqsV10Partitions");
-        Flyway.configure().dataSource(ds).locations("classpath:db/migration").target("9").load().migrate();
-        PartitionManager manager = new PartitionManager(JdbcClient.create(dataSourceFor("wqsV10Partitions")));
-        YearMonth month = YearMonth.of(2030, 3);
-        manager.ensurePartitionsAhead(month, 0);
-        assertThat(partitionsOf(db, "wqCountDay")).containsExactly("wqCountDay_2030_03");
+    void read_path_indexes_have_their_final_shape() {
+        assertThat(indexDef("wqWebItem_cover")).endsWith(
+                "(\"userId\", \"occurredAt\" DESC, \"itemId\" DESC) INCLUDE (cancelled, \"productType\", type)");
+        assertThat(indexDef("wqCcItem_cover")).endsWith(
+                "(\"userId\", \"occurredAt\" DESC, \"itemId\" DESC) INCLUDE (cancelled, \"productType\", type)");
+        assertThat(indexDef("wqWebHighLevel_cover")).endsWith(
+                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\")");
+        assertThat(indexDef("wqCcHighLevel_cover")).endsWith(
+                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\")");
+        assertThat(indexDef("wqWebItem_batch")).endsWith(
+                "(\"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
+        assertThat(indexDef("wqCcItem_batch")).endsWith(
+                "(\"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
+        assertThat(indexDef("wqPlay_batch")).endsWith("(\"userId\", \"batchId\", \"startedAt\")");
+    }
 
-        Flyway.configure().dataSource(ds).locations("classpath:db/migration").load().migrate();
-
-        assertThat(partitionsOf(db, "wqCountDay")).as("dropped with the old table").isEmpty();
-        assertThat(partitionsOf(db, "wqWebItem")).containsExactly("wqWebItem_2030_03");
-        assertThat(manager.runwayMonths(month)).as("runway sees the gap").isZero();
-
-        assertThat(manager.ensurePartitionsAhead(month, 0)).isEqualTo(1);
-
-        assertThat(partitionsOf(db, "wqCountDay")).containsExactly("wqCountDay_2030_03");
-        assertThat(manager.runwayMonths(month)).isEqualTo(1);
-        db.execute("""
-                insert into "wqCountDay"
-                  ("userId","viewKind","pageUnit","productType","typeId","period","cntAll","cntExclCancelled")
-                values (7, 1, 0, '', 0, date '2030-03-31', 1, 1)
-                """);
-        assertThat(db.count("\"wqCountDay_2030_03\"")).isEqualTo(1);
+    /** The Quartz JobStore lives in its own schema. */
+    @Test
+    void quartz_tables_live_in_the_quartz_schema() {
+        assertThat(db().value("""
+                select count(*) from pg_tables where schemaname = 'quartz' and tablename like 'qrtz\\_%'
+                """, Long.class)).isEqualTo(11L);
     }
 
     /** D5: the versioned-upsert column and the delta poller's watermark table. */
     @Test
-    void v13_adds_versionAt_and_watermark_table() {
+    void locator_has_versionAt_and_watermark_table_exists() {
         assertThat(columnType("wqItemLocator", "versionAt")).isEqualTo("timestamp with time zone");
         assertThat(nullable("wqItemLocator", "versionAt")).as("null for stream items").isTrue();
 
@@ -230,6 +195,10 @@ class MigrationTest extends PostgresTestBase {
         assertThat(updatedAtDefault).isEqualTo("now()");
     }
 
+    private static String indexDef(String name) {
+        return db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class, "\"" + name + "\"");
+    }
+
     private static boolean nullable(String table, String column) {
         return "YES".equals(db().value("""
                 select is_nullable from information_schema.columns
@@ -243,29 +212,5 @@ class MigrationTest extends PostgresTestBase {
                 where table_schema = 'public' and table_name = ? and column_name = ?
                 """, String.class, table, column);
         return types.isEmpty() ? null : types.get(0);
-    }
-
-    private static List<String> partitionsOf(TestSql db, String parent) {
-        return db.column("""
-                select c.relname from pg_inherits i join pg_class c on c.oid = i.inhrelid
-                where i.inhparent = to_regclass(?)::oid order by c.relname
-                """, String.class, "\"" + parent + "\"");
-    }
-
-    /** A new, empty database in the shared container (dropped first if a previous run left it). */
-    private static TestSql freshDatabase(String name) {
-        db().execute("drop database if exists \"" + name + "\" with (force)");
-        db().execute("create database \"" + name + "\"");
-        return new TestSql(dataSourceFor(name));
-    }
-
-    private static PGSimpleDataSource dataSourceFor(String database) {
-        PGSimpleDataSource ds = new PGSimpleDataSource();
-        ds.setServerNames(new String[] {POSTGRES.getHost()});
-        ds.setPortNumbers(new int[] {POSTGRES.getFirstMappedPort()});
-        ds.setDatabaseName(database);
-        ds.setUser(POSTGRES.getUsername());
-        ds.setPassword(POSTGRES.getPassword());
-        return ds;
     }
 }

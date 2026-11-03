@@ -111,7 +111,7 @@ class RollupUpdaterTest extends PostgresTestBase {
     /**
      * The re-key path (delete returning the whole row, re-insert at the new start) keeps every
      * column: numeric values at full scale, and null productId / productType / firstSource* bound
-     * as typed nulls. The rows are first nulled the way a pre-V11 row would be, so the re-insert
+     * as typed nulls. The nullable columns are first set to null, so the re-insert
      * must carry nulls through; the re-keyed rows then equal the rows of the in-order run.
      */
     @Test

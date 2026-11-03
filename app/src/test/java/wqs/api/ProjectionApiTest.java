@@ -248,7 +248,7 @@ class ProjectionApiTest extends ApiTestBase {
     }
 
     /**
-     * Ruling R2: the phase-4 integer productId filter is gone (products are strings since V10; the
+     * Ruling R2: the phase-4 integer productId filter is gone (products are strings, not ids; the
      * contract's productTypes list filter arrives in phase 5 Task 7). The parameter is no longer
      * bound, so it neither filters nor fails.
      */

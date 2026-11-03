@@ -1,7 +1,7 @@
 package wqs.gen;
 
 /**
- * Seeded "wqTxType" ids (V10) for tests that build items by hand. {@code TxTypesTest} pins each
+ * Seeded "wqTxType" ids (baseline migration) for tests that build items by hand. {@code TxTypesTest} pins each
  * against the migrated table, so a reseeding that moves an id fails there, not as a silent
  * change of meaning in every test that uses it.
  */

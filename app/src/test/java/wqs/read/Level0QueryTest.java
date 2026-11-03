@@ -205,7 +205,7 @@ class Level0QueryTest extends Level0TestSupport {
 
     /**
      * Plan D4/Task 5: after ANALYZE on realistic data, the default plan (no planner setting
-     * touched) for a filtered key query is an index-only scan of the V10 covering index -- the
+     * touched) for a filtered key query is an index-only scan of the covering index -- the
      * filter columns ride in INCLUDE -- not a seq scan.
      */
     @Test

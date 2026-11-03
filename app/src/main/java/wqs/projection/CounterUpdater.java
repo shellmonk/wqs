@@ -21,7 +21,7 @@ import wqs.domain.ViewKind;
  * Maintains the two-tier pagination counters (spec 5.7): "wqCountMonth" for whole months and
  * "wqCountDay" for the partial months at each end of a range. Periods are UTC.
  *
- * Keys are (productType, typeId) per tier (V10). productType = '' is the ALL-product-types
+ * Keys are (productType, typeId) per tier. productType = '' is the ALL-product-types
  * sentinel and typeId = 0 the ALL-transaction-types sentinel ({@link CounterSentinels}), so the
  * common unfiltered query reads one row rather than summing across values.
  *

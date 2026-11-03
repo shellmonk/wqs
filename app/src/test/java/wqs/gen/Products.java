@@ -1,8 +1,8 @@
 package wqs.gen;
 
 /**
- * A small product pool for hand-built test items, as (productId, productType). Both are strings
- * since V10. A session's pair is its FIRST item's (plan D6), never a per-column LEAST, so the pool
+ * A small product pool for hand-built test items, as (productId, productType). Both are
+ * strings. A session's pair is its FIRST item's (plan D6), never a per-column LEAST, so the pool
  * deliberately makes the two orders DISAGREE: P03 has the highest type ("lottery") and P13 the
  * lowest ("arcade"), so a per-column LEAST pairs P03 with "arcade" -- a product no item has.
  */
