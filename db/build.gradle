@@ -1,22 +1,22 @@
 plugins {
-    `java-library`
+    id 'java-library'
     alias(libs.plugins.springDependencyManagement)
 }
 
 dependencyManagement {
-    imports { mavenBom("org.springframework.boot:spring-boot-dependencies:${libs.versions.springBoot.get()}") }
+    imports { mavenBom "org.springframework.boot:spring-boot-dependencies:${libs.versions.springBoot.get()}" }
 }
 
-val generatedSrc = layout.buildDirectory.dir("generated-src/jooq")
+def generatedSrc = layout.buildDirectory.dir('generated-src/jooq')
 
 sourceSets {
     main {
         // Populated by `generateJooq`, which compileJava depends on below.
         java.srcDir(generatedSrc)
     }
-    create("codegen") {
-        java.srcDir("src/codegen/java")
-        compileClasspath += configurations.runtimeClasspath.get()
+    codegen {
+        java.srcDir('src/codegen/java')
+        compileClasspath += configurations.runtimeClasspath
         // CodegenRunner points Flyway at "classpath:db/migration", which lives in main's
         // resources. configurations.runtimeClasspath (added to compileClasspath above) is
         // dependency jars only, not main's own output, so it must be added separately here
@@ -24,19 +24,19 @@ sourceSets {
         // source directory (rather than sourceSets.main.output) avoids a task dependency on
         // :db:compileJava, which would otherwise cycle back through generateJooq -> classes
         // -> compileJava -> generateJooq.
-        runtimeClasspath += files("src/main/resources")
+        runtimeClasspath += files('src/main/resources')
     }
 }
 
 dependencies {
-    api(libs.jooq)
+    api libs.jooq
 
-    "codegenImplementation"(libs.jooq.codegen)
-    "codegenImplementation"(libs.jooq.meta)
-    "codegenImplementation"(libs.flyway.core)
-    "codegenImplementation"(libs.flyway.postgresql)
-    "codegenImplementation"(libs.postgresql)
-    "codegenImplementation"(libs.testcontainers.postgresql)
+    codegenImplementation libs.jooq.codegen
+    codegenImplementation libs.jooq.meta
+    codegenImplementation libs.flyway.core
+    codegenImplementation libs.flyway.postgresql
+    codegenImplementation libs.postgresql
+    codegenImplementation libs.testcontainers.postgresql
 }
 
 /**
@@ -49,39 +49,43 @@ dependencies {
  * (and therefore skip starting a container) whenever the migrations and the strategy
  * haven't changed.
  */
-val generateJooq by tasks.registering(JavaExec::class) {
-    group = "build"
-    description = "Generate jOOQ classes from Flyway migrations via Testcontainers"
+def generateJooq = tasks.register('generateJooq', JavaExec) {
+    group = 'build'
+    description = 'Generate jOOQ classes from Flyway migrations via Testcontainers'
 
-    val outputDir = generatedSrc.get().asFile
+    def outputDir = generatedSrc.get().asFile
 
-    classpath = sourceSets["codegen"].runtimeClasspath
-    mainClass.set("wqs.codegen.CodegenRunner")
-    args(outputDir.absolutePath)
+    classpath = sourceSets.codegen.runtimeClasspath
+    mainClass = 'wqs.codegen.CodegenRunner'
+    args outputDir.absolutePath
 
     // Always generate into an empty directory. jOOQ sweeps stale files from its own output,
     // but on a case-insensitive filesystem a class rename that differs only in case
     // (Wqwebitem.java -> WqWebItem.java) overwrites the existing file while the directory
     // entry keeps the OLD spelling, so the sweep then deletes it as an orphan. Measured
     // once: a run that reported success and emitted no table classes at all.
-    doFirst { check(outputDir.deleteRecursively()) { "could not clear $outputDir" } }
+    doFirst {
+        if (outputDir.exists() && !outputDir.deleteDir()) {
+            throw new GradleException("could not clear $outputDir")
+        }
+    }
 
-    inputs.dir("src/main/resources/db/migration")
+    inputs.dir('src/main/resources/db/migration')
     // JavaExec.getClasspath() is not an annotated task input, so the jOOQ jars and the
     // compiled strategy are invisible to the up-to-date check unless declared here. Without
     // this a jooq version bump leaves the task UP-TO-DATE and compiles the previous version's
     // generated source against the new runtime. Subsumes the codegen sources, whose compiled
     // output is on this classpath.
-    inputs.files(sourceSets["codegen"].runtimeClasspath)
+    inputs.files(sourceSets.codegen.runtimeClasspath)
     outputs.dir(generatedSrc)
 }
 
-tasks.named<JavaCompile>("compileJava") { dependsOn(generateJooq) }
+tasks.named('compileJava') { dependsOn(generateJooq) }
 
-val checkMigrationQuoting by tasks.registering(MigrationQuotingCheck::class) {
-    group = "verification"
-    description = "Fail if any migration contains an unquoted camelCase identifier"
-    migrations.from(fileTree("src/main/resources/db/migration"))
+def checkMigrationQuoting = tasks.register('checkMigrationQuoting', MigrationQuotingCheck) {
+    group = 'verification'
+    description = 'Fail if any migration contains an unquoted camelCase identifier'
+    migrations.from(fileTree('src/main/resources/db/migration'))
 }
 
-tasks.named("check") { dependsOn(checkMigrationQuoting) }
+tasks.named('check') { dependsOn(checkMigrationQuoting) }

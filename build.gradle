@@ -1,5 +1,5 @@
 plugins {
-    java
+    id 'java'
 }
 
 allprojects {
@@ -9,17 +9,17 @@ allprojects {
 // The generated type-safe `libs` accessor isn't registered on a subproject until that
 // subproject's own build script evaluates, so it can't be read from inside `subprojects {}`
 // below. Resolve it generically instead, once, in root's own context.
-val testcontainersVersion = project.extensions.getByType<VersionCatalogsExtension>()
-    .named("libs")
-    .findVersion("testcontainers")
-    .get()
-    .requiredVersion
+def testcontainersVersion = project.extensions.getByType(VersionCatalogsExtension)
+        .named('libs')
+        .findVersion('testcontainers')
+        .get()
+        .requiredVersion
 
 subprojects {
-    apply(plugin = "java")
+    apply plugin: 'java'
 
     java {
-        toolchain { languageVersion.set(JavaLanguageVersion.of(21)) }
+        toolchain { languageVersion = JavaLanguageVersion.of(21) }
     }
 
     // Spring Boot's dependency-management plugin pins org.testcontainers:* to the
@@ -27,13 +27,13 @@ subprojects {
     // requests. Setting it here is the documented override mechanism (see Spring Boot Gradle
     // plugin docs, "Overriding a managed version") and keeps the catalog as the single source
     // of truth for the actual version number.
-    extra["testcontainers.version"] = testcontainersVersion
+    ext['testcontainers.version'] = testcontainersVersion
 
-    tasks.withType<Test>().configureEach {
-        val excluded = (project.findProperty("excludeTags") as String?)?.split(",") ?: emptyList()
+    tasks.withType(Test).configureEach {
+        def excluded = (project.findProperty('excludeTags') as String)?.split(',') ?: new String[0]
         useJUnitPlatform {
-            includeEngines("junit-jupiter", "jqwik")
-            if (excluded.isNotEmpty()) excludeTags(*excluded.toTypedArray())
+            includeEngines 'junit-jupiter', 'jqwik'
+            if (excluded.length > 0) excludeTags(excluded)
         }
     }
 }
