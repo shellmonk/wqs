@@ -30,7 +30,7 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     private final DeltaRowDecoder decoder = new DeltaRowDecoder(defaults());
 
     static DeltaProperties defaults() {
-        return new DeltaProperties(null, null, 0, null, 0, null);
+        return new DeltaProperties(null, null, 0, null, 0, null, null, null);
     }
 
     @Test

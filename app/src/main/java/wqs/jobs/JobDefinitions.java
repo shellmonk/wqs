@@ -15,4 +15,9 @@ public class JobDefinitions {
     public JobDefinition partitionRolloverJobDefinition() {
         return new JobDefinition("partition-rollover", PartitionRolloverJob.class);
     }
+
+    @Bean
+    public JobDefinition deltaPollJobDefinition() {
+        return new JobDefinition("delta-poll", DeltaPollJob.class);
+    }
 }

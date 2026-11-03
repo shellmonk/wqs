@@ -73,7 +73,26 @@ wqs:
     # of real history (deep replays from offset 0 provision everything after it).
     max-months-ahead: 12
     provision-floor: 2010-01
+  delta:
+    # The /wallet/delta poll (spec 4, phase 6 plan D1-D10). Wire details are configuration; the
+    # endpoint is open (no auth). base-url has no default: set it (WQS_DELTA_BASE_URL) together
+    # with wqs.jobs.delta-poll.enabled=true. A run without it fails and is retried next fire.
+    # base-url: http://wallet:8080
+    cursor-param: from
+    page-limit: 1000
+    overlap: 120s
+    max-pages-per-run: 20
+    connect-timeout: 2s
+    read-timeout: 10s
+    # sources: { walPayments: PAYMENT, walClaimablePrizes: CLAIMABLE_PRIZE,
+    #            walManualAdjustmentRequests: MANUAL_ADJUSTMENT, walLimits: LIMIT }
   jobs:
+    delta-poll:
+      # Closed by default, like the stream (D9). @DisallowConcurrentExecution makes it one
+      # sequential writer cluster-wide; misfires are dropped -- the watermark catches up.
+      enabled: false
+      intervalSeconds: 5
+      misfirePolicy: DO_NOTHING
     partition-rollover:
       enabled: true
       cron: "0 0 3 * * ?"

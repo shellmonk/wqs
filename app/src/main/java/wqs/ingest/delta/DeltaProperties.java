@@ -19,6 +19,8 @@ import wqs.domain.SourceKind;
  * @param maxPagesPerRun saturated pages polled back to back within one job run (default 20)
  * @param sources        the row's {@code source} value -> its kind, matched case-insensitively;
  *                       when set it replaces the defaults
+ * @param connectTimeout the HTTP connect timeout (default 2 s)
+ * @param readTimeout    the HTTP read timeout (default 10 s)
  */
 @ConfigurationProperties("wqs.delta")
 public record DeltaProperties(
@@ -27,7 +29,9 @@ public record DeltaProperties(
         int pageLimit,
         Duration overlap,
         int maxPagesPerRun,
-        Map<String, SourceKind> sources) {
+        Map<String, SourceKind> sources,
+        Duration connectTimeout,
+        Duration readTimeout) {
 
     private static final Map<String, SourceKind> DEFAULT_SOURCES = Map.of(
             "walPayments", SourceKind.PAYMENT,
@@ -58,6 +62,8 @@ public record DeltaProperties(
         if (maxPagesPerRun == 0) {
             maxPagesPerRun = 20;
         }
+        connectTimeout = positive(connectTimeout, Duration.ofSeconds(2), "connect-timeout");
+        readTimeout = positive(readTimeout, Duration.ofSeconds(10), "read-timeout");
         Map<String, SourceKind> given = sources == null || sources.isEmpty() ? DEFAULT_SOURCES : sources;
         Map<String, SourceKind> normalised = new LinkedHashMap<>();
         given.forEach((value, kind) -> {
@@ -71,6 +77,16 @@ public record DeltaProperties(
             normalised.put(value.toLowerCase(Locale.ROOT), kind);
         });
         sources = Map.copyOf(normalised);
+    }
+
+    private static Duration positive(Duration value, Duration fallback, String name) {
+        if (value == null) {
+            return fallback;
+        }
+        if (value.isNegative() || value.isZero()) {
+            throw new IllegalArgumentException("wqs.delta." + name + " must be positive");
+        }
+        return value;
     }
 
     /** The kind a row's {@code source} value names, case-insensitively; empty if unmapped (poison, D2). */

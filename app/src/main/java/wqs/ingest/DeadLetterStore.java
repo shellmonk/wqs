@@ -2,7 +2,9 @@ package wqs.ingest;
 
 import static wqs.db.generated.Tables.WQ_DEAD_LETTER;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Map;
@@ -92,14 +94,37 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
         write(stream, offset, (short) SourceKind.TRANSACTION.code(), null, rawBase64(body), error, attempts);
     }
 
+    /**
+     * A polled {@code /wallet/delta} row that could not be decoded or applied (phase 6). The
+     * payload is the raw wire row, so it is replayable, minus the encrypted card, bank and e-mail
+     * fields and the xml/json blobs that are never projected (plan D4) -- a dead letter must not
+     * become a second copy of {@code walPayments}' PII. {@code source} and {@code sourceId} are
+     * null when the row did not yield them.
+     */
+    public void recordPolled(String stream, JsonNode row, SourceKind source, String sourceId, Exception error) {
+        Object payload = row;
+        if (row instanceof ObjectNode object) {
+            ObjectNode copy = object.deepCopy();
+            copy.remove(POLLED_PII_FIELDS);
+            payload = copy;
+        } else if (row == null) {
+            payload = rawBase64(new byte[0]);
+        }
+        write(stream, null, source == null ? null : (short) source.code(), sourceId, payload, error, 1);
+    }
+
+    /** Never projected (plan D4) and never stored, not even in a dead letter. */
+    static final java.util.List<String> POLLED_PII_FIELDS = java.util.List.of(
+            "payCardNumber", "payBankAccount", "payEmail", "accountNumber", "xmlData", "jsonData");
+
     private void write(
-            String stream, Long offset, short source, String sourceId,
+            String stream, Long offset, Short source, String sourceId,
             Object payload, Exception error, int attempts) {
         write(stream, offset, source, sourceId, payload, describe(error), attempts);
     }
 
     private void write(
-            String stream, Long offset, short source, String sourceId,
+            String stream, Long offset, Short source, String sourceId,
             Object payload, String errorText, int attempts) {
         try {
             requiresNew.executeWithoutResult(status ->
@@ -115,7 +140,7 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
     }
 
     private void insert(
-            String stream, Long offset, short source, String sourceId,
+            String stream, Long offset, Short source, String sourceId,
             JSONB payload, String error, int attempts) {
         dsl.insertInto(WQ_DEAD_LETTER)
                 .set(WQ_DEAD_LETTER.stream, stream)

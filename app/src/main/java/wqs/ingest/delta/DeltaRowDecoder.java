@@ -100,6 +100,39 @@ public class DeltaRowDecoder {
         };
     }
 
+    /**
+     * What can still be read from a row {@link #decode} rejected, for its dead-letter record and
+     * the poller's watermark: each part is null when it is itself unreadable. Never throws.
+     *
+     * @param source   the row's mapped kind
+     * @param sourceId its id field ({@code paymentId} for payments, {@code id} otherwise)
+     * @param version  its version field, so one poison row cannot pin the cursor
+     */
+    public record Identity(SourceKind source, String sourceId, Instant version) {}
+
+    public Identity identify(JsonNode row) {
+        if (row == null || !row.isObject()) {
+            return new Identity(null, null, null);
+        }
+        SourceKind source = attempt(() -> properties.sourceOf(textual(required(row, "source"), "source")).orElse(null));
+        if (source == null || source == SourceKind.TRANSACTION) {
+            return new Identity(null, null, null);
+        }
+        String idField = source == SourceKind.PAYMENT ? "paymentId" : "id";
+        String versionField = source == SourceKind.MANUAL_ADJUSTMENT ? "statusDate" : "updated";
+        return new Identity(source,
+                attempt(() -> Long.toString(id(row, idField))),
+                attempt(() -> timestamp(row, versionField)));
+    }
+
+    private static <T> T attempt(java.util.function.Supplier<T> read) {
+        try {
+            return read.get();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     private static DeltaRow payment(JsonNode row, TxTypeRegistry registry) {
         int ownerType = ownerType(row, "ownerType");
         long userId = id(row, "ownerId");
