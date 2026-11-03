@@ -3,7 +3,9 @@ package wqs.projection;
 import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -14,6 +16,7 @@ import wqs.db.PartitionProvisioner;
 import wqs.domain.PageUnit;
 import wqs.domain.ProjectionItem;
 import wqs.domain.ViewKind;
+import wqs.projection.source.DeltaRow;
 
 /**
  * The single write choke point. Nothing else in WQS holds a write connection (spec section 6).
@@ -24,6 +27,9 @@ import wqs.domain.ViewKind;
  * apply or park it, then rollups, page index and counters; after the items, drain the cancels
  * parked for items this batch inserted; then the offset last -- all in one transaction, so
  * projection state and consumer position advance or roll back together.
+ *
+ * <p>{@link #applyDelta} is the polled sources' path (phase 6): versioned upserts and the
+ * poller's watermark, likewise in one transaction.
  */
 @Component
 public class ProjectionWriter {
@@ -42,6 +48,12 @@ public class ProjectionWriter {
     private final DrainedCancelDeadLetters drainedCancelDeadLetters;
     private final IngestRules ingestRules;
     private final RejectedItemDeadLetters rejectedItemDeadLetters;
+    private final VersionedApplier versionedApplier;
+    private final DeltaWatermarkStore watermarkStore;
+    private final DeltaMetrics deltaMetrics;
+
+    /** The only owner type projected (spec 4.1). */
+    private static final int PLAYER = 1;
 
     public ProjectionWriter(
             ItemInserter itemInserter,
@@ -55,7 +67,10 @@ public class ProjectionWriter {
             DrainedCancelApplier drainedCancelApplier,
             DrainedCancelDeadLetters drainedCancelDeadLetters,
             IngestRules ingestRules,
-            RejectedItemDeadLetters rejectedItemDeadLetters) {
+            RejectedItemDeadLetters rejectedItemDeadLetters,
+            VersionedApplier versionedApplier,
+            DeltaWatermarkStore watermarkStore,
+            DeltaMetrics deltaMetrics) {
         this.itemInserter = itemInserter;
         this.rollupUpdater = rollupUpdater;
         this.highLevelUpdater = highLevelUpdater;
@@ -68,6 +83,9 @@ public class ProjectionWriter {
         this.drainedCancelDeadLetters = drainedCancelDeadLetters;
         this.ingestRules = ingestRules;
         this.rejectedItemDeadLetters = rejectedItemDeadLetters;
+        this.versionedApplier = versionedApplier;
+        this.watermarkStore = watermarkStore;
+        this.deltaMetrics = deltaMetrics;
     }
 
     /**
@@ -157,6 +175,84 @@ public class ProjectionWriter {
         }
 
         return new WriteResult(projected, duplicates, deadLettered, skipped);
+    }
+
+    /**
+     * Applies one page of polled rows as versioned upserts (spec 4; phase 6 plan D6, D7), and the
+     * poller's watermark, in one transaction: a failure leaves both untouched and the page is
+     * polled again.
+     *
+     * <p>Per row: a non-player owner is skipped before any write (ruling R1). First sight is the
+     * stream's insert path -- the ingest rules, then the gate, rollups, page index and counters --
+     * with the row's version recorded; zero-amount hiding does not apply (it is about transactions
+     * only). A row already stored is decided by {@link VersionedApplier}: newer replaces "detail",
+     * equal is a duplicate, older is stale, and a newer version changing an immutable field is
+     * dead-lettered alone ({@code immutable-field-changed}) while the rest of the page applies.
+     * No polled source cancels (D3), so there is nothing to park or drain.
+     */
+    @Transactional
+    public DeltaResult applyDelta(DeltaBatch batch) {
+        List<DeltaRow> players = new ArrayList<>(batch.rows().size());
+        int skipped = 0;
+        for (DeltaRow row : batch.rows()) {
+            if (row.ownerType() == PLAYER) {
+                players.add(row);
+            } else {
+                skipped++;
+            }
+        }
+        // As in apply(): partitions first, in their own transaction, before any projection write.
+        partitionProvisioner.ensureMonths(players.stream()
+                .map(row -> YearMonth.from(row.item().occurredAt().atZone(ZoneOffset.UTC)))
+                .collect(Collectors.toSet()));
+
+        int inserted = 0;
+        int updated = 0;
+        int duplicates = 0;
+        int stale = 0;
+        int deadLettered = 0;
+        for (DeltaRow row : players) {
+            ProjectionItem item = row.item();
+            VersionedApplier.Stored stored = versionedApplier.stored(row);
+            switch (VersionedApplier.verdict(row, stored)) {
+                case ABSENT -> {
+                    String rejection = ingestRules.rejection(item);
+                    if (rejection != null) {
+                        log.warn("Dead-lettering polled row {} (source {}): {}", item.sourceId(), item.source(), rejection);
+                        rejectedItemDeadLetters.recordRejected(DeltaWatermarkStore.WALLET_DELTA, null, item, rejection);
+                        deadLettered++;
+                    } else if (itemInserter.insertIfAbsent(item, VersionedApplier.stored(row.version()))) {
+                        project(item);
+                        inserted++;
+                    } else {
+                        duplicates++; // unreachable under the single sequential writer; never double-apply
+                    }
+                }
+                case NEWER -> {
+                    String field = versionedApplier.immutableFieldChanged(row, stored);
+                    if (field != null) {
+                        log.warn("Dead-lettering polled row {} (source {}): version {} changes immutable field {}",
+                                item.sourceId(), item.source(), row.version(), field);
+                        rejectedItemDeadLetters.recordRejected(DeltaWatermarkStore.WALLET_DELTA, null, item,
+                                RejectedItemDeadLetters.IMMUTABLE_FIELD_CHANGED);
+                        deadLettered++;
+                    } else {
+                        versionedApplier.applyNewer(row, stored);
+                        updated++;
+                    }
+                }
+                case DUPLICATE -> duplicates++;
+                case STALE -> stale++;
+            }
+        }
+
+        if (batch.newWatermark() != null) {
+            watermarkStore.write(batch.newWatermark());
+        }
+
+        DeltaResult result = new DeltaResult(inserted, updated, duplicates, stale, skipped, deadLettered);
+        deltaMetrics.recordOnCommit(result);
+        return result;
     }
 
     /**

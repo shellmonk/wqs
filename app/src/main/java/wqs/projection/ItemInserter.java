@@ -38,6 +38,15 @@ public class ItemInserter {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public boolean insertIfAbsent(ProjectionItem item) {
+        return insertIfAbsent(item, null);
+    }
+
+    /**
+     * As {@link #insertIfAbsent(ProjectionItem)}, recording {@code versionAt} -- a polled row's
+     * version (spec 4, phase 6 D6) -- in the locator; null for an immutable stream item.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean insertIfAbsent(ProjectionItem item, java.time.Instant versionAt) {
         long itemId = dsl.nextval(WQ_ITEM_ID_SEQ);
         OffsetDateTime occurredAt = item.occurredAt().atOffset(ZoneOffset.UTC);
 
@@ -47,6 +56,7 @@ public class ItemInserter {
                 .set(WQ_ITEM_LOCATOR.userId, item.userId())
                 .set(WQ_ITEM_LOCATOR.occurredAt, occurredAt)
                 .set(WQ_ITEM_LOCATOR.itemId, itemId)
+                .set(WQ_ITEM_LOCATOR.versionAt, versionAt == null ? null : versionAt.atOffset(ZoneOffset.UTC))
                 .onConflictDoNothing()
                 .execute();
 

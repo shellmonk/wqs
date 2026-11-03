@@ -17,6 +17,7 @@ public interface RejectedItemDeadLetters {
     /** Rejection reasons, recorded verbatim as the dead letter's error text. */
     String CURRENCY_MISMATCH = "currency-mismatch";
     String EINSTANT_UNSESSIONED = "einstant-unsessioned";
+    String IMMUTABLE_FIELD_CHANGED = "immutable-field-changed";
 
     /**
      * @param offset the item's own stream offset, or null when unknown

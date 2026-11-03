@@ -69,7 +69,7 @@ public abstract class PostgresTestBase {
         for (String table : java.util.List.of(
                 "wqItemLocator", "wqWebItem", "wqCcItem", "wqGroupLocator", "wqSession", "wqPlay",
                 "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth", "wqPendingCancel",
-                "wqStreamOffset", "wqDeadLetter")) {
+                "wqStreamOffset", "wqDeadLetter", "wqIngestWatermark")) {
             dsl().execute("delete from \"" + table + "\"");
         }
     }
