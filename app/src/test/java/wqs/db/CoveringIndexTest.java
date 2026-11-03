@@ -27,7 +27,7 @@ class CoveringIndexTest extends PostgresTestBase {
     @Test
     void every_item_and_high_level_partition_has_the_cover_index() {
         for (String parent : PARENTS) {
-            List<String> childDefs = dsl().fetch("""
+            List<String> childDefs = db().column("""
                     select pg_get_indexdef(ci.oid)
                     from pg_inherits ti
                     join pg_index ix on ix.indrelid = ti.inhrelid
@@ -35,10 +35,10 @@ class CoveringIndexTest extends PostgresTestBase {
                     join pg_inherits ii on ii.inhrelid = ci.oid
                     where ti.inhparent = to_regclass(?)::oid
                       and ii.inhparent = to_regclass(?)::oid
-                    """, "\"" + parent + "\"", "\"" + parent + "_cover\"").getValues(0, String.class);
-            long partitions = dsl().fetchOne(
-                    "select count(*) from pg_inherits where inhparent = to_regclass(?)::oid",
-                    "\"" + parent + "\"").get(0, Long.class);
+                    """, String.class, "\"" + parent + "\"", "\"" + parent + "_cover\"");
+            long partitions = db().value(
+                    "select count(*) from pg_inherits where inhparent = to_regclass(?)::oid", Long.class,
+                    "\"" + parent + "\"");
             assertThat(partitions).as(parent + " partitions").isGreaterThan(0);
             assertThat(childDefs).as(parent + " cover index children").hasSize((int) partitions);
             assertThat(childDefs).allMatch(d -> d.contains("INCLUDE"));
@@ -54,8 +54,8 @@ class CoveringIndexTest extends PostgresTestBase {
         String items = "(userId, occurredAt DESC, itemId DESC) INCLUDE (cancelled, productType, type)";
         String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled)";
         for (String parent : PARENTS) {
-            String def = dsl().fetchOne("select pg_get_indexdef(to_regclass(?)::oid)",
-                    "\"" + parent + "_cover\"").get(0, String.class).replace("\"", "");
+            String def = db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class,
+                    "\"" + parent + "_cover\"").replace("\"", "");
             assertThat(def).as(parent).endsWith(parent.endsWith("Item") ? items : highLevel);
         }
     }
@@ -84,12 +84,12 @@ class CoveringIndexTest extends PostgresTestBase {
                 .map(l -> l.replaceAll(".*Index Only Scan (?:Backward )?using (\\S+) on .*", "$1"))
                 .findFirst().orElseThrow().replace("\"", "");
         assertThat(indexName).doesNotContain("pkey");
-        Boolean isCoverChild = dsl().fetchOne("""
+        Boolean isCoverChild = db().value("""
                 select exists (
                   select 1 from pg_inherits i
                   where i.inhrelid = to_regclass(?)::oid
                     and i.inhparent = to_regclass('"wqWebItem_cover"')::oid)
-                """, "\"" + indexName + "\"").get(0, Boolean.class);
+                """, Boolean.class, "\"" + indexName + "\"");
         assertThat(isCoverChild).as("scanned index %s in plan:%n%s", indexName, text).isTrue();
     }
 }

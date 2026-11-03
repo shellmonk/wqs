@@ -142,12 +142,11 @@ class StreamEndToEndTest extends PostgresTestBase {
     }
 
     private static short typeId(String code) {
-        return dsl().fetchOne("select \"typeId\" from \"wqTxType\" where \"code\" = '" + code + "'")
-                .get(0, Short.class);
+        return db().value("select \"typeId\" from \"wqTxType\" where \"code\" = '" + code + "'", Short.class);
     }
 
     private static long count(String sql) {
-        return dsl().fetchOne(sql).get(0, Long.class);
+        return db().value(sql, Long.class);
     }
 
     @Test
@@ -169,7 +168,7 @@ class StreamEndToEndTest extends PostgresTestBase {
         });
 
         // The real PRIZE sample landed as a row of the right type, product and session.
-        var prize = dsl().fetchOne("select \"type\", \"productId\", \"productType\", \"batchId\", \"amount\""
+        var prize = db().row("select \"type\", \"productId\", \"productType\", \"batchId\", \"amount\""
                 + " from \"wqWebItem\" where \"sourceId\" = 'e2e-2'");
         assertThat(prize.get("type", Short.class)).isEqualTo(typeId("PRIZE"));
         assertThat(prize.get("productId", String.class)).isEqualTo("TIKIKALACABANA");

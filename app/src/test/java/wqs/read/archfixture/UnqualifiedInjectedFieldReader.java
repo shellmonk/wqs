@@ -1,11 +1,10 @@
 package wqs.read.archfixture;
 
-import org.jooq.DSLContext;
 import org.springframework.beans.factory.annotation.Autowired;
-import wqs.config.ReaderDsl;
+import org.springframework.jdbc.core.simple.JdbcClient;
 
-/** Fixture: @Autowired field without @ReaderDsl (must be rejected). */
+/** Fixture: @Autowired field without @ReaderJdbc (must be rejected). */
 public class UnqualifiedInjectedFieldReader {
     @Autowired
-    private DSLContext injectedDsl;
+    private JdbcClient injectedJdbc;
 }

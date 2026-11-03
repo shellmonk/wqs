@@ -52,7 +52,7 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         clearProjection();
-        dsl().execute("delete from \"wqDeadLetter\"");
+        db().execute("delete from \"wqDeadLetter\"");
     }
 
     @Test
@@ -70,7 +70,7 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
         source.queue(new StreamPayload("tx-garbage-date", 1, 7L, farAhead, "TT_BUY", "11", null, null, null, new BigDecimal("1.0000"), "EUR", null, null, java.util.Map.of()), 4);
         source.deliverAll();
 
-        assertThat(dsl().fetchOne("select \"sourceId\", \"error\" from \"wqDeadLetter\"").intoMap())
+        assertThat(db().row("select \"sourceId\", \"error\" from \"wqDeadLetter\"").asMap())
                 .containsEntry("sourceId", "tx-garbage-date")
                 .hasEntrySatisfying("error", e -> assertThat((String) e).contains("months ahead"));
         assertThat(offsetStore.read(STREAM)).contains(4L);
@@ -91,7 +91,7 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
         source.queue(new StreamPayload("tx-before-floor", 1, 7L, Instant.parse("2015-05-20T00:00:00Z"), "TT_BUY", "11", null, null, null, new BigDecimal("1.0000"), "EUR", null, null, java.util.Map.of()), 9);
         source.deliverAll();
 
-        assertThat(dsl().fetchOne("select \"sourceId\", \"error\" from \"wqDeadLetter\"").intoMap())
+        assertThat(db().row("select \"sourceId\", \"error\" from \"wqDeadLetter\"").asMap())
                 .containsEntry("sourceId", "tx-before-floor")
                 .hasEntrySatisfying("error", e -> assertThat((String) e).contains("2015-05").contains("floor"));
         assertThat(partitionCount()).isEqualTo(partitionsBefore);
@@ -99,6 +99,6 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
     }
 
     private static int partitionCount() {
-        return dsl().fetchOne("select count(*)::int from pg_inherits").get(0, Integer.class);
+        return db().value("select count(*)::int from pg_inherits", Integer.class);
     }
 }

@@ -93,7 +93,7 @@ class PartitionRolloverJobBootTest extends PostgresTestBase {
         YearMonth target = YearMonth.now(Clock.systemUTC()).plusMonths(2);
         String partitionName =
                 PartitionedTable.WQ_WEB_ITEM.tableName() + "_" + target.format(MONTH_SUFFIX);
-        dsl().execute("DROP TABLE IF EXISTS \"" + partitionName + "\"");
+        db().execute("DROP TABLE IF EXISTS \"" + partitionName + "\"");
         assertThat(partitionAttached(partitionName)).as("precondition: dropped").isFalse();
 
         scheduler.triggerJob(jobKey);
@@ -108,10 +108,10 @@ class PartitionRolloverJobBootTest extends PostgresTestBase {
     }
 
     private static boolean partitionAttached(String partitionName) {
-        return dsl().fetchExists(dsl().selectOne()
-                .from("pg_inherits")
-                .where("inhrelid = to_regclass(?)::oid", "\"" + partitionName + "\"")
-                .and("inhparent = to_regclass(?)::oid",
-                        "\"" + PartitionedTable.WQ_WEB_ITEM.tableName() + "\""));
+        return db().value("""
+                select exists (select 1 from pg_inherits
+                               where inhrelid = to_regclass(?)::oid and inhparent = to_regclass(?)::oid)
+                """, Boolean.class, "\"" + partitionName + "\"",
+                "\"" + PartitionedTable.WQ_WEB_ITEM.tableName() + "\"");
     }
 }

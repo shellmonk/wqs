@@ -1,6 +1,5 @@
 [versions]
 springBoot = "3.4.1"
-jooq = "3.19.16"
 mapstruct = "1.6.3"
 lombok = "1.18.36"
 lombokMapstructBinding = "0.2.0"
@@ -12,9 +11,6 @@ postgresql = "42.7.4"
 assertj = "3.26.3"
 
 [libraries]
-jooq = { module = "org.jooq:jooq", version.ref = "jooq" }
-jooq-codegen = { module = "org.jooq:jooq-codegen", version.ref = "jooq" }
-jooq-meta = { module = "org.jooq:jooq-meta", version.ref = "jooq" }
 flyway-core = { module = "org.flywaydb:flyway-core" }
 flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }

@@ -29,7 +29,7 @@ class AggregationPropertyTest extends ProjectionPropertyBase {
         reset();
         applyBatches(items);
 
-        assertThat(new ProjectionInvariants(dsl()).aggregationDrift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).aggregationDrift()).isEmpty();
     }
 
     @Provide

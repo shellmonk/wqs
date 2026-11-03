@@ -54,7 +54,7 @@ class StreamWiringTest extends PostgresTestBase {
     /** The context starts the consumer, so the offset table must be empty before it does. */
     @BeforeAll
     static void emptyOffsetTable() {
-        dsl().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqStreamOffset\"");
     }
 
     @Autowired private FakeStreamSource source;
@@ -81,7 +81,7 @@ class StreamWiringTest extends PostgresTestBase {
         source.deliverAll();
 
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
-            assertThat(dsl().fetchOne("select count(*)::int from \"wqWebItem\"").get(0, Integer.class))
+            assertThat(db().value("select count(*)::int from \"wqWebItem\"", Integer.class))
                     .isEqualTo(1);
             assertThat(offsetStore.read(STREAM)).contains(0L);
         });

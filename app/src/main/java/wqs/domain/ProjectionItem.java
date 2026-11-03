@@ -7,8 +7,8 @@ import java.time.Instant;
  * A normalized, source-agnostic item, ready to be written to one or more view tables.
  *
  * Unenumerated source-specific fields live in {@code detailJson} until O-13 is answered
- * (spec section 13). {@code detailJson} is a String rather than jOOQ's JSONB so that the
- * domain package carries no jOOQ dependency.
+ * (spec section 13). {@code detailJson} is the raw JSON text, so that the domain package carries no
+ * persistence-library dependency.
  *
  * {@code cancels} is the sourceId this item cancels, or null; blank is normalised to null like
  * the batch ids, so "not a cancellation" has exactly one representation.

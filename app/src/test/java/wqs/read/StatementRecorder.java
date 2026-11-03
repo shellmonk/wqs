@@ -20,8 +20,7 @@ import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
  * Test-only JDBC-level statement recorder over the reader pool: {@link #client()} is a
  * {@link JdbcClient} whose statements join the current reader transaction (as the app's
  * {@code @ReaderJdbc} client does) and are recorded with their binds, so a test can count them
- * and re-run each one under {@code explain}. Replaces the jOOQ {@code ExecuteListener} the
- * read-path tests used.
+ * and re-run each one under {@code explain}.
  */
 final class StatementRecorder {
 

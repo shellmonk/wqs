@@ -19,10 +19,6 @@ final class Binds {
         return new SqlParameterValue(Types.VARCHAR, value);
     }
 
-    static SqlParameterValue smallint(Short value) {
-        return new SqlParameterValue(Types.SMALLINT, value);
-    }
-
     static SqlParameterValue numeric(BigDecimal value) {
         return new SqlParameterValue(Types.NUMERIC, value);
     }

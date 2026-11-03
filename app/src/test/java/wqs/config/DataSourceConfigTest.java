@@ -7,8 +7,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.UUID;
 import javax.sql.DataSource;
-import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -39,8 +37,6 @@ class DataSourceConfigTest extends PostgresTestBase {
 
     @Autowired DataSource dataSource;
     @Autowired @Qualifier("readerDataSource") DataSource readerDataSource;
-    @Autowired @ReaderDsl DSLContext readerDsl;
-    @Autowired DSLContext writerDsl;
     @Autowired MeterRegistry meterRegistry;
     @Autowired JdbcClient writerJdbc;
     @Autowired @ReaderJdbc JdbcClient readerJdbc;
@@ -48,35 +44,31 @@ class DataSourceConfigTest extends PostgresTestBase {
     @Autowired TransactionTemplate writerTx;
     @Autowired PlatformTransactionManager transactionManager;
 
-    /** R1: a writer {@code @Transactional} that writes through both jOOQ and JdbcClient. */
+    /** A writer {@code @Transactional} that writes twice through the primary JdbcClient. */
     @TestConfiguration
     static class MixedWrites {
         @Bean
-        MixedWriter mixedWriter(DSLContext dsl, JdbcClient jdbc) {
-            return new MixedWriter(dsl, jdbc);
+        MixedWriter mixedWriter(JdbcClient jdbc) {
+            return new MixedWriter(jdbc);
         }
     }
 
     static class MixedWriter {
-        private final DSLContext dsl;
         private final JdbcClient jdbc;
 
-        MixedWriter(DSLContext dsl, JdbcClient jdbc) {
-            this.dsl = dsl;
+        MixedWriter(JdbcClient jdbc) {
             this.jdbc = jdbc;
         }
 
-        /** Writes one offset row each way, checks each sees the other's, then fails. */
+        /** Writes two offset rows, checks both are visible on the transaction's connection, then fails. */
         @Transactional
-        public void writeBothThenFail(String viaJooq, String viaJdbc) {
-            dsl.execute("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values ({0}, 1)",
-                    DSL.val(viaJooq));
+        public void writeBothThenFail(String first, String second) {
+            jdbc.sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 1)")
+                    .param(first).update();
             jdbc.sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 2)")
-                    .param(viaJdbc).update();
+                    .param(second).update();
             // Uncommitted rows are visible only on the connection that wrote them.
-            assertThat(countOffsets(jdbc, viaJooq, viaJdbc)).as("JdbcClient sees both").isEqualTo(2);
-            assertThat(dsl.fetchCount(DSL.table(DSL.name("wqStreamOffset")),
-                    DSL.field(DSL.name("stream")).in(viaJooq, viaJdbc))).as("jOOQ sees both").isEqualTo(2);
+            assertThat(countOffsets(jdbc, first, second)).as("one connection sees both").isEqualTo(2);
             throw new IllegalStateException("roll back");
         }
     }
@@ -108,25 +100,6 @@ class DataSourceConfigTest extends PostgresTestBase {
     }
 
     @Test
-    void writer_dsl_uses_spring_transactions_and_the_reader_does_not() {
-        assertThat(writerDsl.configuration().transactionProvider())
-                .isInstanceOf(org.springframework.boot.autoconfigure.jooq.SpringTransactionProvider.class);
-        assertThat(readerDsl.configuration().transactionProvider())
-                .isNotInstanceOf(org.springframework.boot.autoconfigure.jooq.SpringTransactionProvider.class);
-    }
-
-    @Test
-    void reader_dsl_rejects_writes() {
-        assertThatThrownBy(() -> readerDsl.transaction(cfg -> cfg.dsl()
-                        .insertInto(wqs.db.generated.Tables.WQ_STREAM_OFFSET)
-                        .set(wqs.db.generated.Tables.WQ_STREAM_OFFSET.stream, "s")
-                        .set(wqs.db.generated.Tables.WQ_STREAM_OFFSET.offsetVal, 1L)
-                        .execute()))
-                .rootCause()
-                .hasMessageContaining("read-only transaction");
-    }
-
-    @Test
     void the_writer_transaction_manager_jdbc_client_and_template_are_primary() {
         assertThat(((DataSourceTransactionManager) transactionManager).getDataSource()).isSameAs(dataSource);
         assertThat(writerTx.getTransactionManager()).isSameAs(transactionManager);
@@ -139,36 +112,36 @@ class DataSourceConfigTest extends PostgresTestBase {
         assertThat(writerJdbc).isNotSameAs(readerJdbc);
     }
 
-    /** R1: jOOQ and JdbcClient writes in one writer @Transactional share it; a rollback undoes both. */
+    /** Writer JdbcClient statements in one writer @Transactional share it; a rollback undoes both. */
     @Test
-    void jooq_and_jdbc_client_writes_share_one_writer_transaction() {
-        String viaJooq = "r1-jooq-" + UUID.randomUUID();
-        String viaJdbc = "r1-jdbc-" + UUID.randomUUID();
+    void jdbc_client_writes_share_one_writer_transaction() {
+        String first = "r1-first-" + UUID.randomUUID();
+        String second = "r1-second-" + UUID.randomUUID();
 
-        assertThatThrownBy(() -> mixedWriter.writeBothThenFail(viaJooq, viaJdbc))
+        assertThatThrownBy(() -> mixedWriter.writeBothThenFail(first, second))
                 .isInstanceOf(IllegalStateException.class).hasMessage("roll back");
 
-        assertThat(countOffsets(writerJdbc, viaJooq, viaJdbc)).as("both writes rolled back").isZero();
+        assertThat(countOffsets(writerJdbc, first, second)).as("both writes rolled back").isZero();
     }
 
-    /** R1, reader side: one @ReaderTx callback mixing @ReaderDsl and @ReaderJdbc reads one snapshot. */
+    /** Reader side: every @ReaderJdbc statement in one @ReaderTx callback reads the same snapshot. */
     @Test
-    void reader_dsl_and_reader_jdbc_share_one_reader_snapshot() {
+    void reader_jdbc_statements_share_one_reader_snapshot() {
         String stream = "r1-snapshot-" + UUID.randomUUID();
         try {
             long[] seen = readerTx.execute(status -> {
-                long before = readerDsl.fetchCount(DSL.table(DSL.name("wqStreamOffset")),
-                        DSL.field(DSL.name("stream")).eq(stream));
+                long before = readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
+                        .param(stream).query(Long.class).single();
                 // Committed by the writer pool, outside the reader transaction.
                 writerJdbc.sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 1)")
                         .param(stream).update();
                 long viaJdbc = readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
                         .param(stream).query(Long.class).single();
-                long viaDsl = readerDsl.fetchCount(DSL.table(DSL.name("wqStreamOffset")),
-                        DSL.field(DSL.name("stream")).eq(stream));
-                return new long[] {before, viaJdbc, viaDsl};
+                long again = readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
+                        .param(stream).query(Long.class).single();
+                return new long[] {before, viaJdbc, again};
             });
-            assertThat(seen).as("before, via JdbcClient, via jOOQ").containsExactly(0, 0, 0);
+            assertThat(seen).as("before, after the commit, once more").containsExactly(0, 0, 0);
             assertThat(readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
                     .param(stream).query(Long.class).single()).as("a new transaction sees the row").isEqualTo(1);
         } finally {

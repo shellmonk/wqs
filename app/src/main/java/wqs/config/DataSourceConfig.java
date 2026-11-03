@@ -2,11 +2,6 @@ package wqs.config;
 
 import com.zaxxer.hikari.HikariDataSource;
 import javax.sql.DataSource;
-import org.jooq.DSLContext;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
-import org.jooq.impl.DefaultConfiguration;
-import org.jooq.impl.DefaultDSLContext;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
@@ -22,7 +17,6 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.support.JdbcTransactionManager;
-import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -30,10 +24,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 /**
  * Separate writer and reader pools (spec 10, ruling D11). Defining any DataSource bean switches
  * off Boot's pooled DataSource auto-config, so both are explicit. The writer stays primary:
- * Flyway, Quartz, the transaction manager, Boot's jOOQ configuration, the primary
- * {@link JdbcClient}, ingest and projection all use it. The reader serves only {@code wqs.read..},
- * through {@link ReaderJdbc} inside a {@link ReaderTx} transaction. ({@link ReaderDsl} has no
- * main-code user left; it goes with jOOQ.)
+ * Flyway, Quartz, the transaction manager, the primary {@link JdbcClient}, ingest and
+ * projection all use it. The reader serves only {@code wqs.read..}, through {@link ReaderJdbc}
+ * inside a {@link ReaderTx} transaction.
  *
  * <p>Two transaction managers exist, so the writer one is {@code @Primary}: an unqualified
  * {@code @Transactional}, {@code PlatformTransactionManager} or {@code TransactionTemplate} is the
@@ -74,33 +67,6 @@ public class DataSourceConfig {
         return ds;
     }
 
-    /**
-     * Boot's jOOQ auto-config is {@code @ConditionalOnMissingBean(DSLContext.class)}, so the reader
-     * bean below would remove the writer DSLContext. Re-declaring it from Boot's still
-     * auto-configured {@link org.jooq.Configuration} keeps Spring transactions and exception
-     * translation. Do NOT register another {@code org.jooq.Configuration} bean.
-     */
-    @Bean
-    @Primary
-    public DSLContext dslContext(org.jooq.Configuration configuration) {
-        return new DefaultDSLContext(configuration);
-    }
-
-    /**
-     * Plain jOOQ transactions: open them with {@code readerDsl.transactionResult(cfg -> ...)}. Bound
-     * through a {@link TransactionAwareDataSourceProxy} so that, inside a {@link ReaderTx}
-     * transaction, it uses that transaction's connection -- one snapshot with {@link ReaderJdbc}.
-     * Outside one, each call takes its own pool connection, as before. The read path no longer uses
-     * it (it runs on {@link ReaderJdbc} in one {@link ReaderTx}); it is removed with jOOQ.
-     */
-    @Bean
-    @ReaderDsl
-    public DSLContext readerDsl(@Qualifier("readerDataSource") DataSource readerDataSource) {
-        return DSL.using(new DefaultConfiguration()
-                .set(new TransactionAwareDataSourceProxy(readerDataSource))
-                .set(SQLDialect.POSTGRES));
-    }
-
     /** As Boot's {@code DataSourceTransactionManagerAutoConfiguration} builds it, over the writer. */
     @Bean
     @Primary
@@ -135,7 +101,12 @@ public class DataSourceConfig {
         return new JdbcTransactionManager(readerDataSource);
     }
 
-    /** Statements join the {@link ReaderTx} transaction they run in; there is no other way to read. */
+    /**
+     * Statements join the {@link ReaderTx} transaction they run in. Used outside one, each
+     * statement autocommits in its own snapshot; ArchitectureTest requires every {@code wqs.read..}
+     * class that injects this client to inject {@link ReaderTx} too, and ProjectionReader runs
+     * every read inside one {@code readerTx.execute(..)}.
+     */
     @Bean
     @ReaderJdbc
     public JdbcClient readerJdbc(@Qualifier("readerDataSource") DataSource readerDataSource) {
@@ -143,8 +114,7 @@ public class DataSourceConfig {
     }
 
     /**
-     * The read path's ONE transaction: read-only, REPEATABLE READ, on the reader pool -- the
-     * {@code readerDsl.transactionResult} it replaces. The pool already pins both (see
+     * The read path's ONE transaction: read-only, REPEATABLE READ, on the reader pool. The pool already pins both (see
      * {@link #readerDataSource}); stating them here keeps them if the pool ever stops doing so.
      */
     @Bean

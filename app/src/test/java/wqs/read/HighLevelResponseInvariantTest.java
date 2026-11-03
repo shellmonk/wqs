@@ -71,7 +71,7 @@ class HighLevelResponseInvariantTest extends ReadPropertyBase {
     /** Guards the dataset: cancellations exist and change totals, so the all/excl choice is observable. */
     @Test
     void dataset_is_clean_and_has_cancelled_plays() {
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
         List<HighLevelEntry> all = walk(ViewKind.CC, AggregationLevel.L2, FILTERS.get(0), 50);
         List<HighLevelEntry> excl = walk(ViewKind.CC, AggregationLevel.L2, FILTERS.get(1), 50);
         assertThat(all.stream().filter(SessionView.class::isInstance)).hasSize(13);

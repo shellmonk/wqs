@@ -48,7 +48,7 @@ class ProjectionWriterTest extends PostgresTestBase {
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 7), 0);
         clearProjection();
-        dsl().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqStreamOffset\"");
     }
 
     @Test
@@ -128,7 +128,7 @@ class ProjectionWriterTest extends PostgresTestBase {
         WriteResult first = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 1L));
 
         assertThat(count("wqItemLocator")).isEqualTo(1);
-        assertThat(dsl().fetchOne("select \"zeroAmount\" from \"wqItemLocator\"").get(0, Boolean.class)).isTrue();
+        assertThat(db().value("select \"zeroAmount\" from \"wqItemLocator\"", Boolean.class)).isTrue();
         assertNothingProjected();
         assertThat(first.projected()).isZero();
         assertThat(first.skipped()).isEqualTo(1);
@@ -156,11 +156,10 @@ class ProjectionWriterTest extends PostgresTestBase {
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
 
             assertThat(count("wqWebItem")).as("cancelFirst=" + cancelFirst).isEqualTo(1);
-            assertThat(dsl().fetchOne("select \"sourceId\" from \"wqWebItem\"").get(0, String.class)).isEqualTo("c-1");
-            assertThat(dsl().fetchOne("select count(*)::int from \"wqWebItem\" where \"cancelled\"")
-                    .get(0, Integer.class)).isZero();
+            assertThat(db().value("select \"sourceId\" from \"wqWebItem\"", String.class)).isEqualTo("c-1");
+            assertThat(db().value("select count(*)::int from \"wqWebItem\" where \"cancelled\"", Integer.class)).isZero();
             assertThat(count("wqPendingCancel")).as("cancelFirst=" + cancelFirst).isZero();
-            assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+            assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
         }
     }
 
@@ -177,10 +176,10 @@ class ProjectionWriterTest extends PostgresTestBase {
 
             assertThat(count("wqItemLocator")).isEqualTo(2);
             assertThat(count("wqWebItem")).as("only the target has an item row").isEqualTo(1);
-            assertThat(dsl().fetchOne("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\"").intoArray())
+            assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\"").asMap().values().toArray())
                     .as("cancelFirst=" + cancelFirst).containsExactly(true, "c-1");
             assertThat(count("wqPendingCancel")).isZero();
-            assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+            assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
         }
     }
 
@@ -188,20 +187,20 @@ class ProjectionWriterTest extends PostgresTestBase {
     @Test
     void currency_mismatch_in_session_dead_letters() {
         writer.apply(new ProjectionBatch(STREAM, List.of(inSession("e-1", "EUR")), 1L));
-        String sessionBefore = dsl().fetch("select * from \"wqSession\"").formatCSV();
+        List<String> sessionBefore = db().lines("select * from \"wqSession\"");
 
         WriteResult result = writer.apply(new ProjectionBatch(STREAM,
                 List.of(inSession("u-1", "USD"), tx("other")), 3L, List.of(2L, 3L)));
 
         assertThat(result.deadLettered()).isEqualTo(1);
         assertThat(result.projected()).isEqualTo(1);
-        assertThat(dsl().fetch("select * from \"wqSession\" where \"batchId\" = 'b-shared'").formatCSV())
+        assertThat(db().lines("select * from \"wqSession\" where \"batchId\" = 'b-shared'"))
                 .isEqualTo(sessionBefore);
-        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqItemLocator\"").where("\"sourceId\" = 'u-1'")))
+        assertThat(db().count("\"wqItemLocator\" where \"sourceId\" = 'u-1'"))
                 .as("not even the locator").isZero();
         assertThat(deadLetters()).containsExactly("u-1|2|currency-mismatch");
         assertThat(offsetStore.read(STREAM)).contains(3L);
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     /** D7 / P-7: an eInstant item must be sessioned; one that is not is dead-lettered. */
@@ -214,7 +213,7 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.deadLettered()).isEqualTo(1);
         assertThat(result.projected()).isEqualTo(1);
-        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqItemLocator\"").where("\"sourceId\" = 'ei-1'"))).isZero();
+        assertThat(db().count("\"wqItemLocator\" where \"sourceId\" = 'ei-1'")).isZero();
         assertThat(deadLetters()).containsExactly("ei-1|7|einstant-unsessioned");
         assertThat(offsetStore.read(STREAM)).contains(8L);
     }
@@ -235,9 +234,8 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.deadLettered()).isZero();
         assertThat(deadLetters()).isEmpty();
-        assertThat(dsl().fetchOne("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\" where \"sourceId\" = 'ei-t'")
-                .intoArray()).containsExactly(true, "ei-c");
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\" where \"sourceId\" = 'ei-t'").asMap().values().toArray()).containsExactly(true, "ei-c");
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     private void assertNothingProjected() {
@@ -248,8 +246,8 @@ class ProjectionWriterTest extends PostgresTestBase {
     }
 
     private List<String> deadLetters() {
-        return dsl().fetch("select \"sourceId\" || '|' || coalesce(\"streamOffset\"::text, '-') || '|' || \"error\""
-                + " from \"wqDeadLetter\" order by \"deadLetterId\"").getValues(0, String.class);
+        return db().column("select \"sourceId\" || '|' || coalesce(\"streamOffset\"::text, '-') || '|' || \"error\""
+                + " from \"wqDeadLetter\" order by \"deadLetterId\"", String.class);
     }
 
     private ProjectionItem zero(String sourceId) {
@@ -278,7 +276,7 @@ class ProjectionWriterTest extends PostgresTestBase {
 
     private void dropPartitions(YearMonth month) {
         for (PartitionedTable table : PartitionedTable.values()) {
-            dsl().execute("drop table if exists \"" + table.tableName() + "_"
+            db().execute("drop table if exists \"" + table.tableName() + "_"
                     + month.format(DateTimeFormatter.ofPattern("uuuu_MM")) + "\"");
         }
         provisioner.forgetKnownMonths();
@@ -295,6 +293,6 @@ class ProjectionWriterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 }

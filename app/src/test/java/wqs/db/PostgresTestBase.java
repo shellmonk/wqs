@@ -2,9 +2,6 @@ package wqs.db;
 
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
-import org.jooq.DSLContext;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -38,8 +35,9 @@ public abstract class PostgresTestBase {
         return dataSource;
     }
 
-    protected static DSLContext dsl() {
-        return DSL.using(dataSource, SQLDialect.POSTGRES);
+    /** Plain-SQL helpers over {@link #jdbc()}, for test setup and assertions. */
+    protected static TestSql db() {
+        return new TestSql(jdbc());
     }
 
     /** A JdbcClient over the shared container; it joins a Spring transaction on {@link #dataSource()}. */
@@ -51,7 +49,7 @@ public abstract class PostgresTestBase {
      * A transaction template over the shared container, for tests that build updaters by hand: a
      * {@link #jdbc()} client joins the transaction it opens, as the app's writer does.
      */
-    protected static org.springframework.transaction.support.TransactionTemplate tx() {
+    protected static org.springframework.transaction.support.TransactionTemplate inTx() {
         return new org.springframework.transaction.support.TransactionTemplate(
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
     }
@@ -84,7 +82,7 @@ public abstract class PostgresTestBase {
                 "wqItemLocator", "wqWebItem", "wqCcItem", "wqGroupLocator", "wqSession", "wqPlay",
                 "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth", "wqPendingCancel",
                 "wqStreamOffset", "wqDeadLetter", "wqIngestWatermark")) {
-            dsl().execute("delete from \"" + table + "\"");
+            db().execute("delete from \"" + table + "\"");
         }
     }
 }

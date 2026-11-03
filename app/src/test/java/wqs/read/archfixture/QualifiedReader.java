@@ -1,16 +1,19 @@
 package wqs.read.archfixture;
 
-import org.jooq.DSLContext;
-import org.springframework.beans.factory.annotation.Autowired;
-import wqs.config.ReaderDsl;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.support.TransactionTemplate;
+import wqs.config.ReaderJdbc;
+import wqs.config.ReaderTx;
 
-/** Fixture: the normal pattern -- plain field assigned from a qualified constructor parameter (must pass). */
+/** Fixture: the normal pattern -- plain fields assigned from qualified constructor parameters (must pass). */
 public class QualifiedReader {
-    private final DSLContext dsl;
+    private final JdbcClient jdbc;
+    private final TransactionTemplate tx;
 
-    public QualifiedReader(@ReaderDsl DSLContext dsl) {
-        this.dsl = dsl;
+    public QualifiedReader(@ReaderJdbc JdbcClient jdbc, @ReaderTx TransactionTemplate tx) {
+        this.jdbc = jdbc;
+        this.tx = tx;
     }
 
-    public void run(@ReaderDsl DSLContext other) {}
+    public void run(@ReaderJdbc JdbcClient other) {}
 }

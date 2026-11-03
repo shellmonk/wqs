@@ -9,7 +9,7 @@ import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
-import org.jooq.Record;
+import wqs.db.TestSql;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import wqs.db.PartitionManager;
@@ -59,7 +59,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.insertedCount()).isEqualTo(1);
         assertThat(count("wqCcHighLevel")).isEqualTo(1);
         assertThat(count("wqWebHighLevel")).isZero();
-        Record row = dsl().fetchOne("select * from \"wqCcHighLevel\"");
+        TestSql.Row row = db().row("select * from \"wqCcHighLevel\"");
         assertThat(row.get("kind", Short.class)).isEqualTo((short) 4);
         assertThat(row.get("refId", String.class)).isEqualTo("pay1");
     }
@@ -138,7 +138,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     @Test
     void a_move_preserves_visibility_and_the_move_also_updates_the_product() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        dsl().execute("update \"wqWebHighLevel\" set \"visibleExclCancelled\" = false");
+        db().execute("update \"wqWebHighLevel\" set \"visibleExclCancelled\" = false");
         Instant earlier = T0.minusSeconds(60);
 
         HighLevelResult result = apply(tx("t0", "b1", earlier), moved(earlier, 7, T0, 11));
@@ -151,17 +151,15 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.revived()).containsExactly(ViewKind.WEB);
         assertThat(visible("wqWebHighLevel")).isTrue();
         assertThat(visible("wqCcHighLevel")).isTrue();
-        assertThat(dsl().fetchOne("select \"productId\" from \"wqWebHighLevel\"")
-                .get(0, String.class)).isEqualTo(Products.id(7));
-        assertThat(dsl().fetchOne("select \"productType\" from \"wqWebHighLevel\"")
-                .get(0, String.class)).isEqualTo(Products.type(7));
+        assertThat(db().value("select \"productId\" from \"wqWebHighLevel\"", String.class)).isEqualTo(Products.id(7));
+        assertThat(db().value("select \"productType\" from \"wqWebHighLevel\"", String.class)).isEqualTo(Products.type(7));
     }
 
     @Test
     void a_live_item_revives_hidden_session_rows_only_in_the_views_its_source_feeds() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        dsl().execute("update \"wqWebHighLevel\" set \"visibleExclCancelled\" = false");
-        dsl().execute("update \"wqCcHighLevel\" set \"visibleExclCancelled\" = false");
+        db().execute("update \"wqWebHighLevel\" set \"visibleExclCancelled\" = false");
+        db().execute("update \"wqCcHighLevel\" set \"visibleExclCancelled\" = false");
 
         HighLevelResult result = apply(ccOnly("a1", "b1", T0.plusSeconds(5)), joined(T0, 11));
 
@@ -179,7 +177,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     @Test
     void a_product_only_change_reports_each_moved_rows_visibility() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        dsl().execute("update \"wqCcHighLevel\" set \"visibleExclCancelled\" = false");
+        db().execute("update \"wqCcHighLevel\" set \"visibleExclCancelled\" = false");
 
         HighLevelResult result = apply(tx("t2", "b1", T0.plusSeconds(5)), moved(T0, 7, T0, 11));
 
@@ -205,20 +203,16 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.movedFrom()).isEqualTo(T0);
         assertThat(result.movedFromProductType()).isEqualTo(Products.type(11));
         assertThat(occurredAts("wqWebHighLevel")).containsExactly(T0);
-        assertThat(dsl().fetchOne("select \"productId\" from \"wqWebHighLevel\"")
-                .get(0, String.class)).isEqualTo(Products.id(7));
-        assertThat(dsl().fetchOne("select \"productType\" from \"wqWebHighLevel\"")
-                .get(0, String.class)).isEqualTo(Products.type(7));
-        assertThat(dsl().fetchOne("select \"productId\" from \"wqCcHighLevel\"")
-                .get(0, String.class)).isEqualTo(Products.id(7));
-        assertThat(dsl().fetchOne("select \"productType\" from \"wqCcHighLevel\"")
-                .get(0, String.class)).isEqualTo(Products.type(7));
+        assertThat(db().value("select \"productId\" from \"wqWebHighLevel\"", String.class)).isEqualTo(Products.id(7));
+        assertThat(db().value("select \"productType\" from \"wqWebHighLevel\"", String.class)).isEqualTo(Products.type(7));
+        assertThat(db().value("select \"productId\" from \"wqCcHighLevel\"", String.class)).isEqualTo(Products.id(7));
+        assertThat(db().value("select \"productType\" from \"wqCcHighLevel\"", String.class)).isEqualTo(Products.type(7));
     }
 
     @Test
     void a_move_materialises_a_missing_row_in_the_views_the_item_feeds() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        dsl().execute("delete from \"wqWebHighLevel\"");
+        db().execute("delete from \"wqWebHighLevel\"");
         Instant earlier = T0.minusSeconds(60);
 
         HighLevelResult result = apply(tx("t0", "b1", earlier), moved(earlier, 11, T0, 11));
@@ -277,7 +271,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     private List<HighLevelResult> driveBoth(ProjectionItem... items) {
         List<HighLevelResult> results = new java.util.ArrayList<>();
         for (ProjectionItem item : items) {
-            results.add(tx().execute(status -> {
+            results.add(inTx().execute(status -> {
                 RollupResult rollup = new RollupUpdater(jdbc(), txTypes()).applyItem(item);
                 return new HighLevelUpdater(jdbc()).applyItem(item, rollup);
             }));
@@ -290,19 +284,19 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     private void clean() {
-        dsl().execute("delete from \"wqWebHighLevel\"");
-        dsl().execute("delete from \"wqCcHighLevel\"");
-        dsl().execute("delete from \"wqGroupLocator\"");
-        dsl().execute("delete from \"wqPlay\"");
-        dsl().execute("delete from \"wqSession\"");
+        db().execute("delete from \"wqWebHighLevel\"");
+        db().execute("delete from \"wqCcHighLevel\"");
+        db().execute("delete from \"wqGroupLocator\"");
+        db().execute("delete from \"wqPlay\"");
+        db().execute("delete from \"wqSession\"");
     }
 
     private List<String> snapshot() {
         return java.util.stream.Stream.of("wqWebHighLevel", "wqCcHighLevel")
-                .flatMap(t -> dsl().fetch("select \"userId\",\"occurredAt\",\"kind\",\"refId\","
+                .flatMap(t -> db().maps("select \"userId\",\"occurredAt\",\"kind\",\"refId\","
                         + "\"productId\",\"productType\",\"currency\",\"visibleExclCancelled\" from \"" + t
                         + "\" order by 1,2,3,4").stream()
-                        .map(r -> t + r.intoList()))
+                        .map(r -> t + r.values()))
                 .toList();
     }
 
@@ -313,7 +307,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     private HighLevelResult apply(ProjectionItem item, RollupResult rollup) {
-        return tx().execute(status -> new HighLevelUpdater(jdbc()).applyItem(item, rollup));
+        return inTx().execute(status -> new HighLevelUpdater(jdbc()).applyItem(item, rollup));
     }
 
     private static RollupResult newSession(Instant start, int product) {
@@ -345,21 +339,19 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 
     private List<String> refIds(String table) {
-        return dsl().fetch("select \"refId\" from \"" + table + "\"").getValues(0, String.class);
+        return db().column("select \"refId\" from \"" + table + "\"", String.class);
     }
 
     private List<Instant> occurredAts(String table) {
-        return dsl().fetch("select \"occurredAt\" from \"" + table + "\"")
-                .getValues(0, java.time.OffsetDateTime.class).stream()
+        return db().column("select \"occurredAt\" from \"" + table + "\"", java.time.OffsetDateTime.class).stream()
                 .map(o -> o.withOffsetSameInstant(ZoneOffset.UTC).toInstant()).toList();
     }
 
     private Boolean visible(String table) {
-        return dsl().fetchOne("select \"visibleExclCancelled\" from \"" + table + "\"")
-                .get(0, Boolean.class);
+        return db().value("select \"visibleExclCancelled\" from \"" + table + "\"", Boolean.class);
     }
 }

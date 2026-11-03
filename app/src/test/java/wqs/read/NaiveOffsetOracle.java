@@ -6,8 +6,8 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import org.jooq.DSLContext;
-import org.jooq.Record;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import wqs.db.TestSql;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 
@@ -18,10 +18,10 @@ import wqs.domain.ViewKind;
  */
 public final class NaiveOffsetOracle {
 
-    private final DSLContext dsl;
+    private final TestSql sql;
 
-    public NaiveOffsetOracle(DSLContext dsl) {
-        this.dsl = dsl;
+    public NaiveOffsetOracle(JdbcClient jdbc) {
+        this.sql = new TestSql(jdbc);
     }
 
     public long count(ViewKind v, Level0Filter f, Instant from, Instant to) {
@@ -32,7 +32,7 @@ public final class NaiveOffsetOracle {
         List<Object> binds = new ArrayList<>();
         String sql = "select count(*) from \"" + v.itemTable() + "\" where " + where(f, typeCodes, from, to, binds);
         // A non-numeric or null result is a broken oracle, not zero: fail loudly.
-        return ((Number) dsl.fetchValue(sql, binds.toArray())).longValue();
+        return ((Number) this.sql.value(sql, Object.class, binds.toArray())).longValue();
     }
 
     public List<ItemEntry> page(ViewKind v, Level0Filter f, Instant from, Instant to, long offset, int limit) {
@@ -49,7 +49,7 @@ public final class NaiveOffsetOracle {
                 + " order by i.\"occurredAt\" desc, i.\"itemId\" desc offset ? limit ?";
         binds.add(offset);
         binds.add(limit);
-        return dsl.fetch(sql, binds.toArray()).map(NaiveOffsetOracle::entry);
+        return this.sql.rows(sql, binds.toArray()).stream().map(NaiveOffsetOracle::entry).toList();
     }
 
     private static String where(
@@ -83,7 +83,7 @@ public final class NaiveOffsetOracle {
     public long highLevelCount(ViewKind v, HighLevelFilter f, Instant from, Instant to) {
         List<Object> binds = new ArrayList<>();
         String sql = "select count(*) from \"" + highLevelTable(v) + "\" where " + highLevelWhere(f, from, to, binds);
-        return ((Number) dsl.fetchValue(sql, binds.toArray())).longValue();
+        return ((Number) this.sql.value(sql, Object.class, binds.toArray())).longValue();
     }
 
     /** Plain {@code order by ... offset ... limit} over the page index, in the level-1/2 total order. */
@@ -95,10 +95,10 @@ public final class NaiveOffsetOracle {
                 + " order by \"occurredAt\" desc, \"kind\" desc, \"refId\" desc offset ? limit ?";
         binds.add(offset);
         binds.add(limit);
-        return dsl.fetch(sql, binds.toArray()).map(r -> new HighLevelKey(
+        return this.sql.rows(sql, binds.toArray()).stream().map(r -> new HighLevelKey(
                 r.get("occurredAt", OffsetDateTime.class).toInstant(),
                 r.get("kind", Short.class),
-                r.get("refId", String.class)));
+                r.get("refId", String.class))).toList();
     }
 
     private static String highLevelTable(ViewKind v) {
@@ -124,7 +124,7 @@ public final class NaiveOffsetOracle {
     }
 
     /** Same field rules as the view mappers: kind is the source's name, detail the raw JSON. */
-    private static ItemEntry entry(Record r) {
+    private static ItemEntry entry(TestSql.Row r) {
         return new ItemEntry(
                 SourceKind.ofCode(r.get("source", Integer.class)).name(),
                 r.get("sourceId", String.class),

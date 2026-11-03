@@ -303,10 +303,10 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
                     : item("n" + i, at, null, null, TxTypes.PLAY, "1", "keno"));
         }
         applyBatches(data);
-        dsl().execute("vacuum analyze \"wqWebItem\"");
-        dsl().execute("vacuum analyze \"wqCcItem\"");
-        dsl().execute("vacuum analyze \"wqSession\"");
-        dsl().execute("vacuum analyze \"wqPlay\"");
+        db().execute("vacuum analyze \"wqWebItem\"");
+        db().execute("vacuum analyze \"wqCcItem\"");
+        db().execute("vacuum analyze \"wqSession\"");
+        db().execute("vacuum analyze \"wqPlay\"");
         com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper();
         for (ViewKind v : ViewKind.values()) {
             HighLevelItemQuery items = v == ViewKind.WEB ? webAssembly : ccAssembly;
@@ -319,6 +319,9 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
                         (tx, keys) -> assembler.assemble(recording.client(), items, USER, n, keys));
                 assertThat(ids(page.entries())).containsExactly("n3", "n2", "n1", "n0", "L");
                 assertThat(((SessionView) page.entries().get(4)).endedAt()).isEqualTo("2034-02-27T00:00:00Z");
+                // 3 statements at L1, 4 at L2 (measured in Task 4): an empty recording must not pass.
+                assertThat(recording.executed()).as(v + " " + level + " statements")
+                        .hasSize(level == AggregationLevel.L2 ? 4 : 3);
                 long examined = 0;
                 for (StatementRecorder.Executed q : recording.executed()) {
                     String plan = recording.rerun("explain (analyze, format json)", q).get(0);

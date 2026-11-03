@@ -97,7 +97,7 @@ public class WebHighLevelAssembly implements HighLevelItemQuery {
             return Map.of();
         }
         Set<HighLevelKey> want = Set.copyOf(keys);
-        // timestamptz text as jOOQ bound it; one array bind, whatever the page size.
+        // timestamptz as ISO-8601 text (UTC); one array bind, whatever the page size.
         String[] ats = keys.stream().map(k -> utc(k.occurredAt())).distinct()
                 .map(OffsetDateTime::toString).toArray(String[]::new);
         Set<String> sourceIds = new LinkedHashSet<>();

@@ -48,7 +48,7 @@ class StreamConsumerTest extends PostgresTestBase {
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 9), 0);
         clearProjection();
-        dsl().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqStreamOffset\"");
         source = new FakeStreamSource();
         registry = new SimpleMeterRegistry();
     }
@@ -238,7 +238,7 @@ class StreamConsumerTest extends PostgresTestBase {
                 new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null);
         StreamConsumer consumer = new StreamConsumer(
                 source, properties, payloadMapper, flaky, writer, offsetStore, registry, clock, deadLetterStore);
-        dsl().execute("delete from \"wqDeadLetter\"");
+        db().execute("delete from \"wqDeadLetter\"");
         consumer.start();
 
         source.queue(payload("tx-flaky"), 5);
@@ -344,7 +344,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
 
         assertThat(count("wqDeadLetter")).isEqualTo(1);
-        assertThat(dsl().fetchOne("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").intoArray())
+        assertThat(db().row("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").asMap().values().toArray())
                 .containsExactly("tx-poison", 6L);
         assertThat(offsetStore.read("wallet-transactions")).contains(6L);
         assertThat(count("wqWebItem")).isZero();
@@ -437,7 +437,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.queue(payload("tx-rejected"), 7);
         source.deliverAll();
 
-        assertThat(dsl().fetchOne("select \"sourceId\" from \"wqDeadLetter\"").get(0, String.class))
+        assertThat(db().value("select \"sourceId\" from \"wqDeadLetter\"", String.class))
                 .isEqualTo("tx-rejected");
         assertThat(offsetStore.read("wallet-transactions")).contains(7L);
         assertThat(count("wqWebItem")).isZero();
@@ -522,7 +522,7 @@ class StreamConsumerTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 
     private static final class MutableClock extends Clock {

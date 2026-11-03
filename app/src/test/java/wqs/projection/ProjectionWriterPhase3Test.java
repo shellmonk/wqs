@@ -8,7 +8,6 @@ import java.time.YearMonth;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import org.jooq.Record;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -204,10 +203,9 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
             List<String> rows = sessionPageRows();
             String described = order.stream().map(ProjectionItem::sourceId).toList().toString();
             assertThat(rows).as(described).hasSize(2).allMatch(row -> row.contains("USD"));
-            String sessionCurrency = dsl().fetchOne("select \"currency\" from \"wqSession\"")
-                    .get(0, String.class);
+            String sessionCurrency = db().value("select \"currency\" from \"wqSession\"", String.class);
             assertThat(sessionCurrency).as(described).isEqualTo("USD");
-            assertThat(new ProjectionInvariants(dsl()).drift()).as(described).isEmpty();
+            assertThat(new ProjectionInvariants(jdbc()).drift()).as(described).isEmpty();
             if (expected == null) {
                 expected = rows;
             } else {
@@ -221,17 +219,17 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 9L));
         assertThat(mismatch.deadLettered()).isEqualTo(1);
         assertThat(sessionPageRows()).isEqualTo(expected);
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     private List<String> sessionPageRows() {
-        return dsl().fetch("""
+        return db().maps("""
                 select 'web' as v, "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
                 from "wqWebHighLevel" where "kind" = 0
                 union all
                 select 'cc', "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
                 from "wqCcHighLevel" where "kind" = 0
-                order by 1""").map(r -> r.intoList().toString());
+                order by 1""").stream().map(r -> r.values().toString()).toList();
     }
 
     private ProjectionItem txCurrency(String id, Instant at, String currency) {
@@ -260,23 +258,21 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
     /** P-2 over the whole projection, via the shared oracle. */
     private void assertEveryCounterMatchesTheProjection() {
-        assertThat(new ProjectionInvariants(dsl()).counterDrift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).counterDrift()).isEmpty();
     }
 
     private List<String> highLevelProducts(String table) {
-        return dsl().fetch("select \"productId\" from \"" + table + "\" where \"kind\" = 0")
-                .getValues(0, String.class);
+        return db().column("select \"productId\" from \"" + table + "\" where \"kind\" = 0", String.class);
     }
 
     /** The day counter at test product {@code product}'s type; 0 reads the ALL sentinel ''. */
     private int productDayCount(int view, int pageUnit, int product, Instant at) {
-        return dsl().fetchOne("""
+        return db().value("""
                 select coalesce(sum("cntAll"),0)::int from "wqCountDay"
                 where "viewKind" = ? and "pageUnit" = ? and "productType" = ? and "typeId" = 0
                   and "period" = (?::timestamptz at time zone 'UTC')::date
-                """, (short) view, (short) pageUnit, product == 0 ? "" : Products.type(product),
-                at.toString())
-                .get(0, Integer.class);
+                """, Integer.class, (short) view, (short) pageUnit, product == 0 ? "" : Products.type(product),
+                at.toString());
     }
 
     private ProjectionItem tx(String id, String batchId, String subBatchId) {
@@ -311,27 +307,27 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 
     private int sentinel(String table, int pageUnit) {
-        return dsl().fetchOne("""
+        return db().value("""
                 select coalesce(sum("cntAll"),0)::int from "%s"
                 where "viewKind" = 1 and "pageUnit" = ? and "productType" = '' and "typeId" = 0
-                """.formatted(table), (short) pageUnit).get(0, Integer.class);
+                """.formatted(table), Integer.class, (short) pageUnit);
     }
 
     private int monthSentinel(int view, int pageUnit, String period) {
-        return dsl().fetchOne("""
+        return db().value("""
                 select coalesce(sum("cntAll"),0)::int from "wqCountMonth"
                 where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "typeId" = 0
                   and "period" = ?::date
-                """, (short) view, (short) pageUnit, period).get(0, Integer.class);
+                """, Integer.class, (short) view, (short) pageUnit, period);
     }
 
     /** Non-zero day-tier sentinel cntAll per UTC day for one view and page unit. */
     private Map<String, Integer> sentinelsByDay(int view, int pageUnit) {
-        return toMap(dsl().fetch("""
+        return toMap(db().rows("""
                 select "period"::text as d, "cntAll"::int as n from "wqCountDay"
                 where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "typeId" = 0
                   and "cntAll" > 0
@@ -340,18 +336,18 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
     /** The oracle: actual rows per UTC day. */
     private Map<String, Integer> liveByDay(String table, String column) {
-        return toMap(dsl().fetch("""
+        return toMap(db().rows("""
                 select ("%s" at time zone 'UTC')::date::text as d, count(*)::int as n
                 from "%s" where "userId" = 1 group by 1
                 """.formatted(column, table)));
     }
 
-    private static Map<String, Integer> toMap(org.jooq.Result<Record> rows) {
+    private static Map<String, Integer> toMap(List<wqs.db.TestSql.Row> rows) {
         return rows.stream().collect(Collectors.toMap(
                 r -> r.get("d", String.class), r -> r.get("n", Integer.class)));
     }
 
     private int sessionTxCount() {
-        return dsl().fetchOne("select \"txCount\" from \"wqSession\"").get(0, Integer.class);
+        return db().value("select \"txCount\" from \"wqSession\"", Integer.class);
     }
 }

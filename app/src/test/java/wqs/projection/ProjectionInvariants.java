@@ -2,8 +2,8 @@ package wqs.projection;
 
 import java.util.ArrayList;
 import java.util.List;
-import org.jooq.DSLContext;
-import org.jooq.Record;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import wqs.db.TestSql;
 import wqs.domain.MoneyDirection;
 
 /**
@@ -37,10 +37,10 @@ public final class ProjectionInvariants {
 
     private static final String NOT_A_CANCELLATION = "(i.\"cancels\" is null or btrim(i.\"cancels\") = '')";
 
-    private final DSLContext dsl;
+    private final TestSql sql;
 
-    public ProjectionInvariants(DSLContext dsl) {
-        this.dsl = dsl;
+    public ProjectionInvariants(JdbcClient jdbc) {
+        this.sql = new TestSql(jdbc);
     }
 
     /** Every invariant at once. */
@@ -76,7 +76,7 @@ public final class ProjectionInvariants {
                 from "wqItemLocator" l where l."zeroAmount" and l."cancels" is not null
                 """.formatted(cancels);
         for (String[] view : new String[][] {{"WEB", "wqWebItem"}, {"CC", "wqCcItem"}}) {
-            drift.addAll(dsl.fetch("""
+            drift.addAll(sql.rows("""
                     with cancel as (
                         select "source", "userId", target, min("sourceId") as "by"
                         from (%4$s) all_cancels
@@ -95,9 +95,9 @@ public final class ProjectionInvariants {
                        or i."cancelledBy" is distinct from k."by"
                     order by 3, 4, 5
                     """.formatted(view[1], view[0], cancels, allCancels))
-                    .map(ProjectionInvariants::describe));
+                    .stream().map(ProjectionInvariants::describe).toList());
         }
-        drift.addAll(dsl.fetch("""
+        drift.addAll(sql.rows("""
                 with expected as (
                     select c."source", c."sourceId", c.target as "cancels", c."userId"
                     from (%2$s) c
@@ -118,7 +118,7 @@ public final class ProjectionInvariants {
                 where e."sourceId" is null or p."cancelSourceId" is null
                 order by 2, 3, 4
                 """.formatted(cancels, allCancels))
-                .map(ProjectionInvariants::describe));
+                .stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }
 
@@ -137,7 +137,7 @@ public final class ProjectionInvariants {
      * carry a type: only the type sentinel 0.
      */
     public List<String> counterDrift() {
-        return dsl.fetch("""
+        return sql.rows("""
                 with src as (
                     select 1 as v, 0 as u, "userId", "occurredAt" as t, "productType" as p,
                            not "cancelled" as vis, "type"::int as ty from "wqWebItem"
@@ -199,7 +199,7 @@ public final class ProjectionInvariants {
                    or e."cntAll" <> s."cntAll" or e."cntExcl" <> s."cntExcl"
                 order by 2, 3, 4, 5, 6, 7, 8
                 """)
-                .map(ProjectionInvariants::describe);
+                .stream().map(ProjectionInvariants::describe).toList();
     }
 
     /**
@@ -257,7 +257,7 @@ public final class ProjectionInvariants {
                 """;
 
         List<String> drift = new ArrayList<>();
-        drift.addAll(dsl.fetch("""
+        drift.addAll(sql.rows("""
                 with items as (%1$s),
                 expected as (
                     select "userId", "batchId", %2$s,
@@ -281,8 +281,8 @@ public final class ProjectionInvariants {
                    or e."playCountExclCancelled" is distinct from s."playCountExclCancelled"
                 order by 2, 3
                 """.formatted(sessioned, folded, compared))
-                .map(ProjectionInvariants::describe));
-        drift.addAll(dsl.fetch("""
+                .stream().map(ProjectionInvariants::describe).toList());
+        drift.addAll(sql.rows("""
                 with items as (%1$s),
                 expected as (
                     select "userId", "batchId", "subBatchId", %2$s
@@ -302,8 +302,8 @@ public final class ProjectionInvariants {
                 where e."batchId" is null or s."batchId" is null or %3$s
                 order by 2, 3, 4
                 """.formatted(sessioned, folded, compared))
-                .map(ProjectionInvariants::describe));
-        drift.addAll(dsl.fetch("""
+                .stream().map(ProjectionInvariants::describe).toList());
+        drift.addAll(sql.rows("""
                 with items as (%1$s),
                 expected as (
                     select "userId", "batchId", '' as "subBatchId", min("occurredAt") as "startedAt"
@@ -327,7 +327,7 @@ public final class ProjectionInvariants {
                    or e."startedAt" <> l."startedAt"
                 order by 2, 3, 4
                 """.formatted(sessioned))
-                .map(ProjectionInvariants::describe));
+                .stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }
 
@@ -350,7 +350,7 @@ public final class ProjectionInvariants {
         List<String> drift = new ArrayList<>();
         for (String[] view : new String[][] {
                 {"WEB", "wqWebItem", "wqWebHighLevel"}, {"CC", "wqCcItem", "wqCcHighLevel"}}) {
-            drift.addAll(dsl.fetch("""
+            drift.addAll(sql.rows("""
                     with session_key as (
                         select i."userId", i."batchId", min(i."occurredAt") as "startedAt",
                                (array_agg(i."productId"
@@ -406,7 +406,7 @@ public final class ProjectionInvariants {
                        or e.visible <> h."visibleExclCancelled"
                     order by 3, 4, 5
                     """.formatted(view[1], view[2], NOT_A_CANCELLATION, view[0]))
-                    .map(ProjectionInvariants::describe));
+                    .stream().map(ProjectionInvariants::describe).toList());
         }
         return drift;
     }
@@ -426,22 +426,22 @@ public final class ProjectionInvariants {
         String[] types = eInstantProductTypes.toArray(String[]::new);
         for (String[] view : new String[][] {
                 {"WEB", "wqWebItem", "wqWebHighLevel"}, {"CC", "wqCcItem", "wqCcHighLevel"}}) {
-            drift.addAll(dsl.fetch("""
+            drift.addAll(sql.rows("""
                     select 'unsessioned eInstant item' as problem, '%3$s' as view,
                            i."userId", i."source", i."sourceId", i."productType"
                     from "%1$s" i
                     where i."batchId" is null and i."productType" = any(?::text[]) and %4$s
                     order by 3, 4, 5
                     """.formatted(view[1], view[2], view[0], NOT_A_CANCELLATION), (Object) types)
-                    .map(ProjectionInvariants::describe));
-            drift.addAll(dsl.fetch("""
+                    .stream().map(ProjectionInvariants::describe).toList());
+            drift.addAll(sql.rows("""
                     select 'unsessioned eInstant page row' as problem, '%2$s' as view,
                            h."userId", h."kind", h."refId", h."productType"
                     from "%1$s" h
                     where h."kind" <> 0 and h."productType" = any(?::text[])
                     order by 3, 4, 5
                     """.formatted(view[2], view[0]), (Object) types)
-                    .map(ProjectionInvariants::describe));
+                    .stream().map(ProjectionInvariants::describe).toList());
         }
         return drift;
     }
@@ -456,15 +456,15 @@ public final class ProjectionInvariants {
                 + direction.code() + ") then abs(i.\"amount\") else 0 end";
     }
 
-    private static String describe(Record r) {
+    private static String describe(TestSql.Row r) {
         StringBuilder line = new StringBuilder(String.valueOf(r.get("problem")));
-        for (int i = 1; i < r.size(); i++) {
-            Object value = r.get(i);
+        r.asMap().entrySet().stream().skip(1).forEach(column -> {
+            Object value = column.getValue();
             if (value instanceof java.time.OffsetDateTime at) {
                 value = at.toInstant(); // UTC, whatever the session time zone
             }
-            line.append(' ').append(r.field(i).getName()).append('=').append(value);
-        }
+            line.append(' ').append(column.getKey()).append('=').append(value);
+        });
         return line.toString();
     }
 }

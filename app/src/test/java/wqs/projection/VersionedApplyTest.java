@@ -8,7 +8,6 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.YearMonth;
 import java.util.List;
-import org.jooq.Record;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -68,7 +67,7 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).isEqualTo(V1);
         assertThat(versionAt(SourceKind.PAYMENT, "pay1")).isEqualTo(V1);
         assertThat(detail("wqWebItem", "pr1")).isEqualTo(DETAIL_V1);
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     @Test
@@ -81,13 +80,13 @@ class VersionedApplyTest extends PostgresTestBase {
     @Test
     void newer_version_updates_detail_only() {
         writer.applyDelta(batch(V1, prize("pr1", "b1", V1, DETAIL_V1), payment("pay1", V1)));
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
         List<String> itemsBefore = itemsWithoutDetail();
 
         DeltaResult result = writer.applyDelta(batch(V2, prize("pr1", "b1", V2, DETAIL_V2)));
 
         assertThat(result.updated()).isEqualTo(1);
-        ProjectionSnapshot after = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot after = ProjectionSnapshot.of(jdbc());
         assertThat(itemsWithoutDetail()).isEqualTo(itemsBefore);
         assertThat(after.groupLocator()).isEqualTo(before.groupLocator());
         assertThat(after.sessions()).isEqualTo(before.sessions());
@@ -107,26 +106,26 @@ class VersionedApplyTest extends PostgresTestBase {
     @Test
     void equal_version_is_duplicate() {
         writer.applyDelta(batch(V1, prize("pr1", null, V1, DETAIL_V1)));
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
 
         DeltaResult result = writer.applyDelta(batch(V1, prize("pr1", null, V1, DETAIL_V2)));
 
         assertThat(result.duplicates()).isEqualTo(1);
         assertThat(result.updated()).isZero();
-        assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(before);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(before);
     }
 
     @Test
     void older_version_is_stale_and_ignored() {
         writer.applyDelta(batch(V2, prize("pr1", null, V2, DETAIL_V2)));
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
         double stale = meters.counter("wqs.delta.stale").count();
         double staleRows = meters.counter("wqs.delta.rows", "outcome", "stale").count();
 
         DeltaResult result = writer.applyDelta(batch(V2, prize("pr1", null, V1, DETAIL_V1)));
 
         assertThat(result.stale()).isEqualTo(1);
-        assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(before);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(before);
         assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).isEqualTo(V2);
         assertThat(meters.counter("wqs.delta.stale").count()).isEqualTo(stale + 1);
         assertThat(meters.counter("wqs.delta.rows", "outcome", "stale").count()).isEqualTo(staleRows + 1);
@@ -135,14 +134,14 @@ class VersionedApplyTest extends PostgresTestBase {
     @Test
     void newer_version_changing_amount_dead_letters() {
         writer.applyDelta(batch(V1, prize("pr1", null, V1, DETAIL_V1)));
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
 
         DeltaRow changed = row(SourceKind.CLAIMABLE_PRIZE, 1, "pr1", T0, null,
                 new BigDecimal("999.0000"), "EUR", V2, DETAIL_V2);
         DeltaResult result = writer.applyDelta(batch(V2, changed));
 
         assertThat(result.deadLettered()).isEqualTo(1);
-        assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(before);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(before);
         assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).isEqualTo(V1);
         assertThat(deadLetterErrors()).containsExactly(RejectedItemDeadLetters.IMMUTABLE_FIELD_CHANGED);
     }
@@ -150,14 +149,14 @@ class VersionedApplyTest extends PostgresTestBase {
     @Test
     void newer_version_changing_occurredAt_dead_letters() {
         writer.applyDelta(batch(V1, prize("pr1", null, V1, DETAIL_V1)));
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
 
         DeltaRow moved = row(SourceKind.CLAIMABLE_PRIZE, 1, "pr1", T0.plusSeconds(1), null,
                 new BigDecimal("150.0000"), "EUR", V2, DETAIL_V2);
         DeltaResult result = writer.applyDelta(batch(V2, moved));
 
         assertThat(result.deadLettered()).isEqualTo(1);
-        assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(before);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(before);
         assertThat(deadLetterErrors()).containsExactly(RejectedItemDeadLetters.IMMUTABLE_FIELD_CHANGED);
     }
 
@@ -182,7 +181,7 @@ class VersionedApplyTest extends PostgresTestBase {
         for (var change : changes.entrySet()) {
             clearProjection();
             writer.applyDelta(batch(V1, prize("pr1", "b1", V1, DETAIL_V1)));
-            ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+            ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
 
             ProjectionItem item = change.getValue();
             DeltaResult result = writer.applyDelta(batch(V2,
@@ -190,7 +189,7 @@ class VersionedApplyTest extends PostgresTestBase {
 
             assertThat(result.deadLettered()).as(change.getKey()).isEqualTo(1);
             assertThat(result.updated()).as(change.getKey()).isZero();
-            assertThat(ProjectionSnapshot.of(dsl())).as(change.getKey()).isEqualTo(before);
+            assertThat(ProjectionSnapshot.of(jdbc())).as(change.getKey()).isEqualTo(before);
             assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).as(change.getKey()).isEqualTo(V1);
             assertThat(detail("wqCcItem", "pr1")).as(change.getKey()).isEqualTo(DETAIL_V1);
             assertThat(deadLetterErrors()).as(change.getKey())
@@ -262,10 +261,10 @@ class VersionedApplyTest extends PostgresTestBase {
         writer.applyDelta(batch(V1, prize("pr1", "b1", V1, DETAIL_V1)));
 
         assertThat(count("wqSession")).isEqualTo(1);
-        assertThat(dsl().fetchOne("select \"txCount\" from \"wqSession\"").get(0, Integer.class)).isEqualTo(2);
+        assertThat(db().value("select \"txCount\" from \"wqSession\"", Integer.class)).isEqualTo(2);
         assertThat(count("wqWebHighLevel")).isEqualTo(1);
         assertThat(count("wqCcHighLevel")).isEqualTo(1);
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     // --- helpers -------------------------------------------------------------------------------
@@ -291,30 +290,29 @@ class VersionedApplyTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 
     private int itemSentinel(int view) {
-        return dsl().fetchOne("""
+        return db().value("""
                 select coalesce(sum("cntAll"),0)::int from "wqCountDay"
                 where "viewKind" = ? and "pageUnit" = 0 and "productType" = '' and "typeId" = 0
-                """, (short) view).get(0, Integer.class);
+                """, Integer.class, (short) view);
     }
 
     private Instant versionAt(SourceKind source, String sourceId) {
-        java.time.OffsetDateTime at = dsl().fetchOne(
-                "select \"versionAt\" from \"wqItemLocator\" where \"source\" = ? and \"sourceId\" = ?",
-                (short) source.code(), sourceId).get(0, java.time.OffsetDateTime.class);
+        java.time.OffsetDateTime at = db().value(
+                "select \"versionAt\" from \"wqItemLocator\" where \"source\" = ? and \"sourceId\" = ?", java.time.OffsetDateTime.class,
+                (short) source.code(), sourceId);
         return at == null ? null : at.toInstant();
     }
 
     private String detail(String table, String sourceId) {
-        return dsl().fetchOne("select \"detail\"::text from \"" + table + "\" where \"sourceId\" = ?", sourceId)
-                .get(0, String.class);
+        return db().value("select \"detail\"::text from \"" + table + "\" where \"sourceId\" = ?", String.class, sourceId);
     }
 
     private List<String> itemsWithoutDetail() {
-        return dsl().fetch("""
+        return db().lines("""
                 select 'web', "userId", "itemId", "source", "sourceId", "occurredAt", "productId", "productType",
                        "batchId", "subBatchId", "type", "amount", "currency", "balanceAfter", "cancelled",
                        "cancelledBy", "cancels"
@@ -324,10 +322,10 @@ class VersionedApplyTest extends PostgresTestBase {
                        "batchId", "subBatchId", "type", "amount", "currency", "balanceAfter", "cancelled",
                        "cancelledBy", "cancels"
                 from "wqCcItem"
-                order by 1, 5""").map(Record::toString);
+                order by 1, 5""");
     }
 
     private List<String> deadLetterErrors() {
-        return dsl().fetch("select \"error\" from \"wqDeadLetter\"").getValues(0, String.class);
+        return db().column("select \"error\" from \"wqDeadLetter\"", String.class);
     }
 }

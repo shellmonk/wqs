@@ -21,7 +21,7 @@ import java.time.Instant;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
-import org.jooq.Record;
+import wqs.db.TestSql;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -170,7 +170,7 @@ class DeltaPollerTest extends PostgresTestBase {
         expect(Instant.EPOCH, body);
         poller.runOnce();
         nextRun();
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
         double duplicates = meters.counter("wqs.delta.rows", "outcome", "duplicate").count();
 
         expect(v(2).minus(OVERLAP), body);
@@ -178,7 +178,7 @@ class DeltaPollerTest extends PostgresTestBase {
 
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(1, 3, false));
-        assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(before);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(before);
         assertThat(meters.counter("wqs.delta.rows", "outcome", "duplicate").count()).isEqualTo(duplicates + 3);
         assertThat(count("wqDeadLetter")).isZero();
         assertThat(watermarks.read()).contains(v(2));
@@ -245,7 +245,7 @@ class DeltaPollerTest extends PostgresTestBase {
 
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 2, false));
-        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqCcItem\"").where("\"sourceId\" = '999'"))).isEqualTo(1);
+        assertThat(db().count("\"wqCcItem\" where \"sourceId\" = '999'")).isEqualTo(1);
         assertThat(watermarks.read()).contains(v(11));
     }
 
@@ -298,7 +298,7 @@ class DeltaPollerTest extends PostgresTestBase {
 
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 3, false));
-        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqCcItem\"").where("\"sourceId\" = '999'"))).isEqualTo(1);
+        assertThat(db().count("\"wqCcItem\" where \"sourceId\" = '999'")).isEqualTo(1);
         assertThat(count("wqCcItem")).isEqualTo(PAGE_LIMIT + 3);
         assertThat(watermarks.read()).contains(v(12));
         assertThat(meters.counter(DeltaPollMetrics.VERSION_OVERFLOW).count()).isEqualTo(overflows + 1);
@@ -425,7 +425,7 @@ class DeltaPollerTest extends PostgresTestBase {
         expect(Instant.EPOCH, page(prizeAt("1", v(1))));
         poller.runOnce();
         nextRun();
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
         double failures = meters.counter(DeltaPollMetrics.POLL_FAILURES).count();
         String url = BASE + "/wallet/delta?from=" + v(1).minus(OVERLAP);
         server.expect(requestTo(url)).andRespond(withServerError());
@@ -439,7 +439,7 @@ class DeltaPollerTest extends PostgresTestBase {
 
         server.verify();
         assertThat(watermarks.read()).contains(v(1));
-        assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(before);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(before);
         assertThat(meters.counter(DeltaPollMetrics.POLL_FAILURES).count()).isEqualTo(failures + 4);
     }
 
@@ -460,7 +460,7 @@ class DeltaPollerTest extends PostgresTestBase {
         assertThat(watermarks.read())
                 .as("advances past the poison row's readable version, so it cannot pin the cursor")
                 .contains(v(5));
-        List<Record> letters = dsl().fetch(
+        List<TestSql.Row> letters = db().rows(
                 "select \"stream\", \"source\", \"sourceId\", \"payload\"::text as payload from \"wqDeadLetter\""
                         + " order by \"deadLetterId\"");
         assertThat(letters).hasSize(2);
@@ -487,8 +487,7 @@ class DeltaPollerTest extends PostgresTestBase {
         poller.runOnce();
 
         server.verify();
-        List<String> payloads = dsl().fetch("select \"payload\"::text from \"wqDeadLetter\" order by \"deadLetterId\"")
-                .getValues(0, String.class);
+        List<String> payloads = db().column("select \"payload\"::text from \"wqDeadLetter\" order by \"deadLetterId\"", String.class);
         assertThat(payloads).hasSize(3);
         for (String payload : payloads) {
             assertThat(payload).doesNotContain("ENC:").doesNotContainIgnoringCase("payCardNumber")
@@ -529,7 +528,7 @@ class DeltaPollerTest extends PostgresTestBase {
         server.verify();
         assertThat(count("wqCcItem")).isEqualTo(2);
         assertThat(watermarks.read()).contains(v(4));
-        Record letter = dsl().fetchOne("select \"source\", \"sourceId\" from \"wqDeadLetter\"");
+        TestSql.Row letter = db().row("select \"source\", \"sourceId\" from \"wqDeadLetter\"");
         assertThat(letter.get("source", Short.class)).isEqualTo((short) SourceKind.CLAIMABLE_PRIZE.code());
         assertThat(letter.get("sourceId", String.class)).isEqualTo("2");
     }
@@ -586,8 +585,7 @@ class DeltaPollerTest extends PostgresTestBase {
 
             server.verify();
             assertThat(count("wqCcItem")).as("%s", failure).isEqualTo(1);
-            assertThat(dsl().fetch("select \"sourceId\" from \"wqDeadLetter\" order by \"sourceId\"")
-                    .getValues(0, String.class)).containsExactly("1", "2");
+            assertThat(db().column("select \"sourceId\" from \"wqDeadLetter\" order by \"sourceId\"", String.class)).containsExactly("1", "2");
             assertThat(watermarks.read()).contains(v(4));
         }
     }
@@ -602,6 +600,6 @@ class DeltaPollerTest extends PostgresTestBase {
     }
 
     private static long count(String table) {
-        return dsl().fetchOne("select count(*) from \"" + table + "\"").get(0, Long.class);
+        return db().value("select count(*) from \"" + table + "\"", Long.class);
     }
 }

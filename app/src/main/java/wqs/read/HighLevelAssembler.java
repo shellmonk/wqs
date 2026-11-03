@@ -202,7 +202,7 @@ public class HighLevelAssembler {
         return out;
     }
 
-    // The statements jOOQ rendered, value-free: every value is a named bind.
+    // Value-free statements: every value is a named bind.
     private static final String SESSIONS = """
             select "wqSession"."userId", "wqSession"."batchId", "wqSession"."startedAt", "wqSession"."endedAt",
                    "wqSession"."productId", "wqSession"."currency", "wqSession"."txCount",

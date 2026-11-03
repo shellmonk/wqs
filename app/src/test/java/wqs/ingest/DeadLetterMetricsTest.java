@@ -16,7 +16,7 @@ class DeadLetterMetricsTest extends PostgresTestBase {
 
     @Test
     void depth_counts_dead_letter_rows_and_refreshes_after_the_ttl() {
-        dsl().execute("delete from \"wqDeadLetter\"");
+        db().execute("delete from \"wqDeadLetter\"");
         Instant[] now = {Instant.parse("2030-01-01T00:00:00Z")};
         Clock clock = new Clock() {
             @Override public ZoneId getZone() { return ZoneOffset.UTC; }
@@ -28,11 +28,11 @@ class DeadLetterMetricsTest extends PostgresTestBase {
         var gauge = registry.find("wqs.deadletter.depth").gauge();
         assertThat(gauge.value()).isZero();
 
-        dsl().execute("insert into \"wqDeadLetter\" (\"stream\", \"source\", \"payload\", \"error\", \"attempts\") "
+        db().execute("insert into \"wqDeadLetter\" (\"stream\", \"source\", \"payload\", \"error\", \"attempts\") "
                 + "values ('s', 1, '{}'::jsonb, 'e', 1), ('s', 1, '{}'::jsonb, 'e', 1)");
         assertThat(gauge.value()).isZero(); // cached
         now[0] = now[0].plus(Duration.ofSeconds(61));
         assertThat(gauge.value()).isEqualTo(2.0);
-        dsl().execute("delete from \"wqDeadLetter\"");
+        db().execute("delete from \"wqDeadLetter\"");
     }
 }

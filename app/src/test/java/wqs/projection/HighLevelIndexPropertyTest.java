@@ -32,9 +32,9 @@ class HighLevelIndexPropertyTest extends ProjectionPropertyBase {
         reset();
         applyBatches(items);
 
-        assertThat(new ProjectionInvariants(dsl()).highLevelDrift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).highLevelDrift()).isEmpty();
         // The cancellations that drive visibility are themselves exactly right (spec 6.3).
-        assertThat(new ProjectionInvariants(dsl()).cancellationDrift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).cancellationDrift()).isEmpty();
     }
 
     @Provide

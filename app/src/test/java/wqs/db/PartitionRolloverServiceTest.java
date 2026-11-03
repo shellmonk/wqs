@@ -29,7 +29,7 @@ class PartitionRolloverServiceTest extends PostgresTestBase {
             YearMonth month = start.plusMonths(offset);
             for (PartitionedTable table : PartitionedTable.values()) {
                 String name = table.tableName() + "_" + month.format(MONTH_SUFFIX);
-                dsl().execute("drop table if exists \"" + name + "\"");
+                db().execute("drop table if exists \"" + name + "\"");
             }
         }
     }

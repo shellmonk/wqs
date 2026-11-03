@@ -22,9 +22,9 @@ class ItemInserterTest extends PostgresTestBase {
     void setUp() {
         new PartitionManager(jdbc()).ensurePartitionsAhead(java.time.YearMonth.of(2033, 4), 0);
         inserter = new ItemInserter(jdbc());
-        dsl().execute("delete from \"wqItemLocator\"");
-        dsl().execute("delete from \"wqWebItem\"");
-        dsl().execute("delete from \"wqCcItem\"");
+        db().execute("delete from \"wqItemLocator\"");
+        db().execute("delete from \"wqWebItem\"");
+        db().execute("delete from \"wqCcItem\"");
     }
 
     @Test
@@ -62,7 +62,7 @@ class ItemInserterTest extends PostgresTestBase {
     void the_locator_records_where_the_item_landed() {
         inserter.insertIfAbsent(transaction("tx-1"));
 
-        var row = dsl().fetchOne("""
+        var row = db().row("""
                 select "userId", "occurredAt" from "wqItemLocator"
                 where "source" = ? and "sourceId" = ?
                 """, SourceKind.TRANSACTION.code(), "tx-1");
@@ -80,11 +80,9 @@ class ItemInserterTest extends PostgresTestBase {
 
         inserter.insertIfAbsent(withDetail);
 
-        String gameCode = dsl()
-                .fetchOne("""
+        String gameCode = db().value("""
                           select "detail" ->> 'gameCode' from "wqWebItem" where "sourceId" = ?
-                          """, "tx-detail")
-                .get(0, String.class);
+                          """, String.class, "tx-detail");
         assertThat(gameCode).isEqualTo("CRZ8");
     }
 
@@ -96,12 +94,12 @@ class ItemInserterTest extends PostgresTestBase {
                 "tx-cancelled", "{\"gameCode\":\"CRZ8\"}");
         assertThat(inserter.insertIfAbsent(item)).isTrue();
 
-        long locatorId = dsl().fetchOne(
-                "select \"itemId\" from \"wqItemLocator\" where \"source\" = ? and \"sourceId\" = ?",
-                SourceKind.TRANSACTION.code(), "tx-full").get(0, Long.class);
+        long locatorId = db().value(
+                "select \"itemId\" from \"wqItemLocator\" where \"source\" = ? and \"sourceId\" = ?", Long.class,
+                SourceKind.TRANSACTION.code(), "tx-full");
 
         for (String table : new String[] {"wqWebItem", "wqCcItem"}) {
-            var row = dsl().fetchOne(
+            var row = db().row(
                     "select \"userId\", \"itemId\", \"source\", \"sourceId\", \"occurredAt\", "
                             + "\"productId\", \"productType\", \"batchId\", \"subBatchId\", \"type\", \"amount\", "
                             + "\"currency\", \"balanceAfter\", \"cancels\", \"cancelled\", "
@@ -133,6 +131,6 @@ class ItemInserterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 }

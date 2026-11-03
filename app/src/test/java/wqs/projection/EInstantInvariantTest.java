@@ -74,27 +74,27 @@ class EInstantInvariantTest extends ReadPropertyBase {
     @Test
     void dataset_offers_unsessioned_einstant_items_and_projects_the_rest() {
         assertThat(eInstant.productTypes()).contains("instants");
-        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqCcItem\"").where("\"sourceId\" like '%-loose%'"))).isZero();
-        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqCcItem\"")
-                .where("\"productType\" = 'instants' and \"batchId\" is not null"))).isEqualTo(11);
-        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqCcItem\"").where("\"sourceId\" = 'e0-a-x'"))).isOne();
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(db().count("\"wqCcItem\" where \"sourceId\" like '%-loose%'")).isZero();
+        assertThat(db().count("\"wqCcItem\" where \"productType\" = 'instants' and \"batchId\" is not null"))
+                .isEqualTo(11);
+        assertThat(db().count("\"wqCcItem\" where \"sourceId\" = 'e0-a-x'")).isOne();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     @Test
     void every_einstant_item_has_a_batch() {
-        assertThat(new ProjectionInvariants(dsl()).eInstantDrift(eInstant.productTypes())).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).eInstantDrift(eInstant.productTypes())).isEmpty();
     }
 
     /** The oracle above can fail: a stored unsessioned eInstant item and page row are drift. */
     @Test
     void einstant_drift_reports_an_unsessioned_item() {
-        dsl().execute("""
+        db().execute("""
                 update "wqCcItem" set "batchId" = null, "subBatchId" = null where "sourceId" = 'e1-a'""");
-        dsl().execute("""
+        db().execute("""
                 insert into "wqWebHighLevel" ("userId", "occurredAt", "kind", "refId", "productType", "currency")
                 values (1, '2034-02-11T10:00:00Z', 1, 'planted', 'instants', 'EUR')""");
-        assertThat(new ProjectionInvariants(dsl()).eInstantDrift(eInstant.productTypes()))
+        assertThat(new ProjectionInvariants(jdbc()).eInstantDrift(eInstant.productTypes()))
                 .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant item").contains("e1-a"))
                 .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant page row").contains("planted"))
                 .hasSize(2);

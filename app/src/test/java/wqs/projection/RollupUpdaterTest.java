@@ -1,9 +1,6 @@
 package wqs.projection;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static wqs.db.generated.Tables.WQ_GROUP_LOCATOR;
-import static wqs.db.generated.Tables.WQ_PLAY;
-import static wqs.db.generated.Tables.WQ_SESSION;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -12,15 +9,13 @@ import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.db.generated.tables.records.WqPlayRecord;
-import wqs.db.generated.tables.records.WqSessionRecord;
+import wqs.db.TestSql;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.gen.Products;
@@ -41,12 +36,12 @@ class RollupUpdaterTest extends PostgresTestBase {
     void a_first_transaction_creates_the_session_and_the_play() {
         apply(wager("t1", "b1", "p1", "5.0000", T0));
 
-        WqSessionRecord session = session("b1");
-        assertThat(session.getTxCount()).isEqualTo(1);
-        assertThat(session.getPlayCount()).isEqualTo(1);
-        assertThat(session.getTotalPlays()).isEqualByComparingTo("5.0000");
-        assertThat(session.getTotalWins()).isEqualByComparingTo("0.0000");
-        assertThat(session.getNet()).isEqualByComparingTo("-5.0000");
+        Rollup session = session("b1");
+        assertThat(session.txCount()).isEqualTo(1);
+        assertThat(session.playCount()).isEqualTo(1);
+        assertThat(session.totalPlays()).isEqualByComparingTo("5.0000");
+        assertThat(session.totalWins()).isEqualByComparingTo("0.0000");
+        assertThat(session.net()).isEqualByComparingTo("-5.0000");
     }
 
     @Test
@@ -54,12 +49,12 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0));
         apply(win("t2", "b1", "p1", "12.0000", T0.plusSeconds(30)));
 
-        WqSessionRecord session = session("b1");
-        assertThat(session.getTxCount()).isEqualTo(2);
-        assertThat(session.getPlayCount()).isEqualTo(1);
-        assertThat(session.getTotalPlays()).isEqualByComparingTo("5.0000");
-        assertThat(session.getTotalWins()).isEqualByComparingTo("12.0000");
-        assertThat(session.getNet()).isEqualByComparingTo("7.0000");
+        Rollup session = session("b1");
+        assertThat(session.txCount()).isEqualTo(2);
+        assertThat(session.playCount()).isEqualTo(1);
+        assertThat(session.totalPlays()).isEqualByComparingTo("5.0000");
+        assertThat(session.totalWins()).isEqualByComparingTo("12.0000");
+        assertThat(session.net()).isEqualByComparingTo("7.0000");
     }
 
     @Test
@@ -68,8 +63,8 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t2", "b1", "p2", "5.0000", T0.plusSeconds(60)));
         apply(win("t3", "b1", "p2", "1.0000", T0.plusSeconds(70)));
 
-        assertThat(session("b1").getPlayCount()).isEqualTo(2);
-        assertThat(session("b1").getTxCount()).isEqualTo(3);
+        assertThat(session("b1").playCount()).isEqualTo(2);
+        assertThat(session("b1").txCount()).isEqualTo(3);
     }
 
     @Test
@@ -77,11 +72,11 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", T0));
         apply(win("t2", "b1", "p1", "2.0000", T0.plusSeconds(10)));
 
-        WqPlayRecord play = play("b1", "p1");
-        assertThat(play.getTxCount()).isEqualTo(2);
-        assertThat(play.getTotalPlays()).isEqualByComparingTo("5.0000");
-        assertThat(play.getTotalWins()).isEqualByComparingTo("2.0000");
-        assertThat(play.getNet()).isEqualByComparingTo("-3.0000");
+        Rollup play = play("b1", "p1");
+        assertThat(play.txCount()).isEqualTo(2);
+        assertThat(play.totalPlays()).isEqualByComparingTo("5.0000");
+        assertThat(play.totalWins()).isEqualByComparingTo("2.0000");
+        assertThat(play.net()).isEqualByComparingTo("-3.0000");
     }
 
     @Test
@@ -93,25 +88,63 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(earlier);
         Map<String, List<Map<String, Object>>> outOfOrder = snapshot();
 
-        assertThat(dsl().fetchCount(WQ_SESSION)).isEqualTo(1);
-        assertThat(dsl().fetchCount(WQ_PLAY)).isEqualTo(1);
-        WqSessionRecord session = session("b1");
-        assertThat(session.getStartedAt()).isEqualTo(utc(T0));
-        assertThat(session.getEndedAt()).isEqualTo(utc(T0.plusSeconds(100)));
-        assertThat(session.getTxCount()).isEqualTo(2);
-        assertThat(session.getPlayCount()).isEqualTo(1);
-        assertThat(session.getNet()).isEqualByComparingTo("-2.0000");
-        WqPlayRecord play = play("b1", "p1");
-        assertThat(play.getStartedAt()).isEqualTo(utc(T0));
-        assertThat(play.getEndedAt()).isEqualTo(utc(T0.plusSeconds(100)));
-        assertThat(dsl().selectFrom(WQ_GROUP_LOCATOR).fetch(WQ_GROUP_LOCATOR.startedAt))
-                .extracting(OffsetDateTime::toInstant)
+        assertThat(db().count("\"wqSession\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPlay\"")).isEqualTo(1);
+        Rollup session = session("b1");
+        assertThat(session.startedAt()).isEqualTo(utc(T0));
+        assertThat(session.endedAt()).isEqualTo(utc(T0.plusSeconds(100)));
+        assertThat(session.txCount()).isEqualTo(2);
+        assertThat(session.playCount()).isEqualTo(1);
+        assertThat(session.net()).isEqualByComparingTo("-2.0000");
+        Rollup play = play("b1", "p1");
+        assertThat(play.startedAt()).isEqualTo(utc(T0));
+        assertThat(play.endedAt()).isEqualTo(utc(T0.plusSeconds(100)));
+        assertThat(db().column("select \"startedAt\" from \"wqGroupLocator\"", Instant.class))
                 .containsExactly(T0, T0);
 
         clean();
         apply(earlier);
         apply(later);
         assertThat(outOfOrder).isEqualTo(snapshot());
+    }
+
+    /**
+     * The re-key path (delete returning the whole row, re-insert at the new start) keeps every
+     * column: numeric values at full scale, and null productId / productType / firstSource* bound
+     * as typed nulls. The rows are first nulled the way a pre-V11 row would be, so the re-insert
+     * must carry nulls through; the re-keyed rows then equal the rows of the in-order run.
+     */
+    @Test
+    void the_re_key_reinsert_keeps_numeric_scale_and_nullable_columns() {
+        ProjectionItem later = item("t2", "b1", "p1", "1.2345", T0.plusSeconds(100), TxTypes.PLAY, null);
+        ProjectionItem earlier = item("t1", "b1", "p1", "0.0001", T0, TxTypes.WIN, null);
+
+        apply(earlier);
+        apply(later);
+        Map<String, List<Map<String, Object>>> inOrder = snapshot();
+
+        clean();
+        apply(later);
+        for (String table : List.of("wqSession", "wqPlay")) {
+            assertThat(db().execute("update \"" + table + "\" set \"firstSourceId\" = null, \"firstSource\" = null"))
+                    .isEqualTo(1);
+        }
+        RollupResult rekey = apply(earlier);
+
+        assertThat(rekey.sessionKeyChanged()).isTrue();
+        assertThat(snapshot()).isEqualTo(inOrder);
+        for (String table : List.of("wqSession", "wqPlay")) {
+            TestSql.Row row = db().row("select * from \"" + table + "\"");
+            assertThat(row.get("startedAt", Instant.class)).as(table).isEqualTo(T0);
+            assertThat(row.get("productId")).as(table).isNull();
+            assertThat(row.get("productType")).as(table).isNull();
+            assertThat(row.get("firstSourceId", String.class)).as(table).isEqualTo("t1");
+            assertThat(row.get("firstSource", Integer.class)).as(table).isEqualTo(SourceKind.TRANSACTION.code());
+            assertThat(row.get("totalPlays", BigDecimal.class).toPlainString()).as(table).isEqualTo("1.2345");
+            assertThat(row.get("totalWins", BigDecimal.class).toPlainString()).as(table).isEqualTo("0.0001");
+            assertThat(row.get("net", BigDecimal.class).toPlainString()).as(table).isEqualTo("-1.2344");
+            assertThat(row.get("netExclCancelled", BigDecimal.class).toPlainString()).as(table).isEqualTo("-1.2344");
+        }
     }
 
     @Test
@@ -122,16 +155,16 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", mayFirst));
         apply(wager("t2", "b1", "p1", "4.0000", aprilLast));
 
-        assertThat(dsl().fetchCount(DSL.table(DSL.name("wqSession_2034_04")))).isEqualTo(1);
-        assertThat(dsl().fetchCount(DSL.table(DSL.name("wqSession_2034_05")))).isZero();
-        assertThat(dsl().fetchCount(DSL.table(DSL.name("wqPlay_2034_04")))).isEqualTo(1);
-        assertThat(dsl().fetchCount(DSL.table(DSL.name("wqPlay_2034_05")))).isZero();
-        WqSessionRecord session = session("b1");
-        assertThat(session.getStartedAt()).isEqualTo(utc(aprilLast));
-        assertThat(session.getEndedAt()).isEqualTo(utc(mayFirst));
-        assertThat(session.getTotalPlays()).isEqualByComparingTo("9.0000");
-        assertThat(session.getTxCount()).isEqualTo(2);
-        assertThat(play("b1", "p1").getStartedAt()).isEqualTo(utc(aprilLast));
+        assertThat(db().count("\"wqSession_2034_04\"")).isEqualTo(1);
+        assertThat(db().count("\"wqSession_2034_05\"")).isZero();
+        assertThat(db().count("\"wqPlay_2034_04\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPlay_2034_05\"")).isZero();
+        Rollup session = session("b1");
+        assertThat(session.startedAt()).isEqualTo(utc(aprilLast));
+        assertThat(session.endedAt()).isEqualTo(utc(mayFirst));
+        assertThat(session.totalPlays()).isEqualByComparingTo("9.0000");
+        assertThat(session.txCount()).isEqualTo(2);
+        assertThat(play("b1", "p1").startedAt()).isEqualTo(utc(aprilLast));
     }
 
     @Test
@@ -142,11 +175,11 @@ class RollupUpdaterTest extends PostgresTestBase {
         RollupResult result = apply(win("t3", "b1", "p2", "1.0000", T0.plusSeconds(30)));
 
         assertThat(result).isEqualTo(rr(false, false, T0, 11, null, null, false));
-        assertThat(play("b1", "p2").getStartedAt()).isEqualTo(utc(T0.plusSeconds(30)));
-        assertThat(play("b1", "p2").getEndedAt()).isEqualTo(utc(T0.plusSeconds(50)));
-        assertThat(session("b1").getStartedAt()).isEqualTo(utc(T0));
-        assertThat(session("b1").getPlayCount()).isEqualTo(2);
-        assertThat(dsl().fetchCount(WQ_PLAY)).isEqualTo(2);
+        assertThat(play("b1", "p2").startedAt()).isEqualTo(utc(T0.plusSeconds(30)));
+        assertThat(play("b1", "p2").endedAt()).isEqualTo(utc(T0.plusSeconds(50)));
+        assertThat(session("b1").startedAt()).isEqualTo(utc(T0));
+        assertThat(session("b1").playCount()).isEqualTo(2);
+        assertThat(db().count("\"wqPlay\"")).isEqualTo(2);
     }
 
     @Test
@@ -169,17 +202,17 @@ class RollupUpdaterTest extends PostgresTestBase {
         Map<String, List<Map<String, Object>>> outOfOrder = snapshot();
 
         assertThat(outOfOrder).isEqualTo(inOrder);
-        WqSessionRecord session = session("b1");
-        assertThat(session.getStartedAt()).isEqualTo(utc(T0));
-        assertThat(session.getEndedAt()).isEqualTo(utc(T0.plusSeconds(80)));
-        assertThat(session.getTxCount()).isEqualTo(5);
-        assertThat(session.getPlayCount()).isEqualTo(2);
+        Rollup session = session("b1");
+        assertThat(session.startedAt()).isEqualTo(utc(T0));
+        assertThat(session.endedAt()).isEqualTo(utc(T0.plusSeconds(80)));
+        assertThat(session.txCount()).isEqualTo(5);
+        assertThat(session.playCount()).isEqualTo(2);
         // t1, the first item, carries product 12 -- not the LEAST of the session's products.
-        assertThat(session.getProductId()).isEqualTo(Products.id(12));
-        assertThat(session.getProductType()).isEqualTo(Products.type(12));
-        assertThat(session.getTotalPlays()).isEqualByComparingTo("7.0000");
-        assertThat(session.getTotalWins()).isEqualByComparingTo("8.7500");
-        assertThat(session.getNet()).isEqualByComparingTo("1.7500");
+        assertThat(session.productId()).isEqualTo(Products.id(12));
+        assertThat(session.productType()).isEqualTo(Products.type(12));
+        assertThat(session.totalPlays()).isEqualByComparingTo("7.0000");
+        assertThat(session.totalWins()).isEqualByComparingTo("8.7500");
+        assertThat(session.net()).isEqualByComparingTo("1.7500");
     }
 
     @Test
@@ -256,8 +289,8 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(first);
         apply(later);
         Map<String, List<Map<String, Object>>> inOrder = snapshot();
-        assertThat(pair(session("b1").getProductId(), session("b1").getProductType())).isEqualTo("P13/arcade");
-        assertThat(pair(play("b1", "p1").getProductId(), play("b1", "p1").getProductType())).isEqualTo("P13/arcade");
+        assertThat(pair(session("b1").productId(), session("b1").productType())).isEqualTo("P13/arcade");
+        assertThat(pair(play("b1", "p1").productId(), play("b1", "p1").productType())).isEqualTo("P13/arcade");
 
         clean();
         apply(later);
@@ -277,7 +310,7 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(b);
         RollupResult tie = apply(a);
         Map<String, List<Map<String, Object>>> aWins = snapshot();
-        assertThat(pair(session("b1").getProductId(), session("b1").getProductType())).isEqualTo("P13/lottery");
+        assertThat(pair(session("b1").productId(), session("b1").productType())).isEqualTo("P13/lottery");
         assertThat(tie.sessionKeyChanged()).isTrue();
         assertThat(tie.previousSessionStart()).isEqualTo(T0);
 
@@ -304,9 +337,9 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         assertThat(apply(cancel)).isEqualTo(RollupResult.NONE);
 
-        assertThat(dsl().fetchCount(WQ_SESSION)).isZero();
-        assertThat(dsl().fetchCount(WQ_PLAY)).isZero();
-        assertThat(dsl().fetchCount(WQ_GROUP_LOCATOR)).isZero();
+        assertThat(db().count("\"wqSession\"")).isZero();
+        assertThat(db().count("\"wqPlay\"")).isZero();
+        assertThat(db().count("\"wqGroupLocator\"")).isZero();
     }
 
     @ParameterizedTest
@@ -319,17 +352,17 @@ class RollupUpdaterTest extends PostgresTestBase {
                 rr(true, false, T0.plusSeconds(100), 11, null, null, false));
         assertThat(earlier).isEqualTo(
                 rr(false, false, T0, 11, T0.plusSeconds(100), 11, true));
-        assertThat(dsl().fetchCount(WQ_SESSION)).isEqualTo(1);
-        assertThat(dsl().fetchCount(WQ_PLAY)).isZero();
-        WqSessionRecord session = session("b1");
-        assertThat(session.getStartedAt()).isEqualTo(utc(T0));
-        assertThat(session.getTxCount()).isEqualTo(2);
-        assertThat(session.getPlayCount()).isZero();
-        assertThat(dsl().selectFrom(WQ_GROUP_LOCATOR).fetch())
+        assertThat(db().count("\"wqSession\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPlay\"")).isZero();
+        Rollup session = session("b1");
+        assertThat(session.startedAt()).isEqualTo(utc(T0));
+        assertThat(session.txCount()).isEqualTo(2);
+        assertThat(session.playCount()).isZero();
+        assertThat(db().rows("select * from \"wqGroupLocator\""))
                 .singleElement()
                 .satisfies(locator -> {
-                    assertThat(locator.getSubBatchId()).isEmpty();
-                    assertThat(locator.getStartedAt().toInstant()).isEqualTo(T0);
+                    assertThat(locator.get("subBatchId", String.class)).isEmpty();
+                    assertThat(locator.get("startedAt", Instant.class)).isEqualTo(T0);
                 });
     }
 
@@ -337,30 +370,26 @@ class RollupUpdaterTest extends PostgresTestBase {
     void an_unsessioned_item_creates_no_rollup() {
         apply(payment());
 
-        assertThat(dsl().fetchCount(WQ_SESSION)).isZero();
-        assertThat(dsl().fetchCount(WQ_GROUP_LOCATOR)).isZero();
+        assertThat(db().count("\"wqSession\"")).isZero();
+        assertThat(db().count("\"wqGroupLocator\"")).isZero();
     }
 
     private RollupResult apply(ProjectionItem item) {
-        return tx().execute(status -> new RollupUpdater(jdbc(), txTypes()).applyItem(item));
+        return inTx().execute(status -> new RollupUpdater(jdbc(), txTypes()).applyItem(item));
     }
 
     private void clean() {
-        dsl().deleteFrom(WQ_GROUP_LOCATOR).execute();
-        dsl().deleteFrom(WQ_PLAY).execute();
-        dsl().deleteFrom(WQ_SESSION).execute();
+        db().execute("delete from \"wqGroupLocator\"");
+        db().execute("delete from \"wqPlay\"");
+        db().execute("delete from \"wqSession\"");
     }
 
     private Map<String, List<Map<String, Object>>> snapshot() {
         return Map.of(
-                "session", dsl().selectFrom(WQ_SESSION)
-                        .orderBy(WQ_SESSION.userId, WQ_SESSION.batchId).fetchMaps(),
-                "play", dsl().selectFrom(WQ_PLAY)
-                        .orderBy(WQ_PLAY.userId, WQ_PLAY.batchId, WQ_PLAY.subBatchId).fetchMaps(),
-                "locator", dsl().selectFrom(WQ_GROUP_LOCATOR)
-                        .orderBy(WQ_GROUP_LOCATOR.userId, WQ_GROUP_LOCATOR.batchId,
-                                 WQ_GROUP_LOCATOR.subBatchId)
-                        .fetchMaps());
+                "session", db().maps("select * from \"wqSession\" order by \"userId\", \"batchId\""),
+                "play", db().maps("select * from \"wqPlay\" order by \"userId\", \"batchId\", \"subBatchId\""),
+                "locator", db().maps(
+                        "select * from \"wqGroupLocator\" order by \"userId\", \"batchId\", \"subBatchId\""));
     }
 
     private static ProjectionItem payment() {
@@ -406,13 +435,26 @@ class RollupUpdaterTest extends PostgresTestBase {
         return instant.atOffset(ZoneOffset.UTC);
     }
 
-    private WqSessionRecord session(String batchId) {
-        return dsl().selectFrom(WQ_SESSION).where(WQ_SESSION.batchId.eq(batchId)).fetchSingle();
+    /** The rollup columns these tests read, from one "wqSession" or "wqPlay" row. */
+    private record Rollup(OffsetDateTime startedAt, OffsetDateTime endedAt, Integer txCount, Integer playCount,
+                          BigDecimal totalPlays, BigDecimal totalWins, BigDecimal net,
+                          String productId, String productType) {
+
+        static Rollup of(TestSql.Row r, boolean session) {
+            return new Rollup(r.get("startedAt", OffsetDateTime.class), r.get("endedAt", OffsetDateTime.class),
+                    r.get("txCount", Integer.class), session ? r.get("playCount", Integer.class) : null,
+                    r.get("totalPlays", BigDecimal.class), r.get("totalWins", BigDecimal.class),
+                    r.get("net", BigDecimal.class), r.get("productId", String.class),
+                    r.get("productType", String.class));
+        }
     }
 
-    private WqPlayRecord play(String batchId, String subBatchId) {
-        return dsl().selectFrom(WQ_PLAY)
-                .where(WQ_PLAY.batchId.eq(batchId), WQ_PLAY.subBatchId.eq(subBatchId))
-                .fetchSingle();
+    private Rollup session(String batchId) {
+        return Rollup.of(db().row("select * from \"wqSession\" where \"batchId\" = ?", batchId), true);
+    }
+
+    private Rollup play(String batchId, String subBatchId) {
+        return Rollup.of(db().row("select * from \"wqPlay\" where \"batchId\" = ? and \"subBatchId\" = ?",
+                batchId, subBatchId), false);
     }
 }

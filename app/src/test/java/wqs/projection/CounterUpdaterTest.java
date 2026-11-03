@@ -25,12 +25,12 @@ class CounterUpdaterTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         new PartitionManager(jdbc()).ensurePartitionsAhead(YearMonth.of(2034, 10), 1);
-        dsl().execute("delete from \"wqCountDay\"");
-        dsl().execute("delete from \"wqCountMonth\"");
+        db().execute("delete from \"wqCountDay\"");
+        db().execute("delete from \"wqCountMonth\"");
     }
 
     private void run(java.util.function.Consumer<CounterUpdater> action) {
-        tx().executeWithoutResult(status -> action.accept(new CounterUpdater(jdbc())));
+        inTx().executeWithoutResult(status -> action.accept(new CounterUpdater(jdbc())));
     }
 
     @Test
@@ -110,16 +110,15 @@ class CounterUpdaterTest extends PostgresTestBase {
         // Counted directly at its final key...
         run(u -> u.countHighLevel(1L, ViewKind.WEB, "t7", NEXT_DAY));
         List<String> direct = allCounterRows();
-        dsl().execute("delete from \"wqCountDay\"");
-        dsl().execute("delete from \"wqCountMonth\"");
+        db().execute("delete from \"wqCountDay\"");
+        db().execute("delete from \"wqCountMonth\"");
 
         // ...or counted elsewhere first and moved there (spec P-1: identical state either way).
         run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
         run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t7", NEXT_DAY, true));
 
         assertThat(allCounterRows()).isEqualTo(direct);
-        assertThat(dsl().fetchOne("select count(*)::int from \"wqCountDay\" where \"cntAll\" = 0")
-                .get(0, Integer.class)).isZero();
+        assertThat(db().value("select count(*)::int from \"wqCountDay\" where \"cntAll\" = 0", Integer.class)).isZero();
     }
 
     @Test
@@ -277,10 +276,10 @@ class CounterUpdaterTest extends PostgresTestBase {
         run(u -> u.countItem(tx("t1", "t11")));
 
         for (String table : new String[] {"wqCountDay", "wqCountMonth"}) {
-            org.assertj.core.api.Assertions.assertThatThrownBy(() -> dsl().execute(
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> db().execute(
                     "update \"" + table + "\" set \"cntAll\" = -1, \"cntExclCancelled\" = -1"))
                     .hasMessageContaining("check");
-            org.assertj.core.api.Assertions.assertThatThrownBy(() -> dsl().execute(
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> db().execute(
                     "update \"" + table + "\" set \"cntExclCancelled\" = \"cntAll\" + 1"))
                     .hasMessageContaining("check");
         }
@@ -327,16 +326,16 @@ class CounterUpdaterTest extends PostgresTestBase {
                 1L, ViewKind.WEB, PageUnit.ITEM, "instants", TxTypes.PLAY, T0));
 
         for (String table : new String[] {"wqCountDay", "wqCountMonth"}) {
-            var rows = dsl().fetch("select \"cntAll\", \"cntExclCancelled\" from \"" + table
+            var rows = db().rows("select \"cntAll\", \"cntExclCancelled\" from \"" + table
                     + "\" where \"viewKind\" = 1 and \"pageUnit\" = 0");
             assertThat(rows).hasSize(4);
-            assertThat(rows.getValues(0, Long.class)).containsOnly(1L);
-            assertThat(rows.getValues(1, Long.class)).containsOnly(0L);
+            assertThat(rows).extracting(r -> r.get("cntAll", Long.class)).containsOnly(1L);
+            assertThat(rows).extracting(r -> r.get("cntExclCancelled", Long.class)).containsOnly(0L);
         }
 
         run(u -> u.recountExclCancelled(
                 1L, ViewKind.WEB, PageUnit.ITEM, "instants", TxTypes.PLAY, T0));
-        assertThat(dsl().fetch("select 1 from \"wqCountDay\" where \"cntExclCancelled\" = 0"))
+        assertThat(db().maps("select 1 from \"wqCountDay\" where \"cntExclCancelled\" = 0"))
                 .isEmpty();
     }
 
@@ -347,7 +346,7 @@ class CounterUpdaterTest extends PostgresTestBase {
         run(u -> u.uncountExclCancelled(
                 1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "instants", (short) 0, T0));
 
-        assertThat(dsl().fetch("select 1 from \"wqCountDay\" where \"cntExclCancelled\" = 0"))
+        assertThat(db().maps("select 1 from \"wqCountDay\" where \"cntExclCancelled\" = 0"))
                 .hasSize(2);
     }
 
@@ -360,9 +359,8 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     private List<String> keys(String table, ViewKind v, PageUnit u) {
-        return dsl().fetch("select \"productType\" || '/' || \"typeId\" from \"" + table
-                + "\" where \"viewKind\" = ? and \"pageUnit\" = ?", (short) v.code(), u.code())
-                .getValues(0, String.class);
+        return db().column("select \"productType\" || '/' || \"typeId\" from \"" + table
+                + "\" where \"viewKind\" = ? and \"pageUnit\" = ?", String.class, (short) v.code(), u.code());
     }
 
     private ProjectionItem txOfType(String id, String productType, short type) {
@@ -395,13 +393,13 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     private List<String> allCounterRows() {
         return java.util.stream.Stream.of("wqCountDay", "wqCountMonth")
-                .flatMap(t -> dsl().fetch("select * from \"" + t + "\" order by 1, 2, 3, 4, 5, 6")
-                        .stream().map(r -> t + r.intoList()))
+                .flatMap(t -> db().maps("select * from \"" + t + "\" order by 1, 2, 3, 4, 5, 6")
+                        .stream().map(r -> t + r.values()))
                 .toList();
     }
 
     private int rows(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 
     /**
@@ -412,11 +410,10 @@ class CounterUpdaterTest extends PostgresTestBase {
                         Instant at, boolean month) {
         java.time.LocalDate day = java.time.LocalDate.ofInstant(at, java.time.ZoneOffset.UTC);
         java.time.LocalDate period = month ? day.withDayOfMonth(1) : day;
-        var record = dsl().fetchOne("""
+        return db().value("""
                 select coalesce(sum("%s"), 0)::int from "%s"
                 where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "productType" = ?
                   and "typeId" = 0 and "period" = ?
-                """.formatted(column, table), (short) view.code(), unit.code(), product, period);
-        return record.get(0, Integer.class);
+                """.formatted(column, table), Integer.class, (short) view.code(), unit.code(), product, period);
     }
 }

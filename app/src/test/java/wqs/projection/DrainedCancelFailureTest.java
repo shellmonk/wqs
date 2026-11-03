@@ -78,7 +78,7 @@ class DrainedCancelFailureTest extends PostgresTestBase {
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2035, 2), 0);
         clearProjection();
-        dsl().execute("delete from \"wqDeadLetter\"");
+        db().execute("delete from \"wqDeadLetter\"");
         Trap.boomCalls.set(0);
     }
 
@@ -96,12 +96,12 @@ class DrainedCancelFailureTest extends PostgresTestBase {
         // The other drained cancel in the same batch still applied.
         assertThat(cancelled("t2")).isTrue();
         assertThat(count("\"wqPendingCancel\"")).isZero();
-        assertThat(dsl().fetchOne("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").intoMap())
+        assertThat(db().row("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").asMap())
                 .containsEntry("sourceId", "c-boom")
                 .containsEntry("streamOffset", null);
         assertThat(count("\"wqDeadLetter\"")).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(2L);
-        ProjectionInvariants invariants = new ProjectionInvariants(dsl());
+        ProjectionInvariants invariants = new ProjectionInvariants(jdbc());
         assertThat(invariants.counterDrift()).isEmpty();
         assertThat(invariants.aggregationDrift()).isEmpty();
         assertThat(invariants.highLevelDrift()).isEmpty();
@@ -121,11 +121,10 @@ class DrainedCancelFailureTest extends PostgresTestBase {
     }
 
     private static boolean cancelled(String sourceId) {
-        return dsl().fetchOne("select \"cancelled\" from \"wqCcItem\" where \"sourceId\" = ?", sourceId)
-                .get(0, Boolean.class);
+        return db().value("select \"cancelled\" from \"wqCcItem\" where \"sourceId\" = ?", Boolean.class, sourceId);
     }
 
     private static int count(String table) {
-        return dsl().fetchOne("select count(*)::int from " + table).get(0, Integer.class);
+        return db().value("select count(*)::int from " + table, Integer.class);
     }
 }

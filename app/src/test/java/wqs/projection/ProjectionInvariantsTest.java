@@ -27,7 +27,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @BeforeEach
     void buildACleanProjection() {
         reset();
-        invariants = new ProjectionInvariants(dsl());
+        invariants = new ProjectionInvariants(jdbc());
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "p1", T0, TxTypes.PLAY, "5.0000"),
                 tx("t2", "p2", T0.plusSeconds(30), TxTypes.WIN, "-7.0000"),
@@ -354,7 +354,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     }
 
     private void execute(String sql) {
-        assertThat(dsl().execute(sql)).as(sql).isEqualTo(1);
+        assertThat(db().execute(sql)).as(sql).isEqualTo(1);
     }
 
     private static ProjectionItem tx(

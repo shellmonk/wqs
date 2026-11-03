@@ -76,7 +76,7 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
         applyBatches(items);
 
         assertRoutedExactly(items);
-        assertThat(ProjectionSnapshot.of(dsl())).isEqualTo(once);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(once);
     }
 
     @net.jqwik.api.Provide
@@ -92,7 +92,7 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
     private ProjectionSnapshot applyAndSnapshot(List<ProjectionItem> items) {
         applyBatches(items);
         assertRoutedExactly(items);
-        return ProjectionSnapshot.of(dsl());
+        return ProjectionSnapshot.of(jdbc());
     }
 
     /**
@@ -118,8 +118,7 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
     }
 
     private List<String> keys(String table) {
-        return dsl().fetch("select \"source\", \"sourceId\" from \"" + table + "\"")
-                .map(r -> r.get(0) + "/" + r.get(1));
+        return db().column("select \"source\" || '/' || \"sourceId\" from \"" + table + "\"", String.class);
     }
 
     /** Shuffles and duplicates roughly a third of the events. */

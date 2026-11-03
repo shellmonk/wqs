@@ -47,15 +47,13 @@ class PartitionManagerTest extends PostgresTestBase {
     void accepted_rows_land_in_the_right_partition() {
         manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 0);
 
-        dsl().execute("""
+        db().execute("""
                       insert into "wqWebItem"
                         ("userId","itemId","source","sourceId","occurredAt","type","amount","currency")
                       values (1, 1, 1, 'tx-1', timestamptz '2031-01-15T10:00:00Z', 1, 10.0000, 'EUR')
                       """);
 
-        Integer count = dsl()
-                .fetchOne("select count(*)::int from \"wqWebItem_2031_01\"")
-                .get(0, Integer.class);
+        Integer count = db().value("select count(*)::int from \"wqWebItem_2031_01\"", Integer.class);
         assertThat(count).isEqualTo(1);
     }
 
@@ -71,18 +69,14 @@ class PartitionManagerTest extends PostgresTestBase {
     void a_row_at_the_exact_month_boundary_lands_in_the_new_month_not_the_old_one() {
         manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 1);
 
-        dsl().execute("""
+        db().execute("""
                       insert into "wqWebItem"
                         ("userId","itemId","source","sourceId","occurredAt","type","amount","currency")
                       values (1, 2, 1, 'tx-boundary', timestamptz '2031-02-01T00:00:00Z', 1, 10.0000, 'EUR')
                       """);
 
-        Integer februaryCount = dsl()
-                .fetchOne("select count(*)::int from \"wqWebItem_2031_02\"")
-                .get(0, Integer.class);
-        Integer januaryCount = dsl()
-                .fetchOne("select count(*)::int from \"wqWebItem_2031_01\"")
-                .get(0, Integer.class);
+        Integer februaryCount = db().value("select count(*)::int from \"wqWebItem_2031_02\"", Integer.class);
+        Integer januaryCount = db().value("select count(*)::int from \"wqWebItem_2031_01\"", Integer.class);
         assertThat(februaryCount).isEqualTo(1);
         assertThat(januaryCount).isZero();
     }
@@ -92,7 +86,7 @@ class PartitionManagerTest extends PostgresTestBase {
         manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 1);
 
         for (String day : List.of("2031-01-01", "2031-01-31", "2031-02-01", "2031-02-28")) {
-            dsl().execute("""
+            db().execute("""
                           insert into "wqCountDay"
                             ("userId","viewKind","pageUnit","productType","typeId","period","cntAll","cntExclCancelled")
                           values (1, 1, 0, '', 0, date '%s', 1, 1)
@@ -104,11 +98,11 @@ class PartitionManagerTest extends PostgresTestBase {
     }
 
     private List<String> rowsIn(String partition) {
-        return dsl().fetch("select \"period\"::text from \"" + partition + "\"").getValues(0, String.class);
+        return db().column("select \"period\"::text from \"" + partition + "\"", String.class);
     }
 
     private void dropTestPartitions() {
-        testPartitionNames().forEach(name -> dsl().execute("drop table if exists \"" + name + "\""));
+        testPartitionNames().forEach(name -> db().execute("drop table if exists \"" + name + "\""));
     }
 
     /**
@@ -124,15 +118,13 @@ class PartitionManagerTest extends PostgresTestBase {
      */
     private List<String> testPartitionNames() {
         return Arrays.stream(PartitionedTable.values())
-                .flatMap(table -> dsl()
-                        .fetch("""
+                .flatMap(table -> db().column("""
                                select c.relname
                                from pg_inherits i
                                join pg_class c on c.oid = i.inhrelid
                                where i.inhparent = to_regclass(?)::oid
                                  and c.relname like '%_2031_%'
-                               """, "\"" + table.tableName() + "\"")
-                        .getValues(0, String.class)
+                               """, String.class, "\"" + table.tableName() + "\"")
                         .stream())
                 .toList();
     }

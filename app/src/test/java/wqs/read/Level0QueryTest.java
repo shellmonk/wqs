@@ -86,7 +86,7 @@ class Level0QueryTest extends Level0TestSupport {
         Instant base = t("2034-05-01T00:00:00Z");
         try {
             // One set-based statement instead of a 40k-row batchInsert.
-            dsl().execute("""
+            db().execute("""
                     insert into "wqWebItem" ("userId", "itemId", "source", "sourceId", "occurredAt",
                                              "type", "amount", "currency")
                     select ?, 9000000000 + i, 1, 'bulk' || i,
@@ -213,7 +213,7 @@ class Level0QueryTest extends Level0TestSupport {
         partitionManager.ensurePartitionsAhead(java.time.YearMonth.of(2034, 5), 0);
         try {
             // 60 users x 2000 rows over May 2034; USER is one of them. Set-based, like the bulk test.
-            dsl().execute("""
+            db().execute("""
                     insert into "wqWebItem" ("userId", "itemId", "source", "sourceId", "occurredAt",
                                              "type", "amount", "currency", "productType")
                     select ?::bigint + (i % 60), 9100000000 + i, 1, 'cov' || i,
@@ -222,7 +222,7 @@ class Level0QueryTest extends Level0TestSupport {
                     from generate_series(0, 119999) as i
                     """, USER);
             // vacuum sets the visibility map, which an index-only scan needs; no planner setting is touched.
-            dsl().execute("vacuum (analyze) \"wqWebItem\"");
+            db().execute("vacuum (analyze) \"wqWebItem\"");
             Level0Filter f = new Level0Filter(USER, java.util.Set.of("keno", "bingo"),
                     java.util.Set.of(TxTypes.PLAY), false);
             StatementRecorder recording = new StatementRecorder(readerDataSource);

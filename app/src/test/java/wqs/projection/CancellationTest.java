@@ -220,14 +220,14 @@ class CancellationTest extends PostgresTestBase {
     @Test
     void a_cancel_from_another_user_stays_parked_and_changes_nothing() {
         apply(tx("t1", "b1", "p1"));
-        ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
 
         apply(cancelOfUser(2L, "c1", "t1"));
 
         assertThat(pendingCancelStore.depth()).isEqualTo(1);
         assertThat(pendingCancelStore.oldestParkedAt()).isPresent();
         assertThat(cancelled(WEB, "t1")).isFalse();
-        ProjectionSnapshot after = ProjectionSnapshot.of(dsl());
+        ProjectionSnapshot after = ProjectionSnapshot.of(jdbc());
         // User 1's projection is untouched: rollups and page index are identical.
         assertThat(after.sessions()).isEqualTo(before.sessions());
         assertThat(after.plays()).isEqualTo(before.plays());
@@ -442,7 +442,7 @@ class CancellationTest extends PostgresTestBase {
                         apply(item);
                     }
                 }
-                ProjectionSnapshot snapshot = ProjectionSnapshot.of(dsl());
+                ProjectionSnapshot snapshot = ProjectionSnapshot.of(jdbc());
                 String described = order.stream().map(ProjectionItem::sourceId).toList()
                         + (singleBatch ? " as one batch" : " one per batch");
                 assertNoDrift();
@@ -476,7 +476,7 @@ class CancellationTest extends PostgresTestBase {
 
     /** Counters, rollups, group locators and the page index all agree with the item rows. */
     private void assertNoDrift() {
-        assertThat(new ProjectionInvariants(dsl()).drift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     // --- fixtures --------------------------------------------------------------------------------
@@ -548,61 +548,58 @@ class CancellationTest extends PostgresTestBase {
     }
 
     private boolean cancelledOf(int view, SourceKind source, String sourceId) {
-        return dsl().fetchOne(
+        return db().value(
                 "select \"cancelled\" from \"" + itemTable(view)
-                        + "\" where \"source\" = ? and \"sourceId\" = ?",
-                (short) source.code(), sourceId)
-                .get(0, Boolean.class);
+                        + "\" where \"source\" = ? and \"sourceId\" = ?", Boolean.class,
+                (short) source.code(), sourceId);
     }
 
     private String cancelledBy(String sourceId) {
-        return dsl().fetchOne(
-                "select \"cancelledBy\" from \"wqCcItem\" where \"source\" = 1 and \"sourceId\" = ?",
-                sourceId).get(0, String.class);
+        return db().value(
+                "select \"cancelledBy\" from \"wqCcItem\" where \"source\" = 1 and \"sourceId\" = ?", String.class,
+                sourceId);
     }
 
     private boolean exists(int view, String sourceId) {
-        return dsl().fetchOne("select count(*)::int from \"" + itemTable(view)
-                + "\" where \"sourceId\" = ?", sourceId).get(0, Integer.class) > 0;
+        return db().value("select count(*)::int from \"" + itemTable(view)
+                + "\" where \"sourceId\" = ?", Integer.class, sourceId) > 0;
     }
 
     private int sessionField(String field) {
-        return dsl().fetchOne("select \"" + field + "\" from \"wqSession\"").get(0, Integer.class);
+        return db().value("select \"" + field + "\" from \"wqSession\"", Integer.class);
     }
 
     private BigDecimal sessionMoney(String field) {
-        return dsl().fetchOne("select \"" + field + "\" from \"wqSession\"")
-                .get(0, BigDecimal.class);
+        return db().value("select \"" + field + "\" from \"wqSession\"", BigDecimal.class);
     }
 
     private Instant sessionStart() {
-        return dsl().fetchOne("select \"startedAt\" from \"wqSession\"").get(0, Instant.class);
+        return db().value("select \"startedAt\" from \"wqSession\"", Instant.class);
     }
 
     private int playField(String subBatchId, String field) {
-        return dsl().fetchOne("select \"" + field + "\" from \"wqPlay\" where \"subBatchId\" = ?",
-                subBatchId).get(0, Integer.class);
+        return db().value("select \"" + field + "\" from \"wqPlay\" where \"subBatchId\" = ?", Integer.class,
+                subBatchId);
     }
 
     private BigDecimal playMoney(String subBatchId, String field) {
-        return dsl().fetchOne("select \"" + field + "\" from \"wqPlay\" where \"subBatchId\" = ?",
-                subBatchId).get(0, BigDecimal.class);
+        return db().value("select \"" + field + "\" from \"wqPlay\" where \"subBatchId\" = ?", BigDecimal.class,
+                subBatchId);
     }
 
     private boolean sessionVisible(int view) {
-        return dsl().fetchOne("select \"visibleExclCancelled\" from \"" + pageTable(view)
-                + "\" where \"kind\" = 0").get(0, Boolean.class);
+        return db().value("select \"visibleExclCancelled\" from \"" + pageTable(view)
+                + "\" where \"kind\" = 0", Boolean.class);
     }
 
     private String highLevelProduct(int view) {
-        return dsl().fetchOne("select \"productId\" from \"" + pageTable(view)
-                + "\" where \"kind\" = 0").get(0, String.class);
+        return db().value("select \"productId\" from \"" + pageTable(view)
+                + "\" where \"kind\" = 0", String.class);
     }
 
     private boolean rowVisible(int view, int kind, String refId) {
-        return dsl().fetchOne("select \"visibleExclCancelled\" from \"" + pageTable(view)
-                + "\" where \"kind\" = ? and \"refId\" = ?", (short) kind, refId)
-                .get(0, Boolean.class);
+        return db().value("select \"visibleExclCancelled\" from \"" + pageTable(view)
+                + "\" where \"kind\" = ? and \"refId\" = ?", Boolean.class, (short) kind, refId);
     }
 
     private int highLevelSentinel(int view, String column) {
@@ -614,9 +611,9 @@ class CancellationTest extends PostgresTestBase {
     }
 
     private int sentinel(int view, int pageUnit, String column) {
-        return dsl().fetchOne("""
+        return db().value("""
                 select coalesce(sum("%s"),0)::int from "wqCountDay"
                 where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "typeId" = 0
-                """.formatted(column), (short) view, (short) pageUnit).get(0, Integer.class);
+                """.formatted(column), Integer.class, (short) view, (short) pageUnit);
     }
 }

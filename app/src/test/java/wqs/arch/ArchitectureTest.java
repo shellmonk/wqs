@@ -6,7 +6,6 @@ import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.sli
 
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClass;
-import com.tngtech.archunit.core.domain.JavaFieldAccess;
 import com.tngtech.archunit.core.domain.JavaMethodCall;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
@@ -19,8 +18,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import wqs.config.ReaderDsl;
-import wqs.db.RawSqlJustified;
+import wqs.config.ReaderJdbc;
+import wqs.config.ReaderTx;
+import wqs.api.archfixture.JdbcClientController;
+import wqs.domain.archfixture.SqlTimestampValue;
 import wqs.api.archfixture.ParameterReadingAdvice;
 import wqs.api.cc.archfixture.CcParameterReader;
 import wqs.api.web.archfixture.ParameterReadingWebController;
@@ -30,7 +31,9 @@ import wqs.read.archfixture.QualifiedReader;
 import wqs.read.archfixture.UnqualifiedCtorParamReader;
 import wqs.read.archfixture.UnqualifiedInjectedFieldReader;
 import wqs.read.archfixture.UnqualifiedMethodParamReader;
-import wqs.read.web.archfixture.LeakyWebQuery;
+import wqs.read.archfixture.ReaderJdbcFieldWithoutTxReader;
+import wqs.read.archfixture.ReaderJdbcWithoutTxReader;
+import wqs.read.archfixture.TransactionClientParamReader;
 
 /**
  * Each rule names the spec decision it enforces. Per spec section 8.5, a rule that cannot be
@@ -50,13 +53,77 @@ class ArchitectureTest {
                 .importPackages("wqs");
     }
 
-    /** Spec 2.2 rules 2 and 3: jOOQ types stay in the query layer. */
+    /**
+     * Spec 2.2 rules 2 and 3 (refactor D5a): database access stays in the query and write layers.
+     * The edge (api) and the bottom layer (domain) touch neither Spring JDBC nor JDBC itself.
+     */
     @Test
-    void api_does_not_depend_on_jooq() {
-        ArchRule rule = noClasses()
-                .that().resideInAPackage("wqs.api..")
-                .should().dependOnClassesThat().resideInAnyPackage("org.jooq..", "wqs.db.generated..");
-        rule.check(classes);
+    void api_and_domain_do_not_depend_on_jdbc() {
+        jdbcRule().check(classes);
+    }
+
+    /** Proves the rule above can fail, for each package and each forbidden API. */
+    @Test
+    void jdbc_rule_rejects_an_api_class_using_jdbc_client_and_a_domain_class_using_java_sql() {
+        JavaClasses fixture = new ClassFileImporter()
+                .importClasses(JdbcClientController.class, SqlTimestampValue.class);
+        assertThatThrownBy(() -> jdbcRule().check(fixture))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("JdbcClientController")
+                .hasMessageContaining("org.springframework.jdbc.core.simple.JdbcClient")
+                .hasMessageContaining("SqlTimestampValue")
+                .hasMessageContaining("java.sql.Timestamp");
+    }
+
+    private static ArchRule jdbcRule() {
+        return noClasses()
+                .that().resideInAnyPackage("wqs.api..", "wqs.domain..")
+                .should().dependOnClassesThat().resideInAnyPackage("org.springframework.jdbc..", "java.sql..");
+    }
+
+    /**
+     * Refactor D5c: jOOQ was removed (SQL is JdbcClient text); nothing may depend on it again.
+     * Belt and braces: the rule below, and no jOOQ class on the test runtime classpath.
+     */
+    @Test
+    void nothing_depends_on_jooq() {
+        noJooqRule().check(classes);
+        assertThatThrownBy(() -> Class.forName("org.jooq.DSLContext"))
+                .isInstanceOf(ClassNotFoundException.class);
+    }
+
+    /**
+     * Proves the rule above can fail. jOOQ is off the classpath, so the fixture is compiled here,
+     * against a one-interface stand-in for {@code org.jooq.DSLContext}, and imported from disk.
+     */
+    @Test
+    void jooq_rule_rejects_a_class_depending_on_jooq(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        java.nio.file.Path src = dir.resolve("src");
+        java.nio.file.Path out = dir.resolve("out");
+        java.nio.file.Files.createDirectories(src.resolve("org/jooq"));
+        java.nio.file.Files.createDirectories(src.resolve("wqs/read/archfixture"));
+        java.nio.file.Files.createDirectories(out);
+        java.nio.file.Path stub = java.nio.file.Files.writeString(src.resolve("org/jooq/DSLContext.java"),
+                "package org.jooq; public interface DSLContext {}");
+        java.nio.file.Path reader = java.nio.file.Files.writeString(
+                src.resolve("wqs/read/archfixture/JooqReader.java"),
+                "package wqs.read.archfixture; public class JooqReader { org.jooq.DSLContext dsl; }");
+        javax.tools.JavaCompiler javac = javax.tools.ToolProvider.getSystemJavaCompiler();
+        int status = javac.run(null, null, null, "-d", out.toString(), stub.toString(), reader.toString());
+        org.assertj.core.api.Assertions.assertThat(status).as("fixture compiles").isZero();
+
+        JavaClasses fixture = new ClassFileImporter().importPath(out);
+        assertThatThrownBy(() -> noJooqRule().check(fixture))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("JooqReader")
+                .hasMessageContaining("org.jooq.DSLContext");
+    }
+
+    private static ArchRule noJooqRule() {
+        return noClasses()
+                .that().resideOutsideOfPackage("org.jooq..")
+                .should().dependOnClassesThat().resideInAPackage("org.jooq..");
     }
 
     /** Spec 2.3 rule 1: MapStruct mappers belong on the inside of the boundary. */
@@ -66,33 +133,6 @@ class ArchitectureTest {
                 .that().resideInAPackage("wqs.api..")
                 .should().beAnnotatedWith("org.mapstruct.Mapper");
         rule.check(classes);
-    }
-
-    /**
-     * Spec 9 control 3: security by schema -- /web cannot reach operator data. Forbids every
-     * generated {@code WqCc*} type (the operator item table, its page index, their records) AND
-     * any access to a {@code Tables.WQ_CC_*} field: passing {@code WQ_CC_ITEM} straight to
-     * {@code selectFrom(..)} depends on no WqCc type, only on the Tables field.
-     */
-    @Test
-    void web_layer_cannot_touch_operator_tables() {
-        webRule().check(classes);
-    }
-
-    /** Proves the rule above can fail: a web-layer fixture reading Tables.WQ_CC_ITEM is rejected. */
-    @Test
-    void web_rule_rejects_a_web_class_touching_cc() {
-        JavaClasses fixture = new ClassFileImporter().importClasses(LeakyWebQuery.class);
-        assertThatThrownBy(() -> webRule().check(fixture))
-                .isInstanceOf(AssertionError.class)
-                .hasMessageContaining("LeakyWebQuery");
-    }
-
-    private static ArchRule webRule() {
-        return noClasses()
-                .that().resideInAnyPackage("wqs.api.web..", "wqs.read.web..")
-                .should().dependOnClassesThat().haveSimpleNameStartingWith("WqCc")
-                .orShould().accessFieldWhere(operatorTableField());
     }
 
     /**
@@ -161,16 +201,6 @@ class ArchitectureTest {
                         org.springframework.web.servlet.support.ServletUriComponentsBuilder.class);
     }
 
-    private static DescribedPredicate<JavaFieldAccess> operatorTableField() {
-        return new DescribedPredicate<>("a Tables.WQ_CC_* field") {
-            @Override
-            public boolean test(JavaFieldAccess access) {
-                return access.getTargetOwner().getName().equals("wqs.db.generated.Tables")
-                        && access.getTarget().getName().startsWith("WQ_CC_");
-            }
-        };
-    }
-
     /**
      * Spec 8.5 layering rule / spec 10: {@code api -> read/projection -> domain} and
      * {@code ingest -> projection}. The query and write layers never reach back up into the
@@ -231,112 +261,145 @@ class ArchitectureTest {
         rule.check(classes);
     }
 
-    /** Spec 2.2 rule 1: plain-SQL API use requires an explicit, reviewed justification. */
-    @Test
-    void string_based_sql_requires_justification() {
-        // classes().should(...), NOT noClasses(): noClasses() negates the condition, which would
-        // turn this condition's violation events into passes and make the rule unable to fail.
-        ArchRule rule = classes()
-                .that().areNotAnnotatedWith(RawSqlJustified.class)
-                // Generated jOOQ code uses plain SQL for sequence defaults; it is outside the
-                // intent of the rule, which governs hand-written code.
-                .and().resideOutsideOfPackage("wqs.db.generated..")
-                .should(callPlainSqlApi());
-        rule.check(classes);
-    }
-
     /**
-     * Flags any call whose resolved target is annotated {@code @org.jooq.PlainSQL}: jOOQ marks
-     * exactly its plain-SQL API (DSL.field(String), DSLContext.execute(String),
-     * .from(String), .where(String, ...), ...) with that annotation.
+     * Spec 10 "datasource routing is explicit" (ruling D11, refactor D5b): reads never land on the
+     * writer. Every JdbcClient injected into {@code wqs.read..} carries {@code @ReaderJdbc}.
      */
-    private static ArchCondition<JavaClass> callPlainSqlApi() {
-        return new ArchCondition<>("call the jOOQ plain-SQL API (@org.jooq.PlainSQL)") {
-            @Override
-            public void check(JavaClass item, ConditionEvents events) {
-                item.getCodeUnitCallsFromSelf().stream()
-                        .filter(call -> call.getTarget().resolveMember()
-                                .map(m -> m.isAnnotatedWith("org.jooq.PlainSQL"))
-                                .orElse(false))
-                        .forEach(call -> events.add(SimpleConditionEvent.violated(
-                                item,
-                                "plain-SQL API used in " + call.getOriginOwner().getFullName()
-                                        + " -- annotate with @RawSqlJustified and explain why"
-                                        + " (spec 2.2 rule 1): " + call.getDescription())));
-            }
-        };
-    }
-
-    /** Spec 10 "datasource routing is explicit" (ruling D11): reads never land on the writer. */
     @Test
-    void read_layer_injects_only_the_reader_dsl() {
-        readerDslRule().check(classes);
+    void read_layer_injects_only_the_reader_jdbc_client() {
+        readerJdbcRule().check(classes);
     }
 
     /** Proves the rule above can fail, and that each branch of it does. */
     @Test
-    void read_layer_rule_rejects_each_kind_of_unqualified_dsl() {
-        assertRejected(UnqualifiedCtorParamReader.class, "UnqualifiedCtorParamReader");
-        assertRejected(UnqualifiedMethodParamReader.class, "run");
-        assertRejected(UnqualifiedInjectedFieldReader.class, "injectedDsl");
+    void read_layer_rule_rejects_each_kind_of_unqualified_jdbc_client() {
+        assertRejected(readerJdbcRule(), UnqualifiedCtorParamReader.class, "UnqualifiedCtorParamReader");
+        assertRejected(readerJdbcRule(), UnqualifiedMethodParamReader.class, "run");
+        assertRejected(readerJdbcRule(), UnqualifiedInjectedFieldReader.class, "injectedJdbc");
     }
 
     @Test
     void read_layer_rule_accepts_a_plain_field_assigned_from_a_qualified_constructor() {
-        readerDslRule().check(new ClassFileImporter().importClasses(QualifiedReader.class));
+        readerJdbcRule().check(new ClassFileImporter().importClasses(QualifiedReader.class));
     }
 
     @Test
-    void read_layer_rule_accepts_a_plain_method_taking_the_transaction_dsl() {
-        readerDslRule().check(new ClassFileImporter().importClasses(
-                wqs.read.archfixture.TransactionDslParamReader.class));
+    void read_layer_rule_accepts_a_plain_method_taking_the_transaction_client() {
+        readerJdbcRule().check(new ClassFileImporter().importClasses(TransactionClientParamReader.class));
     }
 
-    private static void assertRejected(Class<?> fixtureClass, String memberName) {
+    /**
+     * Spec 10 / P-3 (one snapshot per request): a {@code @ReaderJdbc} statement outside a
+     * {@code @ReaderTx} transaction autocommits in its own snapshot. So every {@code wqs.read..}
+     * class that injects the reader client also injects the reader template. This cannot prove
+     * each statement runs inside {@code readerTx.execute(..)}; it rules out a reader with no way to
+     * open the transaction at all.
+     */
+    @Test
+    void read_layer_injects_the_reader_tx_wherever_it_injects_the_reader_jdbc_client() {
+        readerTxRule().check(classes);
+    }
+
+    /** Proves the rule above can fail: no template at all, or only the writer's. */
+    @Test
+    void reader_tx_rule_rejects_a_reader_client_without_the_reader_tx() {
+        assertRejected(readerTxRule(), ReaderJdbcWithoutTxReader.class, "ReaderJdbcWithoutTxReader");
+        assertRejected(readerTxRule(), ReaderJdbcFieldWithoutTxReader.class, "ReaderJdbcFieldWithoutTxReader");
+        readerTxRule().check(new ClassFileImporter().importClasses(QualifiedReader.class));
+    }
+
+    private static void assertRejected(ArchRule rule, Class<?> fixtureClass, String memberName) {
         JavaClasses fixture = new ClassFileImporter().importClasses(fixtureClass);
-        assertThatThrownBy(() -> readerDslRule().check(fixture))
+        assertThatThrownBy(() -> rule.check(fixture))
                 .isInstanceOf(AssertionError.class)
                 .hasMessageContaining(memberName)
                 .hasMessageContaining(fixtureClass.getSimpleName());
     }
 
-    private static ArchRule readerDslRule() {
-        // Not noClasses(): see string_based_sql_requires_justification.
+    private static ArchRule readerJdbcRule() {
+        // classes().should(...), NOT noClasses(): noClasses() negates the condition, which would
+        // turn this condition's violation events into passes and make the rule unable to fail.
         return classes()
                 .that().resideInAPackage("wqs.read..")
-                .should(injectOnlyQualifiedDsl());
+                .should(injectOnlyQualifiedJdbcClient());
     }
 
-    private static ArchCondition<JavaClass> injectOnlyQualifiedDsl() {
-        return new ArchCondition<>("take org.jooq.DSLContext only as @ReaderDsl injection parameters, "
-                + "and never as an @Autowired/@Inject field without @ReaderDsl") {
+    private static ArchRule readerTxRule() {
+        return classes()
+                .that().resideInAPackage("wqs.read..")
+                .should(injectReaderTxWithReaderJdbc());
+    }
+
+    private static final String JDBC_CLIENT = "org.springframework.jdbc.core.simple.JdbcClient";
+    private static final String TRANSACTION_TEMPLATE = "org.springframework.transaction.support.TransactionTemplate";
+
+    /** An injected field: {@code @Autowired} or {@code @Inject}. */
+    private static boolean injected(com.tngtech.archunit.core.domain.JavaField f) {
+        return f.isAnnotatedWith("org.springframework.beans.factory.annotation.Autowired")
+                || f.isAnnotatedWith("jakarta.inject.Inject");
+    }
+
+    /**
+     * Injection points only: constructors and @Autowired/@Inject/@Bean methods. A plain method
+     * taking the caller's transaction client ("tx") is not an injection point.
+     */
+    private static boolean injectionPoint(com.tngtech.archunit.core.domain.JavaCodeUnit u) {
+        return u instanceof com.tngtech.archunit.core.domain.JavaConstructor
+                || u.isAnnotatedWith("org.springframework.beans.factory.annotation.Autowired")
+                || u.isAnnotatedWith("jakarta.inject.Inject")
+                || u.isAnnotatedWith("org.springframework.context.annotation.Bean");
+    }
+
+    /** True when the class has an injection point of {@code type} carrying {@code qualifier}. */
+    private static boolean injects(JavaClass item, String type, Class<? extends java.lang.annotation.Annotation> qualifier) {
+        boolean field = item.getFields().stream()
+                .filter(ArchitectureTest::injected)
+                .anyMatch(f -> f.getRawType().isAssignableTo(type) && f.isAnnotatedWith(qualifier));
+        boolean parameter = item.getCodeUnits().stream()
+                .filter(ArchitectureTest::injectionPoint)
+                .flatMap(u -> u.getParameters().stream())
+                .anyMatch(p -> p.getRawType().isAssignableTo(type) && p.isAnnotatedWith(qualifier));
+        return field || parameter;
+    }
+
+    private static ArchCondition<JavaClass> injectOnlyQualifiedJdbcClient() {
+        return new ArchCondition<>("take JdbcClient only as @ReaderJdbc injection parameters, "
+                + "and never as an @Autowired/@Inject field without @ReaderJdbc") {
             @Override
             public void check(JavaClass item, ConditionEvents events) {
-                // A plain field assigned from a @ReaderDsl constructor parameter is the normal
+                // A plain field assigned from a @ReaderJdbc constructor parameter is the normal
                 // pattern; only injected fields are checked.
                 item.getFields().stream()
-                        .filter(f -> f.getRawType().isAssignableTo(org.jooq.DSLContext.class))
-                        .filter(f -> f.isAnnotatedWith("org.springframework.beans.factory.annotation.Autowired")
-                                || f.isAnnotatedWith("jakarta.inject.Inject"))
-                        .filter(f -> !f.isAnnotatedWith(ReaderDsl.class))
+                        .filter(f -> f.getRawType().isAssignableTo(JDBC_CLIENT))
+                        .filter(ArchitectureTest::injected)
+                        .filter(f -> !f.isAnnotatedWith(ReaderJdbc.class))
                         .forEach(f -> events.add(SimpleConditionEvent.violated(
-                                f, f.getDescription() + " is an injected DSLContext without @ReaderDsl")));
-                // Injection points only: constructors and @Autowired/@Inject/@Bean methods. A plain
-                // method taking the caller's transaction DSLContext ("tx") is not an injection point.
+                                f, f.getDescription() + " is an injected JdbcClient without @ReaderJdbc")));
                 item.getCodeUnits().stream()
-                        .filter(u -> u instanceof com.tngtech.archunit.core.domain.JavaConstructor
-                                || u.isAnnotatedWith("org.springframework.beans.factory.annotation.Autowired")
-                                || u.isAnnotatedWith("jakarta.inject.Inject")
-                                || u.isAnnotatedWith("org.springframework.context.annotation.Bean"))
+                        .filter(ArchitectureTest::injectionPoint)
                         .forEach(u -> {
                             for (int i = 0; i < u.getRawParameterTypes().size(); i++) {
-                                if (u.getRawParameterTypes().get(i).isAssignableTo(org.jooq.DSLContext.class)
-                                        && !u.getParameters().get(i).isAnnotatedWith(ReaderDsl.class)) {
+                                if (u.getRawParameterTypes().get(i).isAssignableTo(JDBC_CLIENT)
+                                        && !u.getParameters().get(i).isAnnotatedWith(ReaderJdbc.class)) {
                                     events.add(SimpleConditionEvent.violated(
-                                            u, u.getDescription() + " takes a DSLContext parameter without @ReaderDsl"));
+                                            u, u.getDescription() + " takes a JdbcClient parameter without @ReaderJdbc"));
                                 }
                             }
                         });
+            }
+        };
+    }
+
+    private static ArchCondition<JavaClass> injectReaderTxWithReaderJdbc() {
+        return new ArchCondition<>("inject a @ReaderTx TransactionTemplate wherever they inject a @ReaderJdbc JdbcClient") {
+            @Override
+            public void check(JavaClass item, ConditionEvents events) {
+                if (injects(item, JDBC_CLIENT, ReaderJdbc.class)
+                        && !injects(item, TRANSACTION_TEMPLATE, ReaderTx.class)) {
+                    events.add(SimpleConditionEvent.violated(item, item.getName()
+                            + " injects @ReaderJdbc JdbcClient but no @ReaderTx TransactionTemplate:"
+                            + " its reads would autocommit, one snapshot per statement"));
+                }
             }
         };
     }

@@ -25,7 +25,7 @@ public abstract class ReadPropertyBase extends ProjectionPropertyBase {
     @Autowired protected WebHighLevelQuery webHighLevelQuery;
     @Autowired protected CcHighLevelQuery ccHighLevelQuery;
 
-    protected final NaiveOffsetOracle oracle = new NaiveOffsetOracle(dsl());
+    protected final NaiveOffsetOracle oracle = new NaiveOffsetOracle(jdbc());
 
     /** Empties the projection; ReadGenerators' data and queries span 2033-12 through 2034-03. */
     @Override

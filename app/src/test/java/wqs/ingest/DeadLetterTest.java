@@ -63,8 +63,8 @@ class DeadLetterTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 9), 0);
-        dsl().execute("delete from \"wqDeadLetter\"");
-        dsl().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqDeadLetter\"");
+        db().execute("delete from \"wqStreamOffset\"");
         clearProjection();
         source = new FakeStreamSource();
         registry = new SimpleMeterRegistry();
@@ -97,7 +97,7 @@ class DeadLetterTest extends PostgresTestBase {
 
         assertThat(count("wqWebItem")).isEqualTo(2);
         assertThat(count()).isEqualTo(1);
-        var row = dsl().fetchOne(
+        var row = db().row(
                 "select \"sourceId\", \"streamOffset\", \"stream\", \"source\", \"attempts\", "
                         + "\"payload\"->>'occurredAt' as at, \"payload\"->>'amount' as amount "
                         + "from \"wqDeadLetter\"");
@@ -129,8 +129,7 @@ class DeadLetterTest extends PostgresTestBase {
         });
 
         assertThat(count()).isEqualTo(1);
-        String error = dsl()
-                .fetchOne("select \"error\" from \"wqDeadLetter\"").get(0, String.class);
+        String error = db().value("select \"error\" from \"wqDeadLetter\"", String.class);
         assertThat(error).contains("boom");
     }
 
@@ -147,7 +146,7 @@ class DeadLetterTest extends PostgresTestBase {
         consumer.poll();
 
         assertThat(count()).isEqualTo(1);
-        assertThat(dsl().fetchOne("select \"sourceId\" from \"wqDeadLetter\"").get(0, String.class))
+        assertThat(db().value("select \"sourceId\" from \"wqDeadLetter\"", String.class))
                 .isEqualTo("tx-unmappable");
         assertThat(count("wqWebItem")).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(2L);
@@ -302,7 +301,7 @@ class DeadLetterTest extends PostgresTestBase {
         source.deliverUndeserializable(body, 8);
 
         assertThat(count()).isEqualTo(1);
-        var row = dsl().fetchOne(
+        var row = db().row(
                 "select \"streamOffset\", \"stream\", \"attempts\", \"error\", "
                         + "\"payload\"->>'rawBase64' as raw from \"wqDeadLetter\"");
         assertThat(row.get("streamOffset", Long.class)).isEqualTo(8L);
@@ -424,7 +423,7 @@ class DeadLetterTest extends PostgresTestBase {
         consumer.poll();
 
         assertThat(count()).isEqualTo(1);
-        var row = dsl().fetchOne(
+        var row = db().row(
                 "select \"sourceId\", \"streamOffset\", \"error\", \"payload\"->>'rawBase64' as raw "
                         + "from \"wqDeadLetter\"");
         assertThat(row.get("sourceId", String.class)).isNull();
@@ -446,7 +445,7 @@ class DeadLetterTest extends PostgresTestBase {
         deadLetterStore.record(STREAM, 3L, unmappable, new IllegalArgumentException("bad \u0000 text"), 1);
 
         assertThat(count()).isEqualTo(1);
-        assertThat(dsl().fetchOne("select \"error\" from \"wqDeadLetter\"").get(0, String.class))
+        assertThat(db().value("select \"error\" from \"wqDeadLetter\"", String.class))
                 .startsWith("java.lang.IllegalArgumentException: bad \uFFFD text");
     }
 
@@ -479,7 +478,7 @@ class DeadLetterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return dsl().fetchOne("select count(*)::int from \"" + table + "\"").get(0, Integer.class);
+        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
     }
 
     /** Fails calls numbered failFrom..failTo (1-based), otherwise delegates to the real writer. */

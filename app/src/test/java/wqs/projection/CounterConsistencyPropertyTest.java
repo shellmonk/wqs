@@ -28,7 +28,7 @@ class CounterConsistencyPropertyTest extends ProjectionPropertyBase {
         reset();
         applyBatches(items);
 
-        assertThat(new ProjectionInvariants(dsl()).counterDrift()).isEmpty();
+        assertThat(new ProjectionInvariants(jdbc()).counterDrift()).isEmpty();
     }
 
     @Provide
