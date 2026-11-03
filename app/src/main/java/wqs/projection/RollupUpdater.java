@@ -89,7 +89,10 @@ public class RollupUpdater {
      * different order than a concurrent transaction over the same session (item A's play, then
      * the session, then item B's play), which could deadlock. That is safe today because a single
      * sequential consumer applies all items; any future parallel poller or replay path must
-     * partition work by session (or by user) before calling this.
+     * partition work by session (or by user) before calling this. The delta poller, which runs
+     * concurrently with the stream consumer, relies on retry rather than lock order: a 40P01 on
+     * either side rolls that transaction back and is retried (the stream re-applies its batch, the
+     * poller's run fails and the next fire re-polls), so both converge (phase 6 ruling I2).
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public RollupResult applyItem(ProjectionItem item) {

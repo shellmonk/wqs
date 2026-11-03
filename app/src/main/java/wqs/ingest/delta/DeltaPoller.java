@@ -30,10 +30,15 @@ import wqs.projection.source.DeltaRow;
  * a timestamp cursor (O-1): {@code wqs.delta.timestampcliff} is incremented, an ERROR logged, the
  * rows applied (idempotent) without advancing, and the run ends.
  *
+ * <p><b>Overlap saturation.</b> A full page that does not advance the watermark lies inside the
+ * overlap window; it is refetched once from the watermark itself ({@code wqs.delta.overlap.saturated}),
+ * and the run ends if that does not advance either.
+ *
  * <p><b>Poison.</b> A row that does not decode is dead-lettered alone and the rest of the page
- * applies. If the writer rejects the page, each row is retried alone and a row failing alone is
- * dead-lettered; the watermark is then written on its own. When the database itself is down the
- * dead-letter write fails too and the run fails with the watermark untouched.
+ * applies. If the writer rejects the page's data ({@code IllegalArgumentException},
+ * {@code DataIntegrityViolationException}), each row is applied alone, a row rejected alone is
+ * dead-lettered, and the watermark is then written on its own. Any other failure is transient
+ * (pool timeout, 40P01 deadlock) and fails the run; nothing is dead-lettered for it.
  *
  * <p><b>Failure.</b> Any exception escaping a run (fetch failure, timeout, non-2xx, garbage body,
  * database) counts {@code wqs.delta.poll.failures} and fails the job; the next fire retries from
@@ -44,8 +49,6 @@ public class DeltaPoller {
 
     private static final Logger log = LoggerFactory.getLogger(DeltaPoller.class);
     private static final String STREAM = DeltaWatermarkStore.WALLET_DELTA;
-    /** Attempts of one row alone, after its page failed, before it is dead-lettered. */
-    private static final int ROW_ATTEMPTS = 2;
 
     private final DeltaClient client;
     private final DeltaRowDecoder decoder;
@@ -82,9 +85,10 @@ public class DeltaPoller {
     private PollOutcome poll() {
         int pages = 0;
         int fetched = 0;
+        boolean exact = false;
         while (true) {
             Instant stored = watermarks.read().orElse(null);
-            ArrayNode page = client.fetch(since(stored));
+            ArrayNode page = client.fetch(exact ? stored : since(stored));
             pages++;
             fetched += page.size();
             metrics.fetched(page.size());
@@ -109,12 +113,24 @@ public class DeltaPoller {
             if (!saturated || pages >= properties.maxPagesPerRun()) {
                 return new PollOutcome(pages, fetched, false);
             }
-            if (stored != null && (decoded.maxVersion == null || !decoded.maxVersion.isAfter(stored))) {
-                // A full page entirely inside the overlap window: polling again would fetch it again.
-                log.warn("Delta page of {} rows did not advance the watermark {}; more than page-limit rows "
-                        + "fall within the overlap window", page.size(), stored);
+            boolean advanced = decoded.maxVersion != null && (stored == null || decoded.maxVersion.isAfter(stored));
+            if (advanced) {
+                exact = false;
+                continue;
+            }
+            if (exact || stored == null) {
+                // Polling again would fetch the same page: no readable version, or the exact refetch
+                // from the watermark did not get past it either.
+                log.warn("Delta page of {} rows did not advance the watermark {}; ending the run", page.size(), stored);
                 return new PollOutcome(pages, fetched, false);
             }
+            // Review C1: more than page-limit rows inside [W - overlap, W]. Re-polling with the overlap
+            // would fetch this same page forever; refetch once from W itself. A full page all at W is
+            // then the timestamp cliff; anything newer advances.
+            metrics.overlapSaturated();
+            log.warn("Delta page of {} rows lies inside the overlap window below watermark {}; refetching from "
+                    + "the watermark without overlap", page.size(), stored);
+            exact = true;
         }
     }
 
@@ -163,11 +179,13 @@ public class DeltaPoller {
         try {
             writer.applyDelta(new DeltaBatch(rows, newWatermark));
             return;
-        } catch (RuntimeException pageError) {
+        } catch (IllegalArgumentException | DataIntegrityViolationException pageError) {
+            // Data the writer rejects (as on the stream, Phase 5): find the row(s) alone. Any other
+            // failure -- a pool timeout, a 40P01 deadlock -- is transient and fails the run.
             if (rows.isEmpty()) {
                 throw pageError;
             }
-            log.warn("Delta page of {} rows failed; applying row by row", rows.size(), pageError);
+            log.warn("Delta page of {} rows was rejected; applying row by row", rows.size(), pageError);
         }
         for (DeltaRow row : rows) {
             applyAlone(row);
@@ -177,21 +195,19 @@ public class DeltaPoller {
         }
     }
 
-    /** If the dead-letter write also fails (the database is down) the exception escapes. */
+    /**
+     * Only a rejection of the data is dead-lettered (review I1, the Phase 5 rule): anything else is
+     * rethrown, so the run fails with the watermark unchanged and the next fire retries -- rows
+     * already applied alone are then duplicates. If the dead-letter write itself fails, that
+     * escapes too.
+     */
     private void applyAlone(DeltaRow row) {
-        RuntimeException last = null;
-        for (int attempt = 1; attempt <= ROW_ATTEMPTS; attempt++) {
-            try {
-                writer.applyDelta(new DeltaBatch(List.of(row), null));
-                return;
-            } catch (RuntimeException e) {
-                last = e;
-                log.warn("Delta row {} (source {}) attempt {}/{} failed",
-                        row.item().sourceId(), row.source(), attempt, ROW_ATTEMPTS, e);
-            }
+        try {
+            writer.applyDelta(new DeltaBatch(List.of(row), null));
+        } catch (IllegalArgumentException | DataIntegrityViolationException e) {
+            deadLetters.record(STREAM, null, row.item(), e, 1);
+            metrics.deadLettered();
+            log.error("Dead-lettered delta row {} (source {})", row.item().sourceId(), row.source(), e);
         }
-        deadLetters.record(STREAM, null, row.item(), last, ROW_ATTEMPTS + 1);
-        metrics.deadLettered();
-        log.error("Dead-lettered delta row {} (source {})", row.item().sourceId(), row.source());
     }
 }

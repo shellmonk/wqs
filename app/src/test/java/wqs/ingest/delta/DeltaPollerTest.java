@@ -87,9 +87,35 @@ class DeltaPollerTest extends PostgresTestBase {
                 BASE, null, PAGE_LIMIT, OVERLAP, MAX_PAGES, null, null, null);
         RestClient.Builder builder = RestClient.builder().baseUrl(BASE);
         server = MockRestServiceServer.bindTo(builder).build();
-        DeltaClient client = new DeltaClient(builder.build(), properties, objectMapper);
-        poller = new DeltaPoller(client, new DeltaRowDecoder(properties), txTypes, writer, watermarks,
+        client = new DeltaClient(builder.build(), properties, objectMapper);
+        this.properties = properties;
+        poller = pollerWith(writer);
+    }
+
+    private DeltaClient client;
+    private DeltaProperties properties;
+
+    private DeltaPoller pollerWith(ProjectionWriter projectionWriter) {
+        return new DeltaPoller(client, new DeltaRowDecoder(properties), txTypes, projectionWriter, watermarks,
                 deadLetters, properties, new DeltaPollMetrics(meters, watermarks, clock));
+    }
+
+    /**
+     * The real writer, except that a one-row batch (the per-row fallback) whose row has sourceId
+     * {@code failingId} throws {@code failure} the first {@code times} times.
+     */
+    private ProjectionWriter failingAlone(String failingId, RuntimeException failure, int times) {
+        ProjectionWriter flaky = org.mockito.Mockito.mock(ProjectionWriter.class);
+        java.util.concurrent.atomic.AtomicInteger left = new java.util.concurrent.atomic.AtomicInteger(times);
+        org.mockito.Mockito.when(flaky.applyDelta(org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+            wqs.projection.DeltaBatch batch = call.getArgument(0);
+            if (batch.rows().size() == 1 && batch.rows().get(0).item().sourceId().equals(failingId)
+                    && left.getAndDecrement() > 0) {
+                throw failure;
+            }
+            return writer.applyDelta(batch);
+        });
+        return flaky;
     }
 
     private void expect(Instant since, String body) {
@@ -196,19 +222,61 @@ class DeltaPollerTest extends PostgresTestBase {
         assertThat(count("wqCcItem")).isEqualTo(1 + PAGE_LIMIT);
     }
 
-    /** More than page-limit rows inside the overlap: a second request would fetch the same page. */
+    /**
+     * Review C1: more than page-limit rows inside [W - overlap, W] would stall the cursor forever.
+     * The run refetches once from W itself (no overlap) and applies the newer rows above W.
+     */
     @Test
-    void saturated_page_that_does_not_advance_the_watermark_ends_the_run() {
+    void saturated_overlap_page_refetches_from_the_watermark_and_progresses() {
         expect(Instant.EPOCH, page(prizeAt("1", v(10))));
         poller.runOnce();
         nextRun();
-        expect(v(10).minus(OVERLAP), page(rows(5, PAGE_LIMIT))); // versions v(5)..v(9), all before v(10)
+        double overlapSaturated = meters.counter(DeltaPollMetrics.OVERLAP_SATURATED).count();
+        expect(v(10).minus(OVERLAP), page(prizeAt("2", v(8)), prizeAt("3", v(9)), prizeAt("4", v(9)),
+                prizeAt("5", v(10)), prizeAt("1", v(10))));
+        expect(v(10), page(prizeAt("1", v(10)), prizeAt("6", v(11)), prizeAt("7", v(12))));
 
         PollOutcome outcome = poller.runOnce();
 
-        server.verify(); // exactly one request
-        assertThat(outcome).isEqualTo(new PollOutcome(1, PAGE_LIMIT, false));
+        server.verify();
+        assertThat(outcome).isEqualTo(new PollOutcome(2, PAGE_LIMIT + 3, false));
+        assertThat(watermarks.read()).contains(v(12));
+        assertThat(count("wqCcItem")).isEqualTo(7);
+        assertThat(meters.counter(DeltaPollMetrics.OVERLAP_SATURATED).count()).isEqualTo(overlapSaturated + 1);
+    }
+
+    /** The exact refetch from W is itself a full page all at W: the timestamp cliff. */
+    @Test
+    void saturated_refetch_all_at_the_watermark_is_a_cliff() {
+        expect(Instant.EPOCH, page(prizeAt("1", v(10))));
+        poller.runOnce();
+        nextRun();
+        expect(v(10).minus(OVERLAP), page(prizeAt("2", v(8)), prizeAt("3", v(9)), prizeAt("4", v(10)),
+                prizeAt("5", v(10)), prizeAt("1", v(10))));
+        expect(v(10), page(prizeAt("1", v(10)), prizeAt("4", v(10)), prizeAt("5", v(10)),
+                prizeAt("6", v(10)), prizeAt("7", v(10))));
+
+        PollOutcome outcome = poller.runOnce();
+
+        server.verify();
+        assertThat(outcome).isEqualTo(new PollOutcome(2, 2 * PAGE_LIMIT, true));
         assertThat(watermarks.read()).contains(v(10));
+    }
+
+    /** Review M2: a first-poll full page with no readable version is not fetched again. */
+    @Test
+    void saturated_first_page_without_versions_ends_the_run() {
+        List<String> garbage = new ArrayList<>();
+        for (int i = 0; i < PAGE_LIMIT; i++) {
+            garbage.add("{\"source\":\"walMystery\",\"id\":" + i + "}");
+        }
+        expect(Instant.EPOCH, page(garbage)); // exactly one request
+
+        PollOutcome outcome = poller.runOnce();
+
+        server.verify();
+        assertThat(outcome).isEqualTo(new PollOutcome(1, PAGE_LIMIT, false));
+        assertThat(watermarks.read()).isEmpty();
     }
 
     @Test
@@ -339,6 +407,58 @@ class DeltaPollerTest extends PostgresTestBase {
         Record letter = dsl().fetchOne("select \"source\", \"sourceId\" from \"wqDeadLetter\"");
         assertThat(letter.get("source", Short.class)).isEqualTo((short) SourceKind.CLAIMABLE_PRIZE.code());
         assertThat(letter.get("sourceId", String.class)).isEqualTo("2");
+    }
+
+    /**
+     * Review I1: a transient failure in the per-row fallback (no connection; a 40P01 deadlock)
+     * fails the run -- nothing dead-lettered, watermark unchanged -- and the next run applies it.
+     */
+    @Test
+    void transient_failure_in_the_row_fallback_fails_the_run_and_the_next_run_applies() {
+        List<RuntimeException> transients = List.of(
+                new org.springframework.jdbc.CannotGetJdbcConnectionException("pool exhausted"),
+                new org.springframework.dao.PessimisticLockingFailureException("ERROR: deadlock detected (40P01)"));
+        for (RuntimeException failure : transients) {
+            clearProjection();
+            server.reset();
+            DeltaPoller flaky = pollerWith(failingAlone("1", failure, 1));
+            String body = page(
+                    prizeAt("1", v(1)),
+                    prize("2", USER, Instant.parse("2001-01-01T00:00:00Z"), v(4), "UNCLAIMED", "lotto", null),
+                    limit("21", USER, T0, v(2)));
+            expect(Instant.EPOCH, body);
+            expect(Instant.EPOCH, body);
+            double failures = meters.counter(DeltaPollMetrics.POLL_FAILURES).count();
+
+            assertThatThrownBy(flaky::runOnce).isSameAs(failure);
+            assertThat(count("wqDeadLetter")).as("%s is not poison", failure).isZero();
+            assertThat(watermarks.read()).isEmpty();
+            assertThat(meters.counter(DeltaPollMetrics.POLL_FAILURES).count()).isEqualTo(failures + 1);
+
+            flaky.runOnce();
+
+            server.verify();
+            assertThat(count("wqCcItem")).isEqualTo(2);
+            assertThat(count("wqDeadLetter")).as("only the out-of-window row").isEqualTo(1);
+            assertThat(watermarks.read()).contains(v(4));
+        }
+    }
+
+    /** A data-integrity rejection in the per-row fallback is still poison: dead-lettered alone. */
+    @Test
+    void data_integrity_violation_in_the_row_fallback_is_dead_lettered() {
+        DeltaPoller flaky = pollerWith(failingAlone("1", new org.springframework.dao.DataIntegrityViolationException("bad"), 9));
+        expect(Instant.EPOCH, page(prizeAt("1", v(1)),
+                prize("2", USER, Instant.parse("2001-01-01T00:00:00Z"), v(4), "UNCLAIMED", "lotto", null),
+                limit("21", USER, T0, v(2))));
+
+        flaky.runOnce();
+
+        server.verify();
+        assertThat(count("wqCcItem")).isEqualTo(1);
+        assertThat(dsl().fetch("select \"sourceId\" from \"wqDeadLetter\" order by \"sourceId\"")
+                .getValues(0, String.class)).containsExactly("1", "2");
+        assertThat(watermarks.read()).contains(v(4));
     }
 
     /** {@code n} prizes with ids and versions (minutes after T0) {@code first .. first + n - 1}. */
