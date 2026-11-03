@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Map;
+import java.util.Set;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.slf4j.Logger;
@@ -95,27 +96,44 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
     }
 
     /**
-     * A polled {@code /wallet/delta} row that could not be decoded or applied (phase 6). The
-     * payload is the raw wire row, so it is replayable, minus the encrypted card, bank and e-mail
-     * fields and the xml/json blobs that are never projected (plan D4) -- a dead letter must not
-     * become a second copy of {@code walPayments}' PII. {@code source} and {@code sourceId} are
+     * A polled {@code /wallet/delta} row that could not be decoded or applied (phase 6). Only an
+     * ALLOWLIST of the row's top-level scalar fields is stored -- {@code allowedFields}, matched
+     * exactly -- so card, bank, e-mail and xml/json data ({@code walPayments} holds encrypted PII,
+     * plan D4) can never reach a dead letter, whatever its name, case or nesting: a field not on
+     * the list, or holding an object or array, is dropped. A row that is not a JSON object is stored
+     * as its node type and the SHA-256 of its bytes only. {@code source} and {@code sourceId} are
      * null when the row did not yield them.
      */
-    public void recordPolled(String stream, JsonNode row, SourceKind source, String sourceId, Exception error) {
-        Object payload = row;
-        if (row instanceof ObjectNode object) {
-            ObjectNode copy = object.deepCopy();
-            copy.remove(POLLED_PII_FIELDS);
-            payload = copy;
-        } else if (row == null) {
-            payload = rawBase64(new byte[0]);
-        }
-        write(stream, null, source == null ? null : (short) source.code(), sourceId, payload, error, 1);
+    public void recordPolled(
+            String stream, JsonNode row, Set<String> allowedFields, SourceKind source, String sourceId, Exception error) {
+        write(stream, null, source == null ? null : (short) source.code(), sourceId,
+                redact(row, allowedFields), error, 1);
     }
 
-    /** Never projected (plan D4) and never stored, not even in a dead letter. */
-    static final java.util.List<String> POLLED_PII_FIELDS = java.util.List.of(
-            "payCardNumber", "payBankAccount", "payEmail", "accountNumber", "xmlData", "jsonData");
+    private Object redact(JsonNode row, Set<String> allowedFields) {
+        if (row instanceof ObjectNode object) {
+            ObjectNode kept = objectMapper.createObjectNode();
+            object.fields().forEachRemaining(field -> {
+                if (allowedFields.contains(field.getKey()) && field.getValue().isValueNode()) {
+                    kept.set(field.getKey(), field.getValue());
+                }
+            });
+            return kept;
+        }
+        Map<String, String> marker = new java.util.LinkedHashMap<>();
+        marker.put("type", row == null ? "MISSING" : row.getNodeType().name());
+        marker.put("sha256", sha256(rawBytes(row)));
+        return marker;
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
     private void write(
             String stream, Long offset, Short source, String sourceId,

@@ -10,6 +10,7 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestClientResponseException;
 
 /**
  * Fetches one page of {@code /wallet/delta} (plan D1): {@code GET {base-url}/wallet/delta?{cursor-param}={since}},
@@ -59,18 +60,35 @@ public class DeltaClient {
                     .uri(uri -> uri.path(PATH).queryParam(properties.cursorParam(), since.toString()).build())
                     .retrieve()
                     .body(String.class);
+        } catch (RestClientResponseException e) {
+            // Never the response body, nor the exception (its message quotes the body): only the status.
+            throw new DeltaFetchException("GET " + PATH + " since " + since + " failed: HTTP "
+                    + e.getStatusCode().value() + " (" + e.getClass().getSimpleName() + ")");
         } catch (RestClientException e) {
-            throw new DeltaFetchException("GET " + PATH + " since " + since + " failed: " + e.getMessage(), e);
+            throw new DeltaFetchException("GET " + PATH + " since " + since + " failed: " + describe(e));
         }
         JsonNode page;
         try {
             page = body == null ? null : objectMapper.readTree(body);
         } catch (JsonProcessingException e) {
-            throw new DeltaFetchException("GET " + PATH + " returned a body that is not JSON", e);
+            // Not the parser's exception: its message quotes the offending body text.
+            throw new DeltaFetchException("GET " + PATH + " returned a body that is not JSON (" + describe(e) + ")");
         }
         if (!(page instanceof ArrayNode rows)) {
             throw new DeltaFetchException("GET " + PATH + " returned a body that is not a JSON array");
         }
         return rows;
+    }
+
+    /**
+     * Class names only, the cause chain included (a timeout reads "ResourceAccessException <-
+     * SocketTimeoutException"): exception messages may quote the response, so none is kept.
+     */
+    private static String describe(Throwable e) {
+        StringBuilder text = new StringBuilder(e.getClass().getSimpleName());
+        for (Throwable cause = e.getCause(); cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            text.append(" <- ").append(cause.getClass().getSimpleName());
+        }
+        return text.toString();
     }
 }

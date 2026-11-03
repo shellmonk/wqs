@@ -144,7 +144,7 @@ public class DeltaPoller {
                 DeltaRowDecoder.Identity identity = decoder.identify(node);
                 log.error("Cannot decode delta row {} (source {}); dead-lettering it",
                         identity.sourceId(), identity.source(), e);
-                deadLetters.recordPolled(STREAM, node, identity.source(), identity.sourceId(), e);
+                deadLetters.recordPolled(STREAM, node, DeltaRowDecoder.DEAD_LETTER_FIELDS, identity.source(), identity.sourceId(), e);
                 metrics.deadLettered();
                 version = identity.version();
             }

@@ -74,6 +74,26 @@ public class DeltaRowDecoder {
             "quantityType", "limitType", "period", "count", "gameGroup", "paymentMethodType", "channel",
             "effectiveFrom", "effectiveUntil", "approved", "reason");
 
+    /**
+     * The wire fields a poison row's dead letter may keep (security review): what the decoder reads
+     * -- source, ids, owners, timestamps, amounts, currency, type and product/batch fields -- and the
+     * D4 detail allowlists. Everything else (card, bank, e-mail, account, xml/json) is never stored.
+     */
+    public static final java.util.Set<String> DEAD_LETTER_FIELDS;
+
+    static {
+        java.util.Set<String> fields = new java.util.LinkedHashSet<>(List.of(
+                "source", "paymentId", "id", "ownerType", "ownerId", "playerId", "userType", "userId",
+                "created", "issued", "updated", "statusDate", "amount", "prizeAmount", "currency",
+                "paymentType", "paymentInOut", "operation", "transactionType", "limitType",
+                "productId", "productType", "batchId", "subBatchId"));
+        fields.addAll(PAYMENT_DETAIL);
+        fields.addAll(PRIZE_DETAIL);
+        fields.addAll(ADJUSTMENT_DETAIL);
+        fields.addAll(LIMIT_DETAIL);
+        DEAD_LETTER_FIELDS = java.util.Set.copyOf(fields);
+    }
+
     private final DeltaProperties properties;
 
     public DeltaRowDecoder(DeltaProperties properties) {

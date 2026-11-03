@@ -24,6 +24,9 @@ import java.util.List;
 import org.jooq.Record;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpMethod;
@@ -46,6 +49,7 @@ import wqs.projection.ProjectionWriter;
  * the real writer and tables (plan D7, D9). Page limit 5 and at most 3 pages per run (ruling R3).
  */
 @SpringBootTest
+@ExtendWith(OutputCaptureExtension.class)
 class DeltaPollerTest extends PostgresTestBase {
 
     private static final String BASE = "http://delta.test";
@@ -277,6 +281,46 @@ class DeltaPollerTest extends PostgresTestBase {
         assertThat(letters.get(1).get("sourceId", String.class)).isNull();
         assertThat(letters.get(1).get("payload", String.class)).contains("walMystery");
         assertThat(meters.counter("wqs.delta.rows", "outcome", "dead-lettered").count()).isEqualTo(deadLettered + 2);
+    }
+
+    /** Security review: a dead letter stores only allowlisted wire fields, never PII or blobs. */
+    @Test
+    void poison_payment_dead_letter_keeps_only_allowlisted_fields() {
+        String poison = payment("43", 1, USER, T0, v(5), 3, 7).replace("}",
+                ",\"payEmail\":\"ENC:mail\",\"payBankAccount\":\"ENC:bank\",\"PayCardNumber\":\"ENC:case\","
+                        + "\"description\":{\"payCardNumber\":\"ENC:nested\"},\"accountNumber\":\"10001234\"}");
+        expect(Instant.EPOCH, page(poison, "[\"ENC:in-an-array\"]", "\"ENC:a-scalar\""));
+
+        poller.runOnce();
+
+        server.verify();
+        List<String> payloads = dsl().fetch("select \"payload\"::text from \"wqDeadLetter\" order by \"deadLetterId\"")
+                .getValues(0, String.class);
+        assertThat(payloads).hasSize(3);
+        for (String payload : payloads) {
+            assertThat(payload).doesNotContain("ENC:").doesNotContainIgnoringCase("payCardNumber")
+                    .doesNotContain("payEmail").doesNotContain("payBankAccount").doesNotContain("xmlData")
+                    .doesNotContain("accountNumber").doesNotContain("<payment");
+        }
+        assertThat(payloads.get(0)).contains("\"paymentId\": 43").contains("\"paymentInOut\": 7")
+                .contains("\"status\": 3").doesNotContain("description");
+        assertThat(payloads.get(1)).contains("\"type\": \"ARRAY\"").contains("sha256");
+        assertThat(payloads.get(2)).contains("\"type\": \"STRING\"").contains("sha256");
+    }
+
+    /** Security review: an error response's body never reaches the exception or the log. */
+    @Test
+    void http_error_body_is_not_in_the_exception_or_the_log(CapturedOutput output) {
+        server.expect(requestTo(BASE + "/wallet/delta?from=" + Instant.EPOCH))
+                .andRespond(withServerError().body("SECRET-BODY").contentType(MediaType.TEXT_PLAIN));
+
+        Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(poller::runOnce);
+
+        assertThat(thrown).isInstanceOf(DeltaFetchException.class).hasMessageContaining("500");
+        java.io.StringWriter trace = new java.io.StringWriter();
+        thrown.printStackTrace(new java.io.PrintWriter(trace));
+        assertThat(trace.toString()).doesNotContain("SECRET-BODY");
+        assertThat(output.getAll()).contains("Delta poll failed").doesNotContain("SECRET-BODY");
     }
 
     /** A row the writer cannot apply (here: a month before the provisioning floor) fails alone. */
