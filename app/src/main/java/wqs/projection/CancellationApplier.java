@@ -1,30 +1,16 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_CC_HIGH_LEVEL;
-import static wqs.db.generated.Tables.WQ_CC_ITEM;
-import static wqs.db.generated.Tables.WQ_GROUP_LOCATOR;
-import static wqs.db.generated.Tables.WQ_ITEM_LOCATOR;
-import static wqs.db.generated.Tables.WQ_PLAY;
-import static wqs.db.generated.Tables.WQ_SESSION;
-import static wqs.db.generated.Tables.WQ_WEB_HIGH_LEVEL;
-import static wqs.db.generated.Tables.WQ_WEB_ITEM;
+import static wqs.projection.Binds.timestamptz;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import org.jooq.Condition;
-import org.jooq.DSLContext;
-import org.jooq.Record3;
-import org.jooq.Table;
-import org.jooq.TableField;
-import org.jooq.impl.DSL;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import wqs.db.TxTypeRegistry;
-import wqs.db.generated.tables.records.WqCcItemRecord;
-import wqs.db.generated.tables.records.WqSessionRecord;
 import wqs.domain.MoneyDirection;
 import wqs.domain.CounterSentinels;
 import wqs.domain.PageUnit;
@@ -78,15 +64,64 @@ public class CancellationApplier {
     private static final short KIND_SESSION = 0;
     private static final String SESSION_MARKER = "";
 
-    private final DSLContext dsl;
+    private static final String LOCATE = """
+            select "userId", "occurredAt", "zeroAmount" from "wqItemLocator"
+            where "source" = ? and "sourceId" = ? and "userId" = ?
+            """;
+    private static final String FETCH_ORIGINAL = """
+            select "userId", "occurredAt", "source", "sourceId", "productType", "batchId",
+                   "subBatchId", "type", "amount", "cancelled", "cancels"
+            from "wqCcItem"
+            where "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?
+            """;
+    private static final String SUBTRACT_FROM_PLAY = """
+            update "wqPlay" set
+                "txCountExclCancelled" = "wqPlay"."txCountExclCancelled" - ?,
+                "totalPlaysExclCancelled" = "wqPlay"."totalPlaysExclCancelled" - ?,
+                "totalWinsExclCancelled" = "wqPlay"."totalWinsExclCancelled" - ?,
+                "netExclCancelled" = "wqPlay"."netExclCancelled" - ?
+            where "userId" = ? and "startedAt" = ? and "batchId" = ? and "subBatchId" = ?
+            returning "txCountExclCancelled"
+            """;
+    private static final String SUBTRACT_FROM_SESSION = """
+            update "wqSession" set
+                "txCountExclCancelled" = "wqSession"."txCountExclCancelled" - ?,
+                "playCountExclCancelled" = "wqSession"."playCountExclCancelled" - ?,
+                "totalPlaysExclCancelled" = "wqSession"."totalPlaysExclCancelled" - ?,
+                "totalWinsExclCancelled" = "wqSession"."totalWinsExclCancelled" - ?,
+                "netExclCancelled" = "wqSession"."netExclCancelled" - ?
+            where "userId" = ? and "startedAt" = ? and "batchId" = ?
+            returning "userId", "batchId", "startedAt", "endedAt", "productType",
+                      "txCountExclCancelled", "playCountExclCancelled"
+            """;
+    private static final String GROUP_START = """
+            select "startedAt" from "wqGroupLocator"
+            where "userId" = ? and "batchId" = ? and "subBatchId" = ?
+            """;
+
+    private static final RowMapper<Located> LOCATED = (rs, n) -> new Located(
+            rs.getLong("userId"), rs.getObject("occurredAt", OffsetDateTime.class),
+            rs.getBoolean("zeroAmount"));
+    private static final RowMapper<Original> ORIGINAL = (rs, n) -> new Original(
+            rs.getLong("userId"), rs.getObject("occurredAt", OffsetDateTime.class),
+            rs.getShort("source"), rs.getString("sourceId"), rs.getString("productType"),
+            rs.getString("batchId"), rs.getString("subBatchId"), rs.getShort("type"),
+            rs.getBigDecimal("amount"), rs.getBoolean("cancelled"), rs.getString("cancels"));
+    private static final RowMapper<Session> SESSION = (rs, n) -> new Session(
+            rs.getLong("userId"), rs.getString("batchId"),
+            rs.getObject("startedAt", OffsetDateTime.class),
+            rs.getObject("endedAt", OffsetDateTime.class), rs.getString("productType"),
+            rs.getInt("txCountExclCancelled"), rs.getInt("playCountExclCancelled"));
+
+    private final JdbcClient jdbc;
     private final CounterUpdater counterUpdater;
     private final PendingCancelStore pendingCancelStore;
     private final TxTypeRegistry txTypes;
 
     public CancellationApplier(
-            DSLContext dsl, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
+            JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
             TxTypeRegistry txTypes) {
-        this.dsl = dsl;
+        this.jdbc = jdbc;
         this.counterUpdater = counterUpdater;
         this.pendingCancelStore = pendingCancelStore;
         this.txTypes = txTypes;
@@ -103,52 +138,52 @@ public class CancellationApplier {
         if (!cancel.isCancellation()) {
             throw new IllegalArgumentException("not a cancellation: " + cancel.sourceId());
         }
-        Record3<Long, OffsetDateTime, Boolean> located = locate(cancel);
+        Located located = locate(cancel);
         if (located == null) {
             pendingCancelStore.park(cancel);
             return false;
         }
-        if (located.value3()) {
+        if (located.zeroAmount()) {
             // A zero-amount original is in no view, rollup or counter (spec 4.1): the cancel
             // resolves -- it must not park -- and there is nothing to mark.
             return true;
         }
-        WqCcItemRecord original = fetchOriginal(cancel, located);
+        Original original = fetchOriginal(cancel, located);
 
-        SourceKind source = SourceKind.ofCode(original.getSource());
-        if (original.getCancelled()) {
+        SourceKind source = SourceKind.ofCode(original.source());
+        if (original.cancelled()) {
             lowerCancelledBy(cancel, original, source);
             return true;
         }
         markCancelled(cancel, original, source);
 
-        long userId = original.getUserId();
-        Instant occurredAt = original.getOccurredAt().toInstant();
+        long userId = original.userId();
+        Instant occurredAt = original.occurredAt().toInstant();
         for (ViewKind view : source.views()) {
             counterUpdater.uncountExclCancelled(
-                    userId, view, PageUnit.ITEM, original.getProductType(), original.getType(),
+                    userId, view, PageUnit.ITEM, original.productType(), original.type(),
                     occurredAt);
         }
 
         // A cancellation contributed to no rollup and no page unit, so cancelling one (should a
         // producer ever do so) has only the item-level effect above.
-        if (isCancellation(original.getCancels())) {
+        if (isCancellation(original.cancels())) {
             return true;
         }
 
-        if (original.getBatchId() == null) {
+        if (original.batchId() == null) {
             for (ViewKind view : source.views()) {
-                hide(view, userId, occurredAt, (short) source.code(), original.getSourceId(),
-                        original.getProductType());
+                hide(view, userId, occurredAt, (short) source.code(), original.sourceId(),
+                        original.productType());
             }
             return true;
         }
 
-        WqSessionRecord session = subtractFromRollups(original);
+        Session session = subtractFromRollups(original);
         for (ViewKind view : source.views()) {
             if (!sessionSurvivesIn(view, session)) {
-                hide(view, userId, session.getStartedAt().toInstant(), KIND_SESSION,
-                        session.getBatchId(), session.getProductType());
+                hide(view, userId, session.startedAt().toInstant(), KIND_SESSION,
+                        session.batchId(), session.productType());
             }
         }
         return true;
@@ -163,45 +198,41 @@ public class CancellationApplier {
      * expected mismatch, not a failure; an unexpected failure on the drain path is contained by
      * {@link DrainedCancelApplier}'s savepoint and dead-letters the cancel, never the original.
      */
-    private Record3<Long, OffsetDateTime, Boolean> locate(ProjectionItem cancel) {
-        return dsl
-                .select(WQ_ITEM_LOCATOR.userId, WQ_ITEM_LOCATOR.occurredAt, WQ_ITEM_LOCATOR.zeroAmount)
-                .from(WQ_ITEM_LOCATOR)
-                .where(WQ_ITEM_LOCATOR.source.eq((short) cancel.source().code()),
-                       WQ_ITEM_LOCATOR.sourceId.eq(cancel.cancels()),
-                       WQ_ITEM_LOCATOR.userId.eq(cancel.userId()))
-                .fetchOne();
+    private Located locate(ProjectionItem cancel) {
+        return jdbc.sql(LOCATE)
+                .params((short) cancel.source().code(), cancel.cancels(), cancel.userId())
+                .query(LOCATED)
+                .optional()
+                .orElse(null);
     }
 
     /** The located original, read from "wqCcItem" -- every source feeds /cc. */
-    private WqCcItemRecord fetchOriginal(ProjectionItem cancel, Record3<Long, OffsetDateTime, Boolean> located) {
-        return dsl.selectFrom(WQ_CC_ITEM)
-                .where(WQ_CC_ITEM.userId.eq(located.value1()),
-                       WQ_CC_ITEM.occurredAt.eq(located.value2()),
-                       WQ_CC_ITEM.source.eq((short) cancel.source().code()),
-                       WQ_CC_ITEM.sourceId.eq(cancel.cancels()))
-                .fetchSingle();
+    private Original fetchOriginal(ProjectionItem cancel, Located located) {
+        return jdbc.sql(FETCH_ORIGINAL)
+                .params(located.userId(), timestamptz(located.occurredAt()),
+                        (short) cancel.source().code(), cancel.cancels())
+                .query(ORIGINAL)
+                .single();
     }
 
-    private void markCancelled(ProjectionItem cancel, WqCcItemRecord original, SourceKind source) {
+    private void markCancelled(ProjectionItem cancel, Original original, SourceKind source) {
         for (ViewKind view : source.views()) {
             ItemTable t = ItemTable.of(view);
-            int rows = dsl.update(t.table())
-                    .set(t.cancelled(), true)
-                    .set(t.cancelledBy(), cancel.sourceId())
-                    .where(t.identifies(original))
-                    .execute();
+            int rows = jdbc.sql(t.markCancelled())
+                    .param(cancel.sourceId())
+                    .params(identifies(original))
+                    .update();
             requireOne(rows, "item row in " + view, original);
         }
     }
 
-    private void lowerCancelledBy(ProjectionItem cancel, WqCcItemRecord original, SourceKind source) {
+    private void lowerCancelledBy(ProjectionItem cancel, Original original, SourceKind source) {
         for (ViewKind view : source.views()) {
             ItemTable t = ItemTable.of(view);
-            int rows = dsl.update(t.table())
-                    .set(t.cancelledBy(), DSL.least(t.cancelledBy(), DSL.val(cancel.sourceId())))
-                    .where(t.identifies(original))
-                    .execute();
+            int rows = jdbc.sql(t.lowerCancelledBy())
+                    .param(cancel.sourceId())
+                    .params(identifies(original))
+                    .update();
             requireOne(rows, "item row in " + view, original);
         }
     }
@@ -211,59 +242,45 @@ public class CancellationApplier {
      *
      * @return the session row after the update (its current key and bounds)
      */
-    private WqSessionRecord subtractFromRollups(WqCcItemRecord original) {
-        long userId = original.getUserId();
-        String batchId = original.getBatchId();
+    private Session subtractFromRollups(Original original) {
+        long userId = original.userId();
+        String batchId = original.batchId();
         // Mirrors RollupUpdater exactly: direction by type, magnitude by abs(amount).
-        MoneyDirection direction = txTypes.directionOf(original.getType());
-        BigDecimal amount = original.getAmount().abs();
+        MoneyDirection direction = txTypes.directionOf(original.type());
+        BigDecimal amount = original.amount().abs();
         BigDecimal plays = direction == MoneyDirection.PLAY ? amount : BigDecimal.ZERO;
         BigDecimal wins = direction == MoneyDirection.WIN ? amount : BigDecimal.ZERO;
         BigDecimal net = wins.subtract(plays);
 
         boolean playEmptied = false;
-        if (original.getSubBatchId() != null) {
-            String subBatchId = original.getSubBatchId();
-            int survivors = dsl.update(WQ_PLAY)
-                    .set(WQ_PLAY.txCountExclCancelled, WQ_PLAY.txCountExclCancelled.minus(1))
-                    .set(WQ_PLAY.totalPlaysExclCancelled, WQ_PLAY.totalPlaysExclCancelled.minus(plays))
-                    .set(WQ_PLAY.totalWinsExclCancelled, WQ_PLAY.totalWinsExclCancelled.minus(wins))
-                    .set(WQ_PLAY.netExclCancelled, WQ_PLAY.netExclCancelled.minus(net))
-                    .where(WQ_PLAY.userId.eq(userId),
-                           WQ_PLAY.startedAt.eq(groupStart(userId, batchId, subBatchId)),
-                           WQ_PLAY.batchId.eq(batchId),
-                           WQ_PLAY.subBatchId.eq(subBatchId))
-                    .returning(WQ_PLAY.txCountExclCancelled)
-                    .fetchSingle()
-                    .getTxCountExclCancelled();
+        if (original.subBatchId() != null) {
+            String subBatchId = original.subBatchId();
+            OffsetDateTime playStart = groupStart(userId, batchId, subBatchId);
+            int survivors = jdbc.sql(SUBTRACT_FROM_PLAY)
+                    .params(1, plays, wins, net,
+                            userId, timestamptz(playStart), batchId, subBatchId)
+                    .query(Integer.class)
+                    .single();
             requireNonNegative(survivors, "play txCountExclCancelled", original);
             playEmptied = survivors == 0;
         }
 
-        WqSessionRecord session = dsl.update(WQ_SESSION)
-                .set(WQ_SESSION.txCountExclCancelled, WQ_SESSION.txCountExclCancelled.minus(1))
-                .set(WQ_SESSION.playCountExclCancelled,
-                        WQ_SESSION.playCountExclCancelled.minus(playEmptied ? 1 : 0))
-                .set(WQ_SESSION.totalPlaysExclCancelled, WQ_SESSION.totalPlaysExclCancelled.minus(plays))
-                .set(WQ_SESSION.totalWinsExclCancelled, WQ_SESSION.totalWinsExclCancelled.minus(wins))
-                .set(WQ_SESSION.netExclCancelled, WQ_SESSION.netExclCancelled.minus(net))
-                .where(WQ_SESSION.userId.eq(userId),
-                       WQ_SESSION.startedAt.eq(groupStart(userId, batchId, SESSION_MARKER)),
-                       WQ_SESSION.batchId.eq(batchId))
-                .returning()
-                .fetchSingle();
-        requireNonNegative(session.getTxCountExclCancelled(), "session txCountExclCancelled", original);
-        requireNonNegative(session.getPlayCountExclCancelled(), "session playCountExclCancelled", original);
+        OffsetDateTime sessionStart = groupStart(userId, batchId, SESSION_MARKER);
+        Session session = jdbc.sql(SUBTRACT_FROM_SESSION)
+                .params(1, playEmptied ? 1 : 0, plays, wins, net,
+                        userId, timestamptz(sessionStart), batchId)
+                .query(SESSION)
+                .single();
+        requireNonNegative(session.txCountExclCancelled(), "session txCountExclCancelled", original);
+        requireNonNegative(session.playCountExclCancelled(), "session playCountExclCancelled", original);
         return session;
     }
 
     private OffsetDateTime groupStart(long userId, String batchId, String subBatchId) {
-        return dsl.select(WQ_GROUP_LOCATOR.startedAt)
-                .from(WQ_GROUP_LOCATOR)
-                .where(WQ_GROUP_LOCATOR.userId.eq(userId),
-                       WQ_GROUP_LOCATOR.batchId.eq(batchId),
-                       WQ_GROUP_LOCATOR.subBatchId.eq(subBatchId))
-                .fetchSingle(WQ_GROUP_LOCATOR.startedAt);
+        return jdbc.sql(GROUP_START)
+                .params(userId, batchId, subBatchId)
+                .query((rs, n) -> rs.getObject("startedAt", OffsetDateTime.class))
+                .single();
     }
 
     /**
@@ -271,15 +288,12 @@ public class CancellationApplier {
      * in [startedAt, endedAt] (both fold over all of them), so the bound loses nothing and lets
      * the partitioned item table prune.
      */
-    private boolean sessionSurvivesIn(ViewKind view, WqSessionRecord session) {
-        ItemTable t = ItemTable.of(view);
-        return dsl.fetchExists(DSL.selectOne()
-                .from(t.table())
-                .where(t.userId().eq(session.getUserId()),
-                       t.occurredAt().between(session.getStartedAt(), session.getEndedAt()),
-                       t.batchId().eq(session.getBatchId()),
-                       t.cancelled().isFalse(),
-                       t.cancels().isNull().or(DSL.trim(t.cancels()).eq(""))));
+    private boolean sessionSurvivesIn(ViewKind view, Session session) {
+        return Boolean.TRUE.equals(jdbc.sql(ItemTable.of(view).survivor())
+                .params(session.userId(), timestamptz(session.startedAt()),
+                        timestamptz(session.endedAt()), session.batchId(), "")
+                .query(Boolean.class)
+                .single());
     }
 
     /**
@@ -289,15 +303,9 @@ public class CancellationApplier {
      */
     private void hide(ViewKind view, long userId, Instant at, short kind, String refId,
                       String productType) {
-        PageTable p = PageTable.of(view);
-        int rows = dsl.update(p.table())
-                .set(p.visible(), false)
-                .where(p.userId().eq(userId),
-                       p.occurredAt().eq(at.atOffset(ZoneOffset.UTC)),
-                       p.kind().eq(kind),
-                       p.refId().eq(refId),
-                       p.visible().isTrue())
-                .execute();
+        int rows = jdbc.sql(view == ViewKind.WEB ? HIDE_WEB : HIDE_CC)
+                .params(userId, timestamptz(at), kind, refId)
+                .update();
         if (rows != 1) {
             throw new IllegalStateException("expected to hide exactly one visible page-index row,"
                     + " hid " + rows + ": view=" + view + " userId=" + userId + " at=" + at
@@ -311,77 +319,85 @@ public class CancellationApplier {
         return cancels != null && !cancels.isBlank();
     }
 
-    private static void requireOne(int rows, String what, WqCcItemRecord original) {
+    private static void requireOne(int rows, String what, Original original) {
         if (rows != 1) {
             throw new IllegalStateException("expected exactly one " + what + ", got " + rows
                     + ": " + describe(original));
         }
     }
 
-    private static void requireNonNegative(int value, String what, WqCcItemRecord original) {
+    private static void requireNonNegative(int value, String what, Original original) {
         if (value < 0) {
             throw new IllegalStateException(what + " went negative (" + value
                     + ") cancelling " + describe(original));
         }
     }
 
-    private static String describe(WqCcItemRecord original) {
-        return "userId=" + original.getUserId() + " source=" + original.getSource()
-                + " sourceId=" + original.getSourceId() + " occurredAt=" + original.getOccurredAt();
+    private static String describe(Original original) {
+        return "userId=" + original.userId() + " source=" + original.source()
+                + " sourceId=" + original.sourceId() + " occurredAt=" + original.occurredAt();
     }
 
-    /** The two item tables share a column shape; this selects one by view. */
-    private record ItemTable(
-            Table<?> table,
-            TableField<?, Long> userId,
-            TableField<?, OffsetDateTime> occurredAt,
-            TableField<?, Short> source,
-            TableField<?, String> sourceId,
-            TableField<?, String> batchId,
-            TableField<?, Boolean> cancelled,
-            TableField<?, String> cancelledBy,
-            TableField<?, String> cancels) {
+    /** The original's full identity: partition key first, so the update prunes. */
+    private static Object[] identifies(Original original) {
+        return new Object[] {original.userId(), timestamptz(original.occurredAt()), original.source(),
+                original.sourceId()};
+    }
 
-        static final ItemTable WEB = new ItemTable(WQ_WEB_ITEM,
-                WQ_WEB_ITEM.userId, WQ_WEB_ITEM.occurredAt, WQ_WEB_ITEM.source,
-                WQ_WEB_ITEM.sourceId, WQ_WEB_ITEM.batchId, WQ_WEB_ITEM.cancelled,
-                WQ_WEB_ITEM.cancelledBy, WQ_WEB_ITEM.cancels);
-        static final ItemTable CC = new ItemTable(WQ_CC_ITEM,
-                WQ_CC_ITEM.userId, WQ_CC_ITEM.occurredAt, WQ_CC_ITEM.source,
-                WQ_CC_ITEM.sourceId, WQ_CC_ITEM.batchId, WQ_CC_ITEM.cancelled,
-                WQ_CC_ITEM.cancelledBy, WQ_CC_ITEM.cancels);
+    /** The original's locator row. */
+    private record Located(long userId, OffsetDateTime occurredAt, boolean zeroAmount) {
+    }
+
+    /** The columns of the original's "wqCcItem" row that a cancel reads. */
+    private record Original(
+            long userId, OffsetDateTime occurredAt, short source, String sourceId,
+            String productType, String batchId, String subBatchId, short type, BigDecimal amount,
+            boolean cancelled, String cancels) {
+    }
+
+    /** The session row after a cancel's subtraction: its key, bounds and survivor tallies. */
+    private record Session(
+            long userId, String batchId, OffsetDateTime startedAt, OffsetDateTime endedAt,
+            String productType, int txCountExclCancelled, int playCountExclCancelled) {
+    }
+
+    private static final String HIDE = """
+            update "%s" set "visibleExclCancelled" = false
+            where "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?
+              and "visibleExclCancelled" = true
+            """;
+    private static final String HIDE_WEB = HIDE.formatted("wqWebHighLevel");
+    private static final String HIDE_CC = HIDE.formatted("wqCcHighLevel");
+
+    /** The two item tables share a column shape; this carries one table's statements. */
+    private record ItemTable(String markCancelled, String lowerCancelledBy, String survivor) {
+
+        private static final String IDENTIFIES = """
+                "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?""";
+
+        static final ItemTable WEB = of("wqWebItem");
+        static final ItemTable CC = of("wqCcItem");
 
         static ItemTable of(ViewKind view) {
             return view == ViewKind.WEB ? WEB : CC;
         }
 
-        /** The original's full identity: partition key first, so the update prunes. */
-        Condition identifies(WqCcItemRecord original) {
-            return userId.eq(original.getUserId())
-                    .and(occurredAt.eq(original.getOccurredAt()))
-                    .and(source.eq(original.getSource()))
-                    .and(sourceId.eq(original.getSourceId()));
-        }
-    }
-
-    /** The two page-index tables share a column shape; this selects one by view. */
-    private record PageTable(
-            Table<?> table,
-            TableField<?, Long> userId,
-            TableField<?, OffsetDateTime> occurredAt,
-            TableField<?, Short> kind,
-            TableField<?, String> refId,
-            TableField<?, Boolean> visible) {
-
-        static final PageTable WEB = new PageTable(WQ_WEB_HIGH_LEVEL,
-                WQ_WEB_HIGH_LEVEL.userId, WQ_WEB_HIGH_LEVEL.occurredAt, WQ_WEB_HIGH_LEVEL.kind,
-                WQ_WEB_HIGH_LEVEL.refId, WQ_WEB_HIGH_LEVEL.visibleExclCancelled);
-        static final PageTable CC = new PageTable(WQ_CC_HIGH_LEVEL,
-                WQ_CC_HIGH_LEVEL.userId, WQ_CC_HIGH_LEVEL.occurredAt, WQ_CC_HIGH_LEVEL.kind,
-                WQ_CC_HIGH_LEVEL.refId, WQ_CC_HIGH_LEVEL.visibleExclCancelled);
-
-        static PageTable of(ViewKind view) {
-            return view == ViewKind.WEB ? WEB : CC;
+        private static ItemTable of(String table) {
+            return new ItemTable(
+                    """
+                    update "%s" set "cancelled" = true, "cancelledBy" = ?
+                    where %s
+                    """.formatted(table, IDENTIFIES),
+                    """
+                    update "%1$s" set "cancelledBy" = least("%1$s"."cancelledBy", ?)
+                    where %2$s
+                    """.formatted(table, IDENTIFIES),
+                    """
+                    select exists (
+                        select 1 from "%s"
+                        where "userId" = ? and "occurredAt" between ? and ? and "batchId" = ?
+                          and "cancelled" = false and ("cancels" is null or trim("cancels") = ?))
+                    """.formatted(table));
         }
     }
 }

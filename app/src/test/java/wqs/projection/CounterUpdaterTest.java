@@ -6,7 +6,6 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.YearMonth;
 import java.util.List;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import wqs.db.PartitionManager;
@@ -31,7 +30,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     private void run(java.util.function.Consumer<CounterUpdater> action) {
-        dsl().transaction(cfg -> action.accept(new CounterUpdater(DSL.using(cfg))));
+        tx().executeWithoutResult(status -> action.accept(new CounterUpdater(jdbc())));
     }
 
     @Test

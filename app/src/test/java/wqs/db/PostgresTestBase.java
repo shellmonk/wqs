@@ -47,6 +47,15 @@ public abstract class PostgresTestBase {
         return org.springframework.jdbc.core.simple.JdbcClient.create(dataSource);
     }
 
+    /**
+     * A transaction template over the shared container, for tests that build updaters by hand: a
+     * {@link #jdbc()} client joins the transaction it opens, as the app's writer does.
+     */
+    protected static org.springframework.transaction.support.TransactionTemplate tx() {
+        return new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+    }
+
     private static volatile TxTypeRegistry txTypes;
 
     /**

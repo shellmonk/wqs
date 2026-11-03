@@ -1,17 +1,14 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_CC_ITEM;
-import static wqs.db.generated.Tables.WQ_ITEM_LOCATOR;
-import static wqs.db.generated.Tables.WQ_WEB_ITEM;
+import static wqs.projection.Binds.text;
+import static wqs.projection.Binds.timestamptz;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Objects;
-import org.jooq.DSLContext;
-import org.jooq.JSONB;
-import org.jooq.Record;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -41,32 +38,61 @@ public class VersionedApplier {
     /** The stored identity of a polled row: its locator. */
     record Stored(long userId, Instant occurredAt, long itemId, Instant versionAt) {}
 
-    private final DSLContext dsl;
+    private static final String LOCATOR = """
+            select "userId", "occurredAt", "itemId", "versionAt" from "wqItemLocator"
+            where "source" = ? and "sourceId" = ?
+            """;
+    private static final String CC_IMMUTABLES = """
+            select "amount", "currency", "type", "productId", "productType", "batchId", "subBatchId"
+            from "wqCcItem"
+            where "userId" = ? and "occurredAt" = ? and "itemId" = ?
+            """;
+    private static final String UPDATE_DETAIL = """
+            update "%s" set "detail" = cast(? as jsonb)
+            where "userId" = ? and "occurredAt" = ? and "itemId" = ?
+            """;
+    private static final String UPDATE_WEB_DETAIL = UPDATE_DETAIL.formatted("wqWebItem");
+    private static final String UPDATE_CC_DETAIL = UPDATE_DETAIL.formatted("wqCcItem");
+    private static final String UPDATE_VERSION = """
+            update "wqItemLocator" set "versionAt" = ?
+            where "source" = ? and "sourceId" = ?
+            """;
 
-    public VersionedApplier(DSLContext dsl) {
-        this.dsl = dsl;
+    /** A locator row as read; {@code versionAt} is null for a stream item. */
+    private record Locator(long userId, OffsetDateTime occurredAt, long itemId, OffsetDateTime versionAt) {}
+
+    /** The immutable fields (D6) of a stored /cc item row. */
+    private record Immutables(
+            BigDecimal amount, String currency, short type, String productId, String productType,
+            String batchId, String subBatchId) {}
+
+    private final JdbcClient jdbc;
+
+    public VersionedApplier(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     /** The row's locator, or null on first sight. */
     @Transactional(propagation = Propagation.MANDATORY)
     public Stored stored(DeltaRow row) {
-        Record locator = dsl.select(WQ_ITEM_LOCATOR.userId, WQ_ITEM_LOCATOR.occurredAt,
-                        WQ_ITEM_LOCATOR.itemId, WQ_ITEM_LOCATOR.versionAt)
-                .from(WQ_ITEM_LOCATOR)
-                .where(WQ_ITEM_LOCATOR.source.eq((short) row.source().code()),
-                       WQ_ITEM_LOCATOR.sourceId.eq(row.item().sourceId()))
-                .fetchOne();
+        Locator locator = jdbc.sql(LOCATOR)
+                .params((short) row.source().code(), row.item().sourceId())
+                .query((rs, n) -> new Locator(rs.getLong("userId"),
+                        rs.getObject("occurredAt", OffsetDateTime.class), rs.getLong("itemId"),
+                        rs.getObject("versionAt", OffsetDateTime.class)))
+                .optional()
+                .orElse(null);
         if (locator == null) {
             return null;
         }
-        OffsetDateTime versionAt = locator.get(WQ_ITEM_LOCATOR.versionAt);
+        OffsetDateTime versionAt = locator.versionAt();
         if (versionAt == null) {
             // Only stream items lack a version, and no polled source shares their source code.
             throw new IllegalStateException("polled row " + row.source() + "/" + row.item().sourceId()
                     + " has a locator without a version");
         }
-        return new Stored(locator.get(WQ_ITEM_LOCATOR.userId), locator.get(WQ_ITEM_LOCATOR.occurredAt).toInstant(),
-                locator.get(WQ_ITEM_LOCATOR.itemId), versionAt.toInstant());
+        return new Stored(locator.userId(), locator.occurredAt().toInstant(),
+                locator.itemId(), versionAt.toInstant());
     }
 
     static Verdict verdict(DeltaRow row, Stored stored) {
@@ -95,36 +121,36 @@ public class VersionedApplier {
         if (!stored(item.occurredAt()).equals(stored.occurredAt())) {
             return "occurredAt";
         }
-        Record cc = dsl.select(WQ_CC_ITEM.amount, WQ_CC_ITEM.currency, WQ_CC_ITEM.type, WQ_CC_ITEM.productId,
-                        WQ_CC_ITEM.productType, WQ_CC_ITEM.batchId, WQ_CC_ITEM.subBatchId)
-                .from(WQ_CC_ITEM)
-                .where(WQ_CC_ITEM.userId.eq(stored.userId()),
-                       WQ_CC_ITEM.occurredAt.eq(stored.occurredAt().atOffset(ZoneOffset.UTC)),
-                       WQ_CC_ITEM.itemId.eq(stored.itemId()))
-                .fetchOne();
+        Immutables cc = jdbc.sql(CC_IMMUTABLES)
+                .params(stored.userId(), timestamptz(stored.occurredAt()), stored.itemId())
+                .query((rs, n) -> new Immutables(rs.getBigDecimal("amount"), rs.getString("currency"),
+                        rs.getShort("type"), rs.getString("productId"), rs.getString("productType"),
+                        rs.getString("batchId"), rs.getString("subBatchId")))
+                .optional()
+                .orElse(null);
         if (cc == null) {
             throw new IllegalStateException("polled row " + row.source() + "/" + item.sourceId()
                     + " has a locator but no /cc item row");
         }
-        if (cc.get(WQ_CC_ITEM.amount).compareTo(item.amount()) != 0) {
+        if (cc.amount().compareTo(item.amount()) != 0) {
             return "amount";
         }
-        if (!cc.get(WQ_CC_ITEM.currency).stripTrailing().equals(item.currency())) {
+        if (!cc.currency().stripTrailing().equals(item.currency())) {
             return "currency";
         }
-        if (cc.get(WQ_CC_ITEM.type) != item.type()) {
+        if (cc.type() != item.type()) {
             return "type";
         }
-        if (!Objects.equals(cc.get(WQ_CC_ITEM.productId), item.productId())) {
+        if (!Objects.equals(cc.productId(), item.productId())) {
             return "productId";
         }
-        if (!Objects.equals(cc.get(WQ_CC_ITEM.productType), item.productType())) {
+        if (!Objects.equals(cc.productType(), item.productType())) {
             return "productType";
         }
-        if (!Objects.equals(cc.get(WQ_CC_ITEM.batchId), item.batchId())) {
+        if (!Objects.equals(cc.batchId(), item.batchId())) {
             return "batchId";
         }
-        if (!Objects.equals(cc.get(WQ_CC_ITEM.subBatchId), item.subBatchId())) {
+        if (!Objects.equals(cc.subBatchId(), item.subBatchId())) {
             return "subBatchId";
         }
         return null;
@@ -133,32 +159,23 @@ public class VersionedApplier {
     /** Replaces "detail" in every view the source feeds, then the stored version. */
     @Transactional(propagation = Propagation.MANDATORY)
     public void applyNewer(DeltaRow row, Stored stored) {
-        JSONB detail = row.item().detailJson() == null ? null : JSONB.valueOf(row.item().detailJson());
-        OffsetDateTime occurredAt = stored.occurredAt().atOffset(ZoneOffset.UTC);
+        String detail = row.item().detailJson();
         for (ViewKind view : row.source().views()) {
-            int updated = switch (view) {
-                case WEB -> dsl.update(WQ_WEB_ITEM)
-                        .set(WQ_WEB_ITEM.detail, detail)
-                        .where(WQ_WEB_ITEM.userId.eq(stored.userId()),
-                               WQ_WEB_ITEM.occurredAt.eq(occurredAt),
-                               WQ_WEB_ITEM.itemId.eq(stored.itemId()))
-                        .execute();
-                case CC -> dsl.update(WQ_CC_ITEM)
-                        .set(WQ_CC_ITEM.detail, detail)
-                        .where(WQ_CC_ITEM.userId.eq(stored.userId()),
-                               WQ_CC_ITEM.occurredAt.eq(occurredAt),
-                               WQ_CC_ITEM.itemId.eq(stored.itemId()))
-                        .execute();
+            String sql = switch (view) {
+                case WEB -> UPDATE_WEB_DETAIL;
+                case CC -> UPDATE_CC_DETAIL;
             };
+            int updated = jdbc.sql(sql)
+                    .params(text(detail), stored.userId(), timestamptz(stored.occurredAt()), stored.itemId())
+                    .update();
             if (updated != 1) {
                 throw new IllegalStateException("polled row " + row.source() + "/" + row.item().sourceId()
                         + " has no " + view + " item row to update");
             }
         }
-        dsl.update(WQ_ITEM_LOCATOR)
-                .set(WQ_ITEM_LOCATOR.versionAt, stored(row.version()).atOffset(ZoneOffset.UTC))
-                .where(WQ_ITEM_LOCATOR.source.eq((short) row.source().code()),
-                       WQ_ITEM_LOCATOR.sourceId.eq(row.item().sourceId()))
-                .execute();
+        jdbc.sql(UPDATE_VERSION)
+                .params(timestamptz(stored(row.version())), (short) row.source().code(),
+                        row.item().sourceId())
+                .update();
     }
 }

@@ -1,24 +1,24 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_GROUP_LOCATOR;
-import static wqs.db.generated.Tables.WQ_PLAY;
-import static wqs.db.generated.Tables.WQ_SESSION;
+import static wqs.projection.Binds.text;
+import static wqs.projection.Binds.timestamptz;
 
 import java.math.BigDecimal;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
-import org.jooq.Condition;
-import org.jooq.DSLContext;
-import org.jooq.Field;
-import org.jooq.impl.DSL;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.SqlParameterValue;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.jooq.Record2;
 import wqs.db.TxTypeRegistry;
-import wqs.db.generated.tables.records.WqPlayRecord;
-import wqs.db.generated.tables.records.WqSessionRecord;
 import wqs.domain.MoneyDirection;
 import wqs.domain.ProjectionItem;
 
@@ -65,11 +65,114 @@ public class RollupUpdater {
      */
     private static final String SESSION_MARKER = "";
 
-    private final DSLContext dsl;
+    private static final String CLAIM = """
+            insert into "wqGroupLocator" ("userId", "batchId", "subBatchId", "startedAt")
+            values (?, ?, ?, ?)
+            on conflict do nothing
+            """;
+    private static final String LOCK_ANCHOR = """
+            select "startedAt" from "wqGroupLocator"
+            where "userId" = ? and "batchId" = ? and "subBatchId" = ?
+            for update
+            """;
+    private static final String MOVE_ANCHOR = """
+            update "wqGroupLocator" set "startedAt" = ?
+            where "userId" = ? and "batchId" = ? and "subBatchId" = ?
+            """;
+    private static final String SESSION_PRODUCT = """
+            select "productId", "productType" from "wqSession"
+            where "userId" = ? and "startedAt" = ? and "batchId" = ?
+            """;
+
+    /** Every column of "wqPlay" / "wqSession", so a re-keyed row is re-inserted whole. */
+    private static final String PLAY_COLUMNS = """
+            "userId", "batchId", "subBatchId", "startedAt", "endedAt", "productId", "currency", \
+            "txCount", "txCountExclCancelled", "totalPlays", "totalWins", "net", \
+            "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled", "productType", \
+            "firstSourceId", "firstSource"\
+            """;
+    private static final String SESSION_COLUMNS = """
+            "userId", "batchId", "startedAt", "endedAt", "productId", "currency", "txCount", \
+            "txCountExclCancelled", "playCount", "playCountExclCancelled", "totalPlays", "totalWins", \
+            "net", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled", \
+            "productType", "firstSourceId", "firstSource"\
+            """;
+    private static final String DELETE_PLAY = """
+            delete from "wqPlay"
+            where "userId" = ? and "startedAt" = ? and "batchId" = ? and "subBatchId" = ?
+            returning %s
+            """.formatted(PLAY_COLUMNS);
+    private static final String DELETE_SESSION = """
+            delete from "wqSession"
+            where "userId" = ? and "startedAt" = ? and "batchId" = ?
+            returning %s
+            """.formatted(SESSION_COLUMNS);
+    private static final String REINSERT_PLAY = """
+            insert into "wqPlay" (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.formatted(PLAY_COLUMNS);
+    private static final String REINSERT_SESSION = """
+            insert into "wqSession" (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.formatted(SESSION_COLUMNS);
+
+    /**
+     * The fold. {@code %1$s} is the table, {@code %2$s} the "first item" condition from
+     * {@link #isFirst}: an SQL constant chosen in Java, never a value.
+     */
+    private static final String UPSERT_PLAY = """
+            insert into %1$s ("userId", "batchId", "subBatchId", "startedAt", "endedAt", "productId",
+                    "productType", "currency", "firstSourceId", "firstSource", "txCount",
+                    "txCountExclCancelled", "totalPlays", "totalWins", "net", "totalPlaysExclCancelled",
+                    "totalWinsExclCancelled", "netExclCancelled")
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict ("userId", "startedAt", "batchId", "subBatchId") do update set
+                "endedAt" = greatest(%1$s."endedAt", excluded."endedAt"),
+                "productId" = case when %2$s then excluded."productId" else %1$s."productId" end,
+                "productType" = case when %2$s then excluded."productType" else %1$s."productType" end,
+                "firstSourceId" = case when %2$s then excluded."firstSourceId" else %1$s."firstSourceId" end,
+                "firstSource" = case when %2$s then excluded."firstSource" else %1$s."firstSource" end,
+                "txCount" = %1$s."txCount" + excluded."txCount",
+                "txCountExclCancelled" = %1$s."txCountExclCancelled" + excluded."txCountExclCancelled",
+                "totalPlays" = %1$s."totalPlays" + excluded."totalPlays",
+                "totalWins" = %1$s."totalWins" + excluded."totalWins",
+                "net" = %1$s."net" + excluded."net",
+                "totalPlaysExclCancelled" = %1$s."totalPlaysExclCancelled" + excluded."totalPlaysExclCancelled",
+                "totalWinsExclCancelled" = %1$s."totalWinsExclCancelled" + excluded."totalWinsExclCancelled",
+                "netExclCancelled" = %1$s."netExclCancelled" + excluded."netExclCancelled"
+            returning "txCountExclCancelled"
+            """;
+    private static final String UPSERT_SESSION = """
+            insert into %1$s ("userId", "batchId", "startedAt", "endedAt", "productId", "productType",
+                    "currency", "firstSourceId", "firstSource", "txCount", "txCountExclCancelled",
+                    "playCount", "playCountExclCancelled", "totalPlays", "totalWins", "net",
+                    "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict ("userId", "startedAt", "batchId") do update set
+                "endedAt" = greatest(%1$s."endedAt", excluded."endedAt"),
+                "productId" = case when %2$s then excluded."productId" else %1$s."productId" end,
+                "productType" = case when %2$s then excluded."productType" else %1$s."productType" end,
+                "firstSourceId" = case when %2$s then excluded."firstSourceId" else %1$s."firstSourceId" end,
+                "firstSource" = case when %2$s then excluded."firstSource" else %1$s."firstSource" end,
+                "txCount" = %1$s."txCount" + excluded."txCount",
+                "txCountExclCancelled" = %1$s."txCountExclCancelled" + excluded."txCountExclCancelled",
+                "playCount" = %1$s."playCount" + excluded."playCount",
+                "playCountExclCancelled" = %1$s."playCountExclCancelled" + excluded."playCountExclCancelled",
+                "totalPlays" = %1$s."totalPlays" + excluded."totalPlays",
+                "totalWins" = %1$s."totalWins" + excluded."totalWins",
+                "net" = %1$s."net" + excluded."net",
+                "totalPlaysExclCancelled" = %1$s."totalPlaysExclCancelled" + excluded."totalPlaysExclCancelled",
+                "totalWinsExclCancelled" = %1$s."totalWinsExclCancelled" + excluded."totalWinsExclCancelled",
+                "netExclCancelled" = %1$s."netExclCancelled" + excluded."netExclCancelled"
+            returning "productId", "productType", "currency"
+            """;
+
+    private static final RowMapper<SessionLabel> SESSION_LABEL = (rs, n) -> new SessionLabel(
+            rs.getString("productId"), rs.getString("productType"), rs.getString("currency"));
+
+    private final JdbcClient jdbc;
     private final TxTypeRegistry txTypes;
 
-    public RollupUpdater(DSLContext dsl, TxTypeRegistry txTypes) {
-        this.dsl = dsl;
+    public RollupUpdater(JdbcClient jdbc, TxTypeRegistry txTypes) {
+        this.jdbc = jdbc;
         this.txTypes = txTypes;
     }
 
@@ -125,7 +228,7 @@ public class RollupUpdater {
         OffsetDateTime oldStart = session.previousStart() != null
                 ? session.previousStart()
                 : session.startedAt();
-        Record2<String, String> oldProduct = session.isNew() ? null : sessionProduct(item, oldStart);
+        Product oldProduct = session.isNew() ? null : sessionProduct(item, oldStart);
         if (session.previousStart() != null) {
             moveSession(item, session.previousStart(), session.startedAt());
         }
@@ -133,8 +236,8 @@ public class RollupUpdater {
 
         boolean keyChanged = !session.isNew()
                 && (session.previousStart() != null
-                        || !Objects.equals(oldProduct.value1(), label.productId())
-                        || !Objects.equals(oldProduct.value2(), label.productType()));
+                        || !Objects.equals(oldProduct.productId(), label.productId())
+                        || !Objects.equals(oldProduct.productType(), label.productType()));
         return new RollupResult(
                 session.isNew(),
                 playIsNew,
@@ -143,18 +246,19 @@ public class RollupUpdater {
                 label.productType(),
                 label.currency(),
                 keyChanged ? oldStart.toInstant() : null,
-                keyChanged ? oldProduct.value2() : null,
+                keyChanged ? oldProduct.productType() : null,
                 keyChanged);
     }
 
     /** The session's (productId, productType) before this item is folded in. */
-    private Record2<String, String> sessionProduct(ProjectionItem item, OffsetDateTime startedAt) {
-        return dsl.select(WQ_SESSION.productId, WQ_SESSION.productType)
-                .from(WQ_SESSION)
-                .where(WQ_SESSION.userId.eq(item.userId()),
-                       WQ_SESSION.startedAt.eq(startedAt),
-                       WQ_SESSION.batchId.eq(item.batchId()))
-                .fetchSingle();
+    private Product sessionProduct(ProjectionItem item, OffsetDateTime startedAt) {
+        return jdbc.sql(SESSION_PRODUCT)
+                .params(item.userId(), timestamptz(startedAt), item.batchId())
+                .query((rs, n) -> new Product(rs.getString("productId"), rs.getString("productType")))
+                .single();
+    }
+
+    private record Product(String productId, String productType) {
     }
 
     /**
@@ -162,106 +266,79 @@ public class RollupUpdater {
      * The locator row is locked for the rest of the transaction.
      */
     private Anchor claim(long userId, String batchId, String subBatchId, OffsetDateTime at) {
-        int created = dsl.insertInto(WQ_GROUP_LOCATOR)
-                .set(WQ_GROUP_LOCATOR.userId, userId)
-                .set(WQ_GROUP_LOCATOR.batchId, batchId)
-                .set(WQ_GROUP_LOCATOR.subBatchId, subBatchId)
-                .set(WQ_GROUP_LOCATOR.startedAt, at)
-                .onConflictDoNothing()
-                .execute();
+        int created = jdbc.sql(CLAIM)
+                .params(userId, batchId, subBatchId, timestamptz(at))
+                .update();
         if (created == 1) {
             return new Anchor(true, at, null);
         }
 
-        OffsetDateTime current = dsl.select(WQ_GROUP_LOCATOR.startedAt)
-                .from(WQ_GROUP_LOCATOR)
-                .where(WQ_GROUP_LOCATOR.userId.eq(userId),
-                       WQ_GROUP_LOCATOR.batchId.eq(batchId),
-                       WQ_GROUP_LOCATOR.subBatchId.eq(subBatchId))
-                .forUpdate()
-                .fetchSingle(WQ_GROUP_LOCATOR.startedAt);
+        OffsetDateTime current = jdbc.sql(LOCK_ANCHOR)
+                .params(userId, batchId, subBatchId)
+                .query((rs, n) -> rs.getObject("startedAt", OffsetDateTime.class))
+                .single();
         if (!at.isBefore(current)) {
             return new Anchor(false, current, null);
         }
 
-        dsl.update(WQ_GROUP_LOCATOR)
-                .set(WQ_GROUP_LOCATOR.startedAt, at)
-                .where(WQ_GROUP_LOCATOR.userId.eq(userId),
-                       WQ_GROUP_LOCATOR.batchId.eq(batchId),
-                       WQ_GROUP_LOCATOR.subBatchId.eq(subBatchId))
-                .execute();
+        jdbc.sql(MOVE_ANCHOR)
+                .params(timestamptz(at), userId, batchId, subBatchId)
+                .update();
         return new Anchor(false, at, current);
     }
 
     /** Re-keys the play row to an earlier startedAt, possibly into another partition. */
     private void movePlay(ProjectionItem item, OffsetDateTime from, OffsetDateTime to) {
-        WqPlayRecord row = dsl.deleteFrom(WQ_PLAY)
-                .where(WQ_PLAY.userId.eq(item.userId()),
-                       WQ_PLAY.startedAt.eq(from),
-                       WQ_PLAY.batchId.eq(item.batchId()),
-                       WQ_PLAY.subBatchId.eq(item.subBatchId()))
-                .returning()
-                .fetchSingle();
-        row.setStartedAt(to);
-        row.changed(true);
-        dsl.insertInto(WQ_PLAY).set(row).execute();
+        List<SqlParameterValue> row = jdbc.sql(DELETE_PLAY)
+                .params(item.userId(), timestamptz(from), item.batchId(), item.subBatchId())
+                .query(RollupUpdater::wholeRow)
+                .single();
+        jdbc.sql(REINSERT_PLAY).params(rekeyed(row, 3, to)).update();
     }
 
     /** Re-keys the session row to an earlier startedAt, possibly into another partition. */
     private void moveSession(ProjectionItem item, OffsetDateTime from, OffsetDateTime to) {
-        WqSessionRecord row = dsl.deleteFrom(WQ_SESSION)
-                .where(WQ_SESSION.userId.eq(item.userId()),
-                       WQ_SESSION.startedAt.eq(from),
-                       WQ_SESSION.batchId.eq(item.batchId()))
-                .returning()
-                .fetchSingle();
-        row.setStartedAt(to);
-        row.changed(true);
-        dsl.insertInto(WQ_SESSION).set(row).execute();
+        List<SqlParameterValue> row = jdbc.sql(DELETE_SESSION)
+                .params(item.userId(), timestamptz(from), item.batchId())
+                .query(RollupUpdater::wholeRow)
+                .single();
+        jdbc.sql(REINSERT_SESSION).params(rekeyed(row, 2, to)).update();
+    }
+
+    /**
+     * A deleted row's columns as typed binds, in RETURNING order: timestamptz read and bound as
+     * {@link OffsetDateTime}, every other column with its own JDBC type, so nulls and numeric
+     * scale survive the re-insert unchanged.
+     */
+    private static List<SqlParameterValue> wholeRow(ResultSet rs, int rowNum) throws SQLException {
+        ResultSetMetaData md = rs.getMetaData();
+        List<SqlParameterValue> values = new ArrayList<>(md.getColumnCount());
+        for (int i = 1; i <= md.getColumnCount(); i++) {
+            values.add("timestamptz".equals(md.getColumnTypeName(i))
+                    ? timestamptz(rs.getObject(i, OffsetDateTime.class))
+                    : new SqlParameterValue(md.getColumnType(i), rs.getObject(i)));
+        }
+        return values;
+    }
+
+    /** The row with its "startedAt" (at {@code startedAtIndex}, 0-based) replaced. */
+    private static List<SqlParameterValue> rekeyed(
+            List<SqlParameterValue> row, int startedAtIndex, OffsetDateTime to) {
+        List<SqlParameterValue> copy = new ArrayList<>(row);
+        copy.set(startedAtIndex, timestamptz(to));
+        return copy;
     }
 
     /** @return the play's txCountExclCancelled after the fold. */
     private int upsertPlay(Contribution c, Anchor anchor) {
         ProjectionItem item = c.item();
-        OffsetDateTime startedAt = anchor.startedAt();
-        Condition first = isFirst(c, anchor, WQ_PLAY.firstSourceId, WQ_PLAY.firstSource);
-        return dsl.insertInto(WQ_PLAY)
-                .set(WQ_PLAY.userId, item.userId())
-                .set(WQ_PLAY.batchId, item.batchId())
-                .set(WQ_PLAY.subBatchId, item.subBatchId())
-                .set(WQ_PLAY.startedAt, startedAt)
-                .set(WQ_PLAY.endedAt, c.at())
-                .set(WQ_PLAY.productId, item.productId())
-                .set(WQ_PLAY.productType, item.productType())
-                .set(WQ_PLAY.currency, item.currency())
-                .set(WQ_PLAY.firstSourceId, item.sourceId())
-                .set(WQ_PLAY.firstSource, (short) item.source().code())
-                .set(WQ_PLAY.txCount, 1)
-                .set(WQ_PLAY.txCountExclCancelled, 1)
-                .set(WQ_PLAY.totalPlays, c.plays())
-                .set(WQ_PLAY.totalWins, c.wins())
-                .set(WQ_PLAY.net, c.net())
-                .set(WQ_PLAY.totalPlaysExclCancelled, c.plays())
-                .set(WQ_PLAY.totalWinsExclCancelled, c.wins())
-                .set(WQ_PLAY.netExclCancelled, c.net())
-                .onConflict(WQ_PLAY.userId, WQ_PLAY.startedAt, WQ_PLAY.batchId, WQ_PLAY.subBatchId)
-                .doUpdate()
-                .set(WQ_PLAY.endedAt, latest(WQ_PLAY.endedAt))
-                .set(WQ_PLAY.productId, ifFirst(first, WQ_PLAY.productId))
-                .set(WQ_PLAY.productType, ifFirst(first, WQ_PLAY.productType))
-                .set(WQ_PLAY.firstSourceId, ifFirst(first, WQ_PLAY.firstSourceId))
-                .set(WQ_PLAY.firstSource, ifFirst(first, WQ_PLAY.firstSource))
-                .set(WQ_PLAY.txCount, summed(WQ_PLAY.txCount))
-                .set(WQ_PLAY.txCountExclCancelled, summed(WQ_PLAY.txCountExclCancelled))
-                .set(WQ_PLAY.totalPlays, summed(WQ_PLAY.totalPlays))
-                .set(WQ_PLAY.totalWins, summed(WQ_PLAY.totalWins))
-                .set(WQ_PLAY.net, summed(WQ_PLAY.net))
-                .set(WQ_PLAY.totalPlaysExclCancelled, summed(WQ_PLAY.totalPlaysExclCancelled))
-                .set(WQ_PLAY.totalWinsExclCancelled, summed(WQ_PLAY.totalWinsExclCancelled))
-                .set(WQ_PLAY.netExclCancelled, summed(WQ_PLAY.netExclCancelled))
-                .returning(WQ_PLAY.txCountExclCancelled)
-                .fetchSingle()
-                .getTxCountExclCancelled();
+        return jdbc.sql(UPSERT_PLAY.formatted("\"wqPlay\"", isFirst(c, anchor, "\"wqPlay\"")))
+                .params(item.userId(), item.batchId(), item.subBatchId(), timestamptz(anchor.startedAt()),
+                        timestamptz(c.at()), text(item.productId()), text(item.productType()),
+                        item.currency(), item.sourceId(), (short) item.source().code(),
+                        1, 1, c.plays(), c.wins(), c.net(), c.plays(), c.wins(), c.net())
+                .query(Integer.class)
+                .single();
     }
 
     /**
@@ -273,88 +350,37 @@ public class RollupUpdater {
     private SessionLabel upsertSession(
             Contribution c, Anchor anchor, boolean playIsNew, boolean playIsLive) {
         ProjectionItem item = c.item();
-        OffsetDateTime startedAt = anchor.startedAt();
-        Condition first = isFirst(c, anchor, WQ_SESSION.firstSourceId, WQ_SESSION.firstSource);
         int playDelta = playIsNew ? 1 : 0;
         int playExclDelta = playIsLive ? 1 : 0;
-        return dsl.insertInto(WQ_SESSION)
-                .set(WQ_SESSION.userId, item.userId())
-                .set(WQ_SESSION.batchId, item.batchId())
-                .set(WQ_SESSION.startedAt, startedAt)
-                .set(WQ_SESSION.endedAt, c.at())
-                .set(WQ_SESSION.productId, item.productId())
-                .set(WQ_SESSION.productType, item.productType())
-                .set(WQ_SESSION.currency, item.currency())
-                .set(WQ_SESSION.firstSourceId, item.sourceId())
-                .set(WQ_SESSION.firstSource, (short) item.source().code())
-                .set(WQ_SESSION.txCount, 1)
-                .set(WQ_SESSION.txCountExclCancelled, 1)
-                .set(WQ_SESSION.playCount, playDelta)
-                .set(WQ_SESSION.playCountExclCancelled, playExclDelta)
-                .set(WQ_SESSION.totalPlays, c.plays())
-                .set(WQ_SESSION.totalWins, c.wins())
-                .set(WQ_SESSION.net, c.net())
-                .set(WQ_SESSION.totalPlaysExclCancelled, c.plays())
-                .set(WQ_SESSION.totalWinsExclCancelled, c.wins())
-                .set(WQ_SESSION.netExclCancelled, c.net())
-                .onConflict(WQ_SESSION.userId, WQ_SESSION.startedAt, WQ_SESSION.batchId)
-                .doUpdate()
-                .set(WQ_SESSION.endedAt, latest(WQ_SESSION.endedAt))
-                .set(WQ_SESSION.productId, ifFirst(first, WQ_SESSION.productId))
-                .set(WQ_SESSION.productType, ifFirst(first, WQ_SESSION.productType))
-                .set(WQ_SESSION.firstSourceId, ifFirst(first, WQ_SESSION.firstSourceId))
-                .set(WQ_SESSION.firstSource, ifFirst(first, WQ_SESSION.firstSource))
-                .set(WQ_SESSION.txCount, summed(WQ_SESSION.txCount))
-                .set(WQ_SESSION.txCountExclCancelled, summed(WQ_SESSION.txCountExclCancelled))
-                .set(WQ_SESSION.playCount, summed(WQ_SESSION.playCount))
-                .set(WQ_SESSION.playCountExclCancelled, summed(WQ_SESSION.playCountExclCancelled))
-                .set(WQ_SESSION.totalPlays, summed(WQ_SESSION.totalPlays))
-                .set(WQ_SESSION.totalWins, summed(WQ_SESSION.totalWins))
-                .set(WQ_SESSION.net, summed(WQ_SESSION.net))
-                .set(WQ_SESSION.totalPlaysExclCancelled, summed(WQ_SESSION.totalPlaysExclCancelled))
-                .set(WQ_SESSION.totalWinsExclCancelled, summed(WQ_SESSION.totalWinsExclCancelled))
-                .set(WQ_SESSION.netExclCancelled, summed(WQ_SESSION.netExclCancelled))
-                .returning(WQ_SESSION.productId, WQ_SESSION.productType, WQ_SESSION.currency)
-                .fetchSingle()
-                .map(r -> new SessionLabel(r.get(WQ_SESSION.productId),
-                        r.get(WQ_SESSION.productType), r.get(WQ_SESSION.currency)));
+        return jdbc.sql(UPSERT_SESSION.formatted("\"wqSession\"", isFirst(c, anchor, "\"wqSession\"")))
+                .params(item.userId(), item.batchId(), timestamptz(anchor.startedAt()), timestamptz(c.at()),
+                        text(item.productId()), text(item.productType()), item.currency(),
+                        item.sourceId(), (short) item.source().code(), 1, 1, playDelta, playExclDelta,
+                        c.plays(), c.wins(), c.net(), c.plays(), c.wins(), c.net())
+                .query(SESSION_LABEL)
+                .single();
     }
 
     /** The session's labels after a fold: the first item's product pair, and the currency. */
     private record SessionLabel(String productId, String productType, String currency) {
     }
 
-    /** existing + incoming, for ON CONFLICT DO UPDATE. */
-    private static <T extends Number> Field<T> summed(Field<T> field) {
-        return field.plus(DSL.excluded(field));
-    }
-
-    /** GREATEST(existing, incoming). */
-    private static <T> Field<T> latest(Field<T> field) {
-        return DSL.greatest(field, DSL.excluded(field));
-    }
-
     /**
-     * Whether the incoming item becomes the group's first item, for ON CONFLICT DO UPDATE. The
-     * claim has already moved the anchor to MIN(occurredAt), so: an item that re-anchored the
-     * group is strictly earliest; one later than the anchor is not first; one AT the anchor ties,
-     * and the lower (sourceId, source) wins -- the only comparison left to the database.
+     * Whether the incoming item becomes the group's first item, for ON CONFLICT DO UPDATE, as an
+     * SQL condition over {@code table}. The claim has already moved the anchor to
+     * MIN(occurredAt), so: an item that re-anchored the group is strictly earliest; one later than
+     * the anchor is not first; one AT the anchor ties, and the lower (sourceId, source) wins --
+     * the only comparison left to the database.
      */
-    private static Condition isFirst(
-            Contribution c, Anchor anchor, Field<String> firstSourceId, Field<Short> firstSource) {
+    private static String isFirst(Contribution c, Anchor anchor, String table) {
         if (anchor.previousStart() != null) {
-            return DSL.trueCondition();
+            return "true";
         }
         if (!c.at().isEqual(anchor.startedAt())) {
-            return DSL.falseCondition();
+            return "false";
         }
-        return DSL.row(DSL.excluded(firstSourceId), DSL.excluded(firstSource))
-                .lt(DSL.row(firstSourceId, firstSource));
-    }
-
-    /** The incoming value when the item is first, else the existing one. */
-    private static <T> Field<T> ifFirst(Condition first, Field<T> field) {
-        return DSL.when(first, DSL.excluded(field)).otherwise(field);
+        return "(excluded.\"firstSourceId\", excluded.\"firstSource\") < (" + table
+                + ".\"firstSourceId\", " + table + ".\"firstSource\")";
     }
 
     private record Contribution(

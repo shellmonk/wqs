@@ -1,10 +1,7 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_GROUP_LOCATOR;
-import static wqs.db.generated.Tables.WQ_SESSION;
-
 import java.util.Objects;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,11 +30,21 @@ public class IngestRules {
 
     private static final String SESSION_MARKER = "";
 
-    private final DSLContext dsl;
+    private static final String SESSION_CURRENCY = """
+            select "wqSession"."currency"
+            from "wqGroupLocator"
+            join "wqSession" on "wqSession"."userId" = "wqGroupLocator"."userId"
+                and "wqSession"."startedAt" = "wqGroupLocator"."startedAt"
+                and "wqSession"."batchId" = "wqGroupLocator"."batchId"
+            where "wqGroupLocator"."userId" = ? and "wqGroupLocator"."batchId" = ?
+              and "wqGroupLocator"."subBatchId" = ?
+            """;
+
+    private final JdbcClient jdbc;
     private final EInstantProperties eInstant;
 
-    public IngestRules(DSLContext dsl, EInstantProperties eInstant) {
-        this.dsl = dsl;
+    public IngestRules(JdbcClient jdbc, EInstantProperties eInstant) {
+        this.jdbc = jdbc;
         this.eInstant = eInstant;
     }
 
@@ -55,16 +62,11 @@ public class IngestRules {
         if (!item.isSessioned()) {
             return eInstant.isEInstant(item.productType()) ? RejectedItemDeadLetters.EINSTANT_UNSESSIONED : null;
         }
-        String sessionCurrency = dsl.select(WQ_SESSION.currency)
-                .from(WQ_GROUP_LOCATOR)
-                .join(WQ_SESSION).on(
-                        WQ_SESSION.userId.eq(WQ_GROUP_LOCATOR.userId),
-                        WQ_SESSION.startedAt.eq(WQ_GROUP_LOCATOR.startedAt),
-                        WQ_SESSION.batchId.eq(WQ_GROUP_LOCATOR.batchId))
-                .where(WQ_GROUP_LOCATOR.userId.eq(item.userId()),
-                       WQ_GROUP_LOCATOR.batchId.eq(item.batchId()),
-                       WQ_GROUP_LOCATOR.subBatchId.eq(SESSION_MARKER))
-                .fetchOne(WQ_SESSION.currency);
+        String sessionCurrency = jdbc.sql(SESSION_CURRENCY)
+                .params(item.userId(), item.batchId(), SESSION_MARKER)
+                .query(String.class)
+                .optional()
+                .orElse(null);
         if (sessionCurrency == null) {
             return null; // this item opens the session and sets its currency
         }

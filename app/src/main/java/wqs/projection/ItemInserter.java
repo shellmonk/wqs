@@ -1,14 +1,12 @@
 package wqs.projection;
 
-import static wqs.db.generated.Sequences.WQ_ITEM_ID_SEQ;
-import static wqs.db.generated.Tables.WQ_CC_ITEM;
-import static wqs.db.generated.Tables.WQ_ITEM_LOCATOR;
-import static wqs.db.generated.Tables.WQ_WEB_ITEM;
+import static wqs.projection.Binds.numeric;
+import static wqs.projection.Binds.text;
+import static wqs.projection.Binds.timestamptz;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import org.jooq.DSLContext;
-import org.jooq.JSONB;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,10 +22,32 @@ import wqs.domain.ViewKind;
 @Component
 public class ItemInserter {
 
-    private final DSLContext dsl;
+    private static final String NEXT_ITEM_ID = """
+            select nextval('"wqItemIdSeq"')
+            """;
+    private static final String GATE = """
+            insert into "wqItemLocator" ("source", "sourceId", "userId", "occurredAt", "itemId", "versionAt")
+            values (?, ?, ?, ?, ?, ?)
+            on conflict do nothing
+            """;
+    private static final String GATE_LOCATOR_ONLY = """
+            insert into "wqItemLocator" ("source", "sourceId", "userId", "occurredAt", "itemId", "zeroAmount", "cancels")
+            values (?, ?, ?, ?, nextval('"wqItemIdSeq"'), true, ?)
+            on conflict do nothing
+            """;
+    private static final String INSERT_ITEM = """
+            insert into "%s" ("userId", "itemId", "source", "sourceId", "occurredAt", "productId",
+                    "productType", "batchId", "subBatchId", "type", "amount", "currency", "balanceAfter",
+                    "cancels", "detail")
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
+            """;
+    private static final String INSERT_WEB_ITEM = INSERT_ITEM.formatted("wqWebItem");
+    private static final String INSERT_CC_ITEM = INSERT_ITEM.formatted("wqCcItem");
 
-    public ItemInserter(DSLContext dsl) {
-        this.dsl = dsl;
+    private final JdbcClient jdbc;
+
+    public ItemInserter(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     /**
@@ -47,18 +67,13 @@ public class ItemInserter {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public boolean insertIfAbsent(ProjectionItem item, java.time.Instant versionAt) {
-        long itemId = dsl.nextval(WQ_ITEM_ID_SEQ);
+        long itemId = jdbc.sql(NEXT_ITEM_ID).query(Long.class).single();
         OffsetDateTime occurredAt = item.occurredAt().atOffset(ZoneOffset.UTC);
 
-        int gated = dsl.insertInto(WQ_ITEM_LOCATOR)
-                .set(WQ_ITEM_LOCATOR.source, (short) item.source().code())
-                .set(WQ_ITEM_LOCATOR.sourceId, item.sourceId())
-                .set(WQ_ITEM_LOCATOR.userId, item.userId())
-                .set(WQ_ITEM_LOCATOR.occurredAt, occurredAt)
-                .set(WQ_ITEM_LOCATOR.itemId, itemId)
-                .set(WQ_ITEM_LOCATOR.versionAt, versionAt == null ? null : versionAt.atOffset(ZoneOffset.UTC))
-                .onConflictDoNothing()
-                .execute();
+        int gated = jdbc.sql(GATE)
+                .params((short) item.source().code(), item.sourceId(), item.userId(),
+                        timestamptz(occurredAt), itemId, timestamptz(versionAt))
+                .update();
 
         if (gated == 0) {
             return false;
@@ -82,58 +97,23 @@ public class ItemInserter {
         if (item.amount().signum() != 0) {
             throw new IllegalArgumentException("only a zero-amount item is locator-only: " + item.sourceId());
         }
-        return dsl.insertInto(WQ_ITEM_LOCATOR)
-                .set(WQ_ITEM_LOCATOR.source, (short) item.source().code())
-                .set(WQ_ITEM_LOCATOR.sourceId, item.sourceId())
-                .set(WQ_ITEM_LOCATOR.userId, item.userId())
-                .set(WQ_ITEM_LOCATOR.occurredAt, item.occurredAt().atOffset(ZoneOffset.UTC))
-                .set(WQ_ITEM_LOCATOR.itemId, dsl.nextval(WQ_ITEM_ID_SEQ))
-                .set(WQ_ITEM_LOCATOR.zeroAmount, true)
-                .set(WQ_ITEM_LOCATOR.cancels, item.cancels())
-                .onConflictDoNothing()
-                .execute() == 1;
+        return jdbc.sql(GATE_LOCATOR_ONLY)
+                .params((short) item.source().code(), item.sourceId(), item.userId(),
+                        timestamptz(item.occurredAt()), text(item.cancels()))
+                .update() == 1;
     }
 
     private void insertInto(ViewKind view, ProjectionItem item, long itemId, OffsetDateTime occurredAt) {
-        switch (view) {
-            case WEB -> dsl.insertInto(WQ_WEB_ITEM)
-                    .set(WQ_WEB_ITEM.userId, item.userId())
-                    .set(WQ_WEB_ITEM.itemId, itemId)
-                    .set(WQ_WEB_ITEM.source, (short) item.source().code())
-                    .set(WQ_WEB_ITEM.sourceId, item.sourceId())
-                    .set(WQ_WEB_ITEM.occurredAt, occurredAt)
-                    .set(WQ_WEB_ITEM.productId, item.productId())
-                    .set(WQ_WEB_ITEM.productType, item.productType())
-                    .set(WQ_WEB_ITEM.batchId, item.batchId())
-                    .set(WQ_WEB_ITEM.subBatchId, item.subBatchId())
-                    .set(WQ_WEB_ITEM.type, item.type())
-                    .set(WQ_WEB_ITEM.amount, item.amount())
-                    .set(WQ_WEB_ITEM.currency, item.currency())
-                    .set(WQ_WEB_ITEM.balanceAfter, item.balanceAfter())
-                    .set(WQ_WEB_ITEM.cancels, item.cancels())
-                    .set(WQ_WEB_ITEM.detail, detail(item))
-                    .execute();
-            case CC -> dsl.insertInto(WQ_CC_ITEM)
-                    .set(WQ_CC_ITEM.userId, item.userId())
-                    .set(WQ_CC_ITEM.itemId, itemId)
-                    .set(WQ_CC_ITEM.source, (short) item.source().code())
-                    .set(WQ_CC_ITEM.sourceId, item.sourceId())
-                    .set(WQ_CC_ITEM.occurredAt, occurredAt)
-                    .set(WQ_CC_ITEM.productId, item.productId())
-                    .set(WQ_CC_ITEM.productType, item.productType())
-                    .set(WQ_CC_ITEM.batchId, item.batchId())
-                    .set(WQ_CC_ITEM.subBatchId, item.subBatchId())
-                    .set(WQ_CC_ITEM.type, item.type())
-                    .set(WQ_CC_ITEM.amount, item.amount())
-                    .set(WQ_CC_ITEM.currency, item.currency())
-                    .set(WQ_CC_ITEM.balanceAfter, item.balanceAfter())
-                    .set(WQ_CC_ITEM.cancels, item.cancels())
-                    .set(WQ_CC_ITEM.detail, detail(item))
-                    .execute();
-        }
-    }
-
-    private static JSONB detail(ProjectionItem item) {
-        return item.detailJson() == null ? null : JSONB.valueOf(item.detailJson());
+        String sql = switch (view) {
+            case WEB -> INSERT_WEB_ITEM;
+            case CC -> INSERT_CC_ITEM;
+        };
+        jdbc.sql(sql)
+                .params(item.userId(), itemId, (short) item.source().code(), item.sourceId(),
+                        timestamptz(occurredAt), text(item.productId()), text(item.productType()),
+                        text(item.batchId()), text(item.subBatchId()), item.type(), item.amount(),
+                        text(item.currency()), numeric(item.balanceAfter()), text(item.cancels()),
+                        text(item.detailJson()))
+                .update();
     }
 }

@@ -1,21 +1,20 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_PENDING_CANCEL;
+import static wqs.projection.Binds.numeric;
+import static wqs.projection.Binds.text;
+import static wqs.projection.Binds.timestamptz;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import org.jooq.DSLContext;
-import org.jooq.Row3;
-import org.jooq.impl.DSL;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import wqs.db.generated.tables.records.WqPendingCancelRecord;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 
@@ -34,10 +33,50 @@ import wqs.domain.SourceKind;
 @Component
 public class PendingCancelStore {
 
-    private final DSLContext dsl;
+    private static final String PARK = """
+            insert into "wqPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "userId",
+                    "occurredAt", "productId", "productType", "batchId", "subBatchId", "type", "amount",
+                    "currency", "balanceAfter", "detail")
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict do nothing
+            """;
+    /** The targets arrive as three parallel arrays, so the statement is one whatever their number. */
+    private static final String DRAIN = """
+            delete from "wqPendingCancel"
+            where ("source", "cancelsSourceId", "userId") in (
+                select * from unnest(cast(? as smallint[]), cast(? as text[]), cast(? as bigint[])))
+            returning "source", "cancelSourceId", "cancelsSourceId", "userId", "occurredAt",
+                      "productId", "productType", "batchId", "subBatchId", "type", "amount",
+                      "currency", "balanceAfter", "detail"
+            """;
+    private static final String DEPTH = """
+            select count(*) from "wqPendingCancel"
+            """;
+    private static final String OLDEST = """
+            select min("parkedAt") from "wqPendingCancel"
+            """;
 
-    public PendingCancelStore(DSLContext dsl) {
-        this.dsl = dsl;
+    /** A parked row as the cancel that arrived. */
+    private static final RowMapper<ProjectionItem> CANCEL = (rs, n) -> new ProjectionItem(
+            rs.getLong("userId"),
+            SourceKind.ofCode(rs.getShort("source")),
+            rs.getString("cancelSourceId"),
+            rs.getObject("occurredAt", OffsetDateTime.class).toInstant(),
+            rs.getString("productId"),
+            rs.getString("productType"),
+            rs.getString("batchId"),
+            rs.getString("subBatchId"),
+            rs.getShort("type"),
+            rs.getBigDecimal("amount"),
+            rs.getString("currency"),
+            rs.getBigDecimal("balanceAfter"),
+            rs.getString("cancelsSourceId"),
+            rs.getString("detail"));
+
+    private final JdbcClient jdbc;
+
+    public PendingCancelStore(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     /** Parks a cancel; parking the same cancel again is a no-op. */
@@ -46,23 +85,13 @@ public class PendingCancelStore {
         if (!cancel.isCancellation()) {
             throw new IllegalArgumentException("not a cancellation: " + cancel.sourceId());
         }
-        dsl.insertInto(WQ_PENDING_CANCEL)
-                .set(WQ_PENDING_CANCEL.source, (short) cancel.source().code())
-                .set(WQ_PENDING_CANCEL.cancelSourceId, cancel.sourceId())
-                .set(WQ_PENDING_CANCEL.cancelsSourceId, cancel.cancels())
-                .set(WQ_PENDING_CANCEL.userId, cancel.userId())
-                .set(WQ_PENDING_CANCEL.occurredAt, cancel.occurredAt().atOffset(ZoneOffset.UTC))
-                .set(WQ_PENDING_CANCEL.productId, cancel.productId())
-                .set(WQ_PENDING_CANCEL.productType, cancel.productType())
-                .set(WQ_PENDING_CANCEL.batchId, cancel.batchId())
-                .set(WQ_PENDING_CANCEL.subBatchId, cancel.subBatchId())
-                .set(WQ_PENDING_CANCEL.type, cancel.type())
-                .set(WQ_PENDING_CANCEL.amount, cancel.amount())
-                .set(WQ_PENDING_CANCEL.currency, cancel.currency())
-                .set(WQ_PENDING_CANCEL.balanceAfter, cancel.balanceAfter())
-                .set(WQ_PENDING_CANCEL.detail, cancel.detailJson())
-                .onConflictDoNothing()
-                .execute();
+        jdbc.sql(PARK)
+                .params((short) cancel.source().code(), cancel.sourceId(), cancel.cancels(),
+                        cancel.userId(), timestamptz(cancel.occurredAt()), text(cancel.productId()),
+                        text(cancel.productType()), text(cancel.batchId()), text(cancel.subBatchId()),
+                        cancel.type(), cancel.amount(), text(cancel.currency()),
+                        numeric(cancel.balanceAfter()), text(cancel.detailJson()))
+                .update();
     }
 
     /**
@@ -75,48 +104,33 @@ public class PendingCancelStore {
         if (targets.isEmpty()) {
             return List.of();
         }
-        List<Row3<Short, String, Long>> keys = targets.stream()
-                .map(t -> DSL.row((short) t.source().code(), t.sourceId(), t.userId()))
-                .toList();
-        return dsl.deleteFrom(WQ_PENDING_CANCEL)
-                .where(DSL.row(WQ_PENDING_CANCEL.source, WQ_PENDING_CANCEL.cancelsSourceId,
-                                WQ_PENDING_CANCEL.userId)
-                        .in(keys))
-                .returning()
-                .fetch()
+        List<ItemRef> keys = List.copyOf(targets);
+        short[] sources = new short[keys.size()];
+        String[] sourceIds = new String[keys.size()];
+        long[] userIds = new long[keys.size()];
+        for (int i = 0; i < keys.size(); i++) {
+            sources[i] = (short) keys.get(i).source().code();
+            sourceIds[i] = keys.get(i).sourceId();
+            userIds[i] = keys.get(i).userId();
+        }
+        return jdbc.sql(DRAIN)
+                .params(sources, sourceIds, userIds)
+                .query(CANCEL)
+                .list()
                 .stream()
-                .sorted(Comparator.comparing(WqPendingCancelRecord::getSource)
-                        .thenComparing(WqPendingCancelRecord::getCancelSourceId))
-                .map(PendingCancelStore::toItem)
+                .sorted(Comparator.comparing((ProjectionItem c) -> (short) c.source().code())
+                        .thenComparing(ProjectionItem::sourceId))
                 .toList();
     }
 
     public int depth() {
-        return dsl.fetchCount(WQ_PENDING_CANCEL);
+        return jdbc.sql(DEPTH).query(Integer.class).single();
     }
 
     public Optional<Instant> oldestParkedAt() {
-        return Optional.ofNullable(dsl.select(DSL.min(WQ_PENDING_CANCEL.parkedAt))
-                        .from(WQ_PENDING_CANCEL)
-                        .fetchOne(0, OffsetDateTime.class))
+        return jdbc.sql(OLDEST)
+                .query((rs, n) -> rs.getObject(1, OffsetDateTime.class))
+                .optional()
                 .map(OffsetDateTime::toInstant);
-    }
-
-    private static ProjectionItem toItem(WqPendingCancelRecord r) {
-        return new ProjectionItem(
-                r.getUserId(),
-                SourceKind.ofCode(r.getSource()),
-                r.getCancelSourceId(),
-                r.getOccurredAt().toInstant(),
-                r.getProductId(),
-                r.getProductType(),
-                r.getBatchId(),
-                r.getSubBatchId(),
-                r.getType(),
-                r.getAmount(),
-                r.getCurrency(),
-                r.getBalanceAfter(),
-                r.getCancelsSourceId(),
-                r.getDetail());
     }
 }

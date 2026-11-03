@@ -1,7 +1,5 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_COUNT_DAY;
-import static wqs.db.generated.Tables.WQ_COUNT_MONTH;
 import static wqs.domain.CounterSentinels.ALL_PRODUCT_TYPES;
 import static wqs.domain.CounterSentinels.ALL_TYPES;
 
@@ -10,10 +8,7 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.Set;
-import org.jooq.DSLContext;
-import org.jooq.Record;
-import org.jooq.Table;
-import org.jooq.TableField;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -57,10 +52,13 @@ import wqs.domain.ViewKind;
 @Component
 public class CounterUpdater {
 
-    private final DSLContext dsl;
+    private static final Tier MONTH = Tier.of("wqCountMonth");
+    private static final Tier DAY = Tier.of("wqCountDay");
 
-    public CounterUpdater(DSLContext dsl) {
-        this.dsl = dsl;
+    private final JdbcClient jdbc;
+
+    public CounterUpdater(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     /** Counts one level-0 row in each view this item's source feeds. */
@@ -170,7 +168,7 @@ public class CounterUpdater {
     private void apply(
             Set<Key> keys, long userId, ViewKind view, PageUnit unit, int delta, boolean excl) {
         for (Key key : keys) {
-            Tier<?> tier = tier(key.month());
+            Tier tier = tier(key.month());
             if (delta > 0) {
                 increment(tier, userId, view, unit, key, excl);
             } else {
@@ -179,48 +177,57 @@ public class CounterUpdater {
         }
     }
 
-    private Tier<?> tier(boolean month) {
-        return month
-                ? new Tier<>(WQ_COUNT_MONTH, WQ_COUNT_MONTH.userId, WQ_COUNT_MONTH.viewKind,
-                        WQ_COUNT_MONTH.pageUnit, WQ_COUNT_MONTH.productType, WQ_COUNT_MONTH.typeId,
-                        WQ_COUNT_MONTH.period,
-                        WQ_COUNT_MONTH.cntAll, WQ_COUNT_MONTH.cntExclCancelled)
-                : new Tier<>(WQ_COUNT_DAY, WQ_COUNT_DAY.userId, WQ_COUNT_DAY.viewKind,
-                        WQ_COUNT_DAY.pageUnit, WQ_COUNT_DAY.productType, WQ_COUNT_DAY.typeId,
-                        WQ_COUNT_DAY.period,
-                        WQ_COUNT_DAY.cntAll, WQ_COUNT_DAY.cntExclCancelled);
+    private static Tier tier(boolean month) {
+        return month ? MONTH : DAY;
     }
 
-    /** The two counter tables share one column shape; this carries a table's typed columns. */
-    private record Tier<R extends Record>(
-            Table<R> table,
-            TableField<R, Long> userId,
-            TableField<R, Short> viewKind,
-            TableField<R, Short> pageUnit,
-            TableField<R, String> productType,
-            TableField<R, Short> typeId,
-            TableField<R, LocalDate> period,
-            TableField<R, Long> cntAll,
-            TableField<R, Long> cntExclCancelled) {}
+    /** The row key every statement below addresses, appended after its SET values. */
+    private static final String ROW_IS = """
+            where "userId" = ? and "viewKind" = ? and "pageUnit" = ? and "productType" = ?
+              and "typeId" = ? and "period" = ?
+            """;
 
-    private <R extends Record> void increment(
-            Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
+    /** The two counter tables share one column shape; this carries a table's statements. */
+    private record Tier(
+            String table,
+            String increment,
+            String decrement,
+            String decrementWithExcl,
+            String delete,
+            String decrementExcl,
+            String incrementExcl) {
+
+        static Tier of(String table) {
+            String t = "\"" + table + "\"";
+            return new Tier(
+                    table,
+                    """
+                    insert into %1$s ("userId", "viewKind", "pageUnit", "productType", "typeId", "period",
+                            "cntAll", "cntExclCancelled")
+                    values (?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict ("userId", "viewKind", "pageUnit", "productType", "typeId", "period")
+                    do update set "cntAll" = %1$s."cntAll" + ?,
+                                  "cntExclCancelled" = %1$s."cntExclCancelled" + ?
+                    """.formatted(t),
+                    ("update %1$s set \"cntAll\" = %1$s.\"cntAll\" - ?\n" + ROW_IS
+                            + "returning \"cntAll\"").formatted(t),
+                    ("update %1$s set \"cntAll\" = %1$s.\"cntAll\" - ?,"
+                            + " \"cntExclCancelled\" = %1$s.\"cntExclCancelled\" - ?\n" + ROW_IS
+                            + "returning \"cntAll\"").formatted(t),
+                    ("delete from %1$s\n" + ROW_IS).formatted(t),
+                    ("update %1$s set \"cntExclCancelled\" = %1$s.\"cntExclCancelled\" - ?\n" + ROW_IS)
+                            .formatted(t),
+                    ("update %1$s set \"cntExclCancelled\" = %1$s.\"cntExclCancelled\" + ?\n" + ROW_IS)
+                            .formatted(t));
+        }
+    }
+
+    private void increment(Tier t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
         long exclDelta = excl ? 1L : 0L;
-        dsl.insertInto(t.table())
-                .set(t.userId(), userId)
-                .set(t.viewKind(), (short) view.code())
-                .set(t.pageUnit(), unit.code())
-                .set(t.productType(), key.productType())
-                .set(t.typeId(), key.typeId())
-                .set(t.period(), key.period())
-                .set(t.cntAll(), 1L)
-                .set(t.cntExclCancelled(), exclDelta)
-                .onConflict(t.userId(), t.viewKind(), t.pageUnit(), t.productType(), t.typeId(),
-                        t.period())
-                .doUpdate()
-                .set(t.cntAll(), t.cntAll().plus(1L))
-                .set(t.cntExclCancelled(), t.cntExclCancelled().plus(exclDelta))
-                .execute();
+        jdbc.sql(t.increment())
+                .params(userId, (short) view.code(), unit.code(), key.productType(), key.typeId(),
+                        key.period(), 1L, exclDelta, 1L, exclDelta)
+                .update();
     }
 
     /**
@@ -229,61 +236,55 @@ public class CounterUpdater {
      * row at every key a page unit passed through, making stored state depend on arrival order
      * (spec P-1). cntExclCancelled &lt;= cntAll (CHECK), so a deleted row holds nothing.
      */
-    private <R extends Record> void decrement(
-            Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
-        var update = dsl.update(t.table()).set(t.cntAll(), t.cntAll().minus(1L));
-        var step = excl
-                ? update.set(t.cntExclCancelled(), t.cntExclCancelled().minus(1L))
-                : update;
-        Long remaining = step.where(rowIs(t, userId, view, unit, key))
-                .returning(t.cntAll())
-                .fetchOptional(t.cntAll())
+    private void decrement(Tier t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
+        var statement = excl
+                ? jdbc.sql(t.decrementWithExcl()).params(1L, 1L)
+                : jdbc.sql(t.decrement()).param(1L);
+        Long remaining = statement
+                .params(userId, (short) view.code(), unit.code(), key.productType(), key.typeId(),
+                        key.period())
+                .query(Long.class)
+                .optional()
                 .orElse(null);
         requireOneRow(remaining == null ? 0 : 1, t, userId, view, unit, key);
         if (remaining == 0L) {
-            dsl.deleteFrom(t.table())
-                    .where(rowIs(t, userId, view, unit, key))
-                    .execute();
+            jdbc.sql(t.delete())
+                    .params(rowIs(userId, view, unit, key))
+                    .update();
         }
     }
 
-    private <R extends Record> void decrementExcl(
-            Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
-        int rows = dsl.update(t.table())
-                .set(t.cntExclCancelled(), t.cntExclCancelled().minus(1L))
-                .where(rowIs(t, userId, view, unit, key))
-                .execute();
+    private void decrementExcl(Tier t, long userId, ViewKind view, PageUnit unit, Key key) {
+        int rows = jdbc.sql(t.decrementExcl())
+                .param(1L)
+                .params(rowIs(userId, view, unit, key))
+                .update();
         requireOneRow(rows, t, userId, view, unit, key);
     }
 
-    private <R extends Record> void incrementExcl(
-            Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
-        int rows = dsl.update(t.table())
-                .set(t.cntExclCancelled(), t.cntExclCancelled().plus(1L))
-                .where(rowIs(t, userId, view, unit, key))
-                .execute();
+    private void incrementExcl(Tier t, long userId, ViewKind view, PageUnit unit, Key key) {
+        int rows = jdbc.sql(t.incrementExcl())
+                .param(1L)
+                .params(rowIs(userId, view, unit, key))
+                .update();
         requireOneRow(rows, t, userId, view, unit, key);
     }
 
-    private static <R extends Record> void requireOneRow(
-            int rows, Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
+    private static void requireOneRow(
+            int rows, Tier t, long userId, ViewKind view, PageUnit unit, Key key) {
         if (rows != 1) {
             throw new IllegalStateException(
                     "counter update hit " + rows + " rows, expected 1: table="
-                            + t.table().getName() + " userId=" + userId + " view=" + view
+                            + t.table() + " userId=" + userId + " view=" + view
                             + " unit=" + unit + " productType='" + key.productType() + "'"
                             + " typeId=" + key.typeId()
                             + " period=" + key.period());
         }
     }
 
-    private static <R extends Record> org.jooq.Condition rowIs(
-            Tier<R> t, long userId, ViewKind view, PageUnit unit, Key key) {
-        return t.userId().eq(userId)
-                .and(t.viewKind().eq((short) view.code()))
-                .and(t.pageUnit().eq(unit.code()))
-                .and(t.productType().eq(key.productType()))
-                .and(t.typeId().eq(key.typeId()))
-                .and(t.period().eq(key.period()));
+    /** The bind values of {@link #ROW_IS}, in order. */
+    private static Object[] rowIs(long userId, ViewKind view, PageUnit unit, Key key) {
+        return new Object[] {
+                userId, (short) view.code(), unit.code(), key.productType(), key.typeId(), key.period()};
     }
 }

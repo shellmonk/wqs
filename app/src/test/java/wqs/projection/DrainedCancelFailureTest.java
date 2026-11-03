@@ -7,7 +7,7 @@ import java.time.Instant;
 import java.time.YearMonth;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -55,9 +55,9 @@ class DrainedCancelFailureTest extends PostgresTestBase {
         @Bean
         @Primary
         CancellationApplier trappedCancellationApplier(
-                DSLContext dsl, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
+                JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
                 TxTypeRegistry txTypes) {
-            return new CancellationApplier(dsl, counterUpdater, pendingCancelStore, txTypes) {
+            return new CancellationApplier(jdbc, counterUpdater, pendingCancelStore, txTypes) {
                 @Override
                 public boolean apply(ProjectionItem cancel) {
                     boolean result = super.apply(cancel);

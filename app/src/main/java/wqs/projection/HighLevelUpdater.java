@@ -1,16 +1,12 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_CC_HIGH_LEVEL;
-import static wqs.db.generated.Tables.WQ_WEB_HIGH_LEVEL;
+import static wqs.projection.Binds.text;
+import static wqs.projection.Binds.timestamptz;
 
 import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Set;
-import org.jooq.DSLContext;
-import org.jooq.Table;
-import org.jooq.TableField;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -48,10 +44,10 @@ public class HighLevelUpdater {
 
     private static final short KIND_SESSION = 0;
 
-    private final DSLContext dsl;
+    private final JdbcClient jdbc;
 
-    public HighLevelUpdater(DSLContext dsl) {
-        this.dsl = dsl;
+    public HighLevelUpdater(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     /**
@@ -115,14 +111,9 @@ public class HighLevelUpdater {
 
     /** Flips a hidden session row visible at the session's current key; true iff it flipped. */
     private boolean revive(View v, ProjectionItem item, RollupResult rollup) {
-        return dsl.update(v.table)
-                .set(v.visible, true)
-                .where(v.userId.eq(item.userId()),
-                       v.occurredAt.eq(utc(rollup.sessionStart())),
-                       v.kind.eq(KIND_SESSION),
-                       v.refId.eq(item.batchId()),
-                       v.visible.isFalse())
-                .execute() > 0;
+        return jdbc.sql(v.revive())
+                .params(item.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, item.batchId())
+                .update() > 0;
     }
 
     private Set<ViewKind> insertForSource(ProjectionItem item, Instant at, short kind,
@@ -140,17 +131,10 @@ public class HighLevelUpdater {
 
     private int insert(View v, long userId, Instant at, short kind, String refId,
                        String productId, String productType, String currency, boolean visible) {
-        return dsl.insertInto(v.table)
-                .set(v.userId, userId)
-                .set(v.occurredAt, utc(at))
-                .set(v.kind, kind)
-                .set(v.refId, refId)
-                .set(v.productId, productId)
-                .set(v.productType, productType)
-                .set(v.currency, currency)
-                .set(v.visible, visible)
-                .onConflictDoNothing()
-                .execute();
+        return jdbc.sql(v.insert())
+                .params(userId, timestamptz(at), kind, refId, text(productId), text(productType),
+                        text(currency), visible)
+                .update();
     }
 
     /**
@@ -159,20 +143,19 @@ public class HighLevelUpdater {
      * @return the moved row's visibility, or null when this view held no row
      */
     private Boolean move(View v, ProjectionItem item, RollupResult rollup) {
-        var old = dsl.deleteFrom(v.table)
-                .where(v.userId.eq(item.userId()),
-                       v.occurredAt.eq(utc(rollup.previousSessionStart())),
-                       v.kind.eq(KIND_SESSION),
-                       v.refId.eq(item.batchId()))
-                .returning(v.visible)
-                .fetchOne();
-        if (old == null) {
+        Boolean visible = jdbc.sql(v.delete())
+                .params(item.userId(), timestamptz(rollup.previousSessionStart()), KIND_SESSION,
+                        item.batchId())
+                .query(Boolean.class)
+                .optional()
+                .orElse(null);
+        if (visible == null) {
             return null;
         }
         insert(v, item.userId(), rollup.sessionStart(), KIND_SESSION, item.batchId(),
                 rollup.sessionProductId(), rollup.sessionProductType(), rollup.sessionCurrency(),
-                old.get(v.visible));
-        return old.get(v.visible);
+                visible);
+        return visible;
     }
 
     /**
@@ -181,47 +164,49 @@ public class HighLevelUpdater {
      * @return the row's visibility, or null when this view held no row
      */
     private Boolean updateProduct(View v, ProjectionItem item, RollupResult rollup) {
-        var row = dsl.update(v.table)
-                .set(v.productId, rollup.sessionProductId())
-                .set(v.productType, rollup.sessionProductType())
-                .where(v.userId.eq(item.userId()),
-                       v.occurredAt.eq(utc(rollup.sessionStart())),
-                       v.kind.eq(KIND_SESSION),
-                       v.refId.eq(item.batchId()))
-                .returning(v.visible)
-                .fetchOne();
-        return row == null ? null : row.get(v.visible);
-    }
-
-    private static OffsetDateTime utc(Instant instant) {
-        return instant.atOffset(ZoneOffset.UTC);
+        return jdbc.sql(v.updateProduct())
+                .params(text(rollup.sessionProductId()), text(rollup.sessionProductType()),
+                        item.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, item.batchId())
+                .query(Boolean.class)
+                .optional()
+                .orElse(null);
     }
 
     private static View view(ViewKind kind) {
         return kind == ViewKind.WEB ? View.WEB : View.CC;
     }
 
-    /** The two page-index tables share a column shape; this selects one by view. */
-    private record View(
-            Table<?> table,
-            TableField<?, Long> userId,
-            TableField<?, OffsetDateTime> occurredAt,
-            TableField<?, Short> kind,
-            TableField<?, String> refId,
-            TableField<?, String> productId,
-            TableField<?, String> productType,
-            TableField<?, String> currency,
-            TableField<?, Boolean> visible) {
+    /** The two page-index tables share a column shape; this carries one table's statements. */
+    private record View(String insert, String revive, String delete, String updateProduct) {
 
-        static final View WEB = new View(WQ_WEB_HIGH_LEVEL,
-                WQ_WEB_HIGH_LEVEL.userId, WQ_WEB_HIGH_LEVEL.occurredAt, WQ_WEB_HIGH_LEVEL.kind,
-                WQ_WEB_HIGH_LEVEL.refId, WQ_WEB_HIGH_LEVEL.productId, WQ_WEB_HIGH_LEVEL.productType,
-                WQ_WEB_HIGH_LEVEL.currency,
-                WQ_WEB_HIGH_LEVEL.visibleExclCancelled);
-        static final View CC = new View(WQ_CC_HIGH_LEVEL,
-                WQ_CC_HIGH_LEVEL.userId, WQ_CC_HIGH_LEVEL.occurredAt, WQ_CC_HIGH_LEVEL.kind,
-                WQ_CC_HIGH_LEVEL.refId, WQ_CC_HIGH_LEVEL.productId, WQ_CC_HIGH_LEVEL.productType,
-                WQ_CC_HIGH_LEVEL.currency,
-                WQ_CC_HIGH_LEVEL.visibleExclCancelled);
+        static final View WEB = of("wqWebHighLevel");
+        static final View CC = of("wqCcHighLevel");
+
+        private static final String KEY = """
+                "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?""";
+
+        static View of(String table) {
+            return new View(
+                    """
+                    insert into "%s" ("userId", "occurredAt", "kind", "refId", "productId",
+                            "productType", "currency", "visibleExclCancelled")
+                    values (?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict do nothing
+                    """.formatted(table),
+                    """
+                    update "%s" set "visibleExclCancelled" = true
+                    where %s and "visibleExclCancelled" = false
+                    """.formatted(table, KEY),
+                    """
+                    delete from "%s"
+                    where %s
+                    returning "visibleExclCancelled"
+                    """.formatted(table, KEY),
+                    """
+                    update "%s" set "productId" = ?, "productType" = ?
+                    where %s
+                    returning "visibleExclCancelled"
+                    """.formatted(table, KEY));
+        }
     }
 }

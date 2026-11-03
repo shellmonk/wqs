@@ -1,13 +1,12 @@
 package wqs.projection;
 
-import static wqs.db.generated.Tables.WQ_INGEST_WATERMARK;
+import static wqs.projection.Binds.timestamptz;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Optional;
-import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,17 +21,27 @@ public class DeltaWatermarkStore {
     /** The "source" key of the {@code /wallet/delta} watermark row. */
     public static final String WALLET_DELTA = "wallet-delta";
 
-    private final DSLContext dsl;
+    private static final String READ = """
+            select "watermark" from "wqIngestWatermark" where "source" = ?
+            """;
+    private static final String WRITE = """
+            insert into "wqIngestWatermark" ("source", "watermark") values (?, ?)
+            on conflict ("source") do update set
+                "watermark" = greatest("wqIngestWatermark"."watermark", excluded."watermark"),
+                "updatedAt" = current_timestamp
+            """;
 
-    public DeltaWatermarkStore(DSLContext dsl) {
-        this.dsl = dsl;
+    private final JdbcClient jdbc;
+
+    public DeltaWatermarkStore(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     public Optional<Instant> read() {
-        return dsl.select(WQ_INGEST_WATERMARK.watermark)
-                .from(WQ_INGEST_WATERMARK)
-                .where(WQ_INGEST_WATERMARK.source.eq(WALLET_DELTA))
-                .fetchOptional(WQ_INGEST_WATERMARK.watermark)
+        return jdbc.sql(READ)
+                .param(WALLET_DELTA)
+                .query((rs, n) -> rs.getObject("watermark", OffsetDateTime.class))
+                .optional()
                 .map(OffsetDateTime::toInstant);
     }
 
@@ -44,14 +53,6 @@ public class DeltaWatermarkStore {
     @Transactional(propagation = Propagation.MANDATORY)
     public void write(Instant watermark) {
         OffsetDateTime at = watermark.atOffset(ZoneOffset.UTC);
-        dsl.insertInto(WQ_INGEST_WATERMARK)
-                .set(WQ_INGEST_WATERMARK.source, WALLET_DELTA)
-                .set(WQ_INGEST_WATERMARK.watermark, at)
-                .onConflict(WQ_INGEST_WATERMARK.source)
-                .doUpdate()
-                .set(WQ_INGEST_WATERMARK.watermark,
-                        DSL.greatest(WQ_INGEST_WATERMARK.watermark, DSL.excluded(WQ_INGEST_WATERMARK.watermark)))
-                .set(WQ_INGEST_WATERMARK.updatedAt, DSL.currentOffsetDateTime())
-                .execute();
+        jdbc.sql(WRITE).params(WALLET_DELTA, timestamptz(at)).update();
     }
 }

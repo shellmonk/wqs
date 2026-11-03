@@ -342,7 +342,7 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     private RollupResult apply(ProjectionItem item) {
-        return dsl().transactionResult(cfg -> new RollupUpdater(DSL.using(cfg), txTypes()).applyItem(item));
+        return tx().execute(status -> new RollupUpdater(jdbc(), txTypes()).applyItem(item));
     }
 
     private void clean() {

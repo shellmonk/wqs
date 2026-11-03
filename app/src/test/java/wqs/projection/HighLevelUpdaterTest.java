@@ -10,7 +10,6 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import org.jooq.Record;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import wqs.db.PartitionManager;
@@ -278,9 +277,9 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     private List<HighLevelResult> driveBoth(ProjectionItem... items) {
         List<HighLevelResult> results = new java.util.ArrayList<>();
         for (ProjectionItem item : items) {
-            results.add(dsl().transactionResult(cfg -> {
-                RollupResult rollup = new RollupUpdater(DSL.using(cfg), txTypes()).applyItem(item);
-                return new HighLevelUpdater(DSL.using(cfg)).applyItem(item, rollup);
+            results.add(tx().execute(status -> {
+                RollupResult rollup = new RollupUpdater(jdbc(), txTypes()).applyItem(item);
+                return new HighLevelUpdater(jdbc()).applyItem(item, rollup);
             }));
         }
         return results;
@@ -314,8 +313,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     private HighLevelResult apply(ProjectionItem item, RollupResult rollup) {
-        return dsl().transactionResult(
-                cfg -> new HighLevelUpdater(DSL.using(cfg)).applyItem(item, rollup));
+        return tx().execute(status -> new HighLevelUpdater(jdbc()).applyItem(item, rollup));
     }
 
     private static RollupResult newSession(Instant start, int product) {
