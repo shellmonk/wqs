@@ -135,15 +135,18 @@ lowercase.
 The one exception is Quartz, which owns its DDL and uses fixed `QRTZ_*` uppercase names. Those
 tables live in a separate `quartz` schema (§6.5) so the exception stays contained.
 
+**Prefixes.** Projection tables — the projected wallet data — start with `wqPrj`
+(`"wqPrjTransaction"`, `"wqPrjSession"`, …); ingestion state keeps `wq` (`"wqIngestCursor"`,
+`"wqDeadLetter"`). The projected unit is called a **transaction** in schema and code, whatever its
+source (a payment or a limit is a "transaction" row whose `"source"` says so); `SourceKind.TRANSACTION`
+is the wallet-transaction source specifically.
+
 ```sql
-create table "wqWebItem" ( "userId" bigint not null, "occurredAt" timestamptz not null, ... );
+create table "wqPrjTransaction" ( "userId" bigint not null, "occurredAt" timestamptz not null, ... );
 ```
 
 Every SQL statement — in Flyway migrations and in Java — must **double-quote** camelCase identifiers. In migrations a missing
 quote pair can ship silently.
-
-Identifier **naming** in generated code does need configuration, however: the default generator
-strategy would flatten these camel humps. See §8.3.
 
 **Mitigation:** a build-time check fails the build if any migration file contains an unquoted
 `wq[A-Z]` identifier.
@@ -308,6 +311,41 @@ Two hazards follow from a timestamp-only cursor:
 ---
 
 ## 5. Data model
+
+### 5.0 Current schema (simplified 2026-11-03) — authoritative
+
+The model was simplified from 15 tables to 9 before go-live (plan
+`docs/superpowers/plans/2026-11-03-wqs-model-simplification.md`; picture:
+https://claude.ai/artifact/LzwjQAuEYdxZZNy4GF7yA2). Where §5.1–§5.7 and §7.5–§7.7 below name the
+older tables or describe month counters, a group locator or per-view tables, **this section wins**.
+
+| Table / view | Key | Partitioned | Purpose |
+|---|---|---|---|
+| `"wqPrjTransaction"` | `("userId","occurredAt","transactionId")` | monthly | every projected row, stored once |
+| view `"wqPrjWebTransaction"` | — | — | `/web` reads: sources TRANSACTION and CLAIMABLE_PRIZE only |
+| view `"wqPrjCcTransaction"` | — | — | `/cc` reads: every source |
+| `"wqPrjTransactionLocator"` | `("source","sourceId")` | no | duplicate check; find a row by source id (cancels, delta versions) |
+| `"wqPrjPendingCancel"` | `("source","cancelSourceId")` | no | cancels waiting for their target |
+| `"wqPrjSession"` | `("userId","batchId")` | no | session totals ("all" and excl.-cancelled); a late earlier row only changes `"startedAt"` |
+| `"wqPrjPlay"` | `("userId","batchId","subBatchId")` | no | play totals |
+| `"wqPrjTimeline"` | `("userId","occurredAt","kind","refId")` | monthly | the list levels 1–2 page through: one row per session (kind 0) or unsessioned row; `"onWeb"`, `"visibleExclCancelled"` |
+| `"wqPrjCount"` | `("userId","viewKind","pageUnit","productType","type","day")` | monthly on `"day"` | per-day counts per view and page unit; `''` = ALL for product type and type |
+| `"wqIngestCursor"` | `("feed")` | no | stream offset and delta watermark |
+| `"wqDeadLetter"` | `("deadLetterId")` | no | rejected input (allowlisted fields) |
+
+Rules that follow from it:
+
+- **Types are a Java enum** (`wqs.domain.TransactionType`): rows store the code as text; the enum
+  gives PLAY / WIN / NEUTRAL, and an unknown code is stored and NEUTRAL.
+- **Only TRANSACTION and CLAIMABLE_PRIZE carry a batch**, and both feed both views, so a session
+  is never mixed-visibility; the writer rejects a batched row from a `/cc`-only source.
+- **Totals** sum `"wqPrjCount"` over the whole UTC days in `[from, to)` plus a live COUNT for the
+  two partial boundary days. **The offset walk** walks days; the key query's lower bound is the
+  start of the day where the page ends (or `from`), so only partitions holding the page are
+  opened.
+- **`/web` isolation** is structural: `/web` code reads only the `"wqPrjWebTransaction"` view and
+  timeline rows with `"onWeb"`; a source scan forbids `wqPrjCc…` names in `/web` code.
+
 
 ### 5.1 Tables
 
