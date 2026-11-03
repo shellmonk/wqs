@@ -619,7 +619,7 @@ class CancellationTest extends PostgresTestBase {
 
     private int sentinel(int view, int pageUnit, String column) {
         return db().value("""
-                select coalesce(sum("%s"),0)::int from "wqPrjCountDay"
+                select coalesce(sum("%s"),0)::int from "wqPrjCount"
                 where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
                 """.formatted(column), Integer.class, (short) view, (short) pageUnit);
     }

@@ -141,10 +141,9 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * P-2: every counter row in both tiers equals a live COUNT, and no other counter row exists.
+     * P-2: every "wqPrjCount" row equals a live COUNT, and no other counter row exists.
      *
-     * Expected rows, per view, page unit, tier, product-type key, type key and UTC period (day,
-     * or first of the month): TRANSACTION from the view's transaction rows (cancellation rows included; excl =
+     * Expected rows, per view, page unit, product-type key, type key and UTC day: TRANSACTION from the view's transaction rows (cancellation rows included; excl =
      * not cancelled); HIGH_LEVEL from the view's page-index rows at each row's own (occurredAt,
      * productType) -- a session row already sits at the session key -- with excl =
      * "visibleExclCancelled". Each row counts under its own product type (when it has one) and the
@@ -177,45 +176,34 @@ public final class ProjectionInvariants {
                     where pk.prod is not null
                 ),
                 expected as (
-                    select 'day' as tier, "userId", v, u, prod, typ,
-                           (t at time zone 'UTC')::date as period,
+                    select "userId", v, u, prod, typ, (t at time zone 'UTC')::date as "day",
                            count(*) as "cntAll", count(*) filter (where vis) as "cntExcl"
-                    from keyed group by 1, 2, 3, 4, 5, 6, 7
-                  union all
-                    select 'month', "userId", v, u, prod, typ,
-                           date_trunc('month', t at time zone 'UTC')::date,
-                           count(*), count(*) filter (where vis)
-                    from keyed group by 1, 2, 3, 4, 5, 6, 7
+                    from keyed group by 1, 2, 3, 4, 5, 6
                 ),
                 stored as (
-                    select 'day' as tier, "userId", "viewKind"::int as v, "pageUnit"::int as u,
-                           "productType" as prod, "type" as typ, "period", "cntAll",
+                    select "userId", "viewKind"::int as v, "pageUnit"::int as u,
+                           "productType" as prod, "type" as typ, "day", "cntAll",
                            "cntExclCancelled" as "cntExcl"
-                    from "wqPrjCountDay"
-                  union all
-                    select 'month', "userId", "viewKind", "pageUnit", "productType", "type",
-                           "period", "cntAll", "cntExclCancelled"
-                    from "wqPrjCountMonth"
+                    from "wqPrjCount"
                 )
-                select case when e.tier is null then 'orphan counter row'
-                            when s.tier is null then 'missing counter row'
+                select case when e."userId" is null then 'orphan counter row'
+                            when s."userId" is null then 'missing counter row'
                             else 'counter mismatch' end as problem,
-                       coalesce(e.tier, s.tier) as tier,
                        coalesce(e."userId", s."userId") as "userId",
                        coalesce(e.v, s.v) as "viewKind",
                        case coalesce(e.u, s.u) when 0 then 'TRANSACTION' else 'HIGH_LEVEL' end as "pageUnit",
                        coalesce(e.prod, s.prod) as "productType",
                        coalesce(e.typ, s.typ) as "type",
-                       coalesce(e.period, s.period) as period,
+                       coalesce(e."day", s."day") as "day",
                        e."cntAll" as "expectedAll", s."cntAll" as "storedAll",
                        e."cntExcl" as "expectedExcl", s."cntExcl" as "storedExcl"
                 from expected e
                 full outer join stored s
-                  on s.tier = e.tier and s."userId" = e."userId" and s.v = e.v and s.u = e.u
-                 and s.prod = e.prod and s.typ = e.typ and s.period = e.period
-                where e.tier is null or s.tier is null
+                  on s."userId" = e."userId" and s.v = e.v and s.u = e.u
+                 and s.prod = e.prod and s.typ = e.typ and s."day" = e."day"
+                where e."userId" is null or s."userId" is null
                    or e."cntAll" <> s."cntAll" or e."cntExcl" <> s."cntExcl"
-                order by 2, 3, 4, 5, 6, 7, 8
+                order by 2, 3, 4, 5, 6, 7
                 """.formatted(WEB_TIMELINE, CC_TIMELINE))
                 .stream().map(ProjectionInvariants::describe).toList();
     }

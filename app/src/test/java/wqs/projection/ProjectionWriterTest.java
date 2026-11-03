@@ -261,7 +261,7 @@ class ProjectionWriterTest extends PostgresTestBase {
                     String.class)).as(table).isEqualTo("TT_NEVER_SEEN_BEFORE");
         }
         assertThat(db().value("""
-                select count(*)::int from "wqPrjCountDay" where "type" = 'TT_NEVER_SEEN_BEFORE'""", Integer.class))
+                select count(*)::int from "wqPrjCount" where "type" = 'TT_NEVER_SEEN_BEFORE'""", Integer.class))
                 .as("counted under its own code: (instants, code) and (ALL, code), per view").isEqualTo(4);
         var session = db().row("""
                 select "txCount", "totalPlays", "totalWins" from "wqPrjSession" where "batchId" = 'b-u'""");
@@ -272,7 +272,7 @@ class ProjectionWriterTest extends PostgresTestBase {
 
     private void assertNothingProjected() {
         for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay",
-                "wqPrjTimeline", "wqPrjCountDay", "wqPrjCountMonth", "wqPrjPendingCancel")) {
+                "wqPrjTimeline", "wqPrjCount", "wqPrjPendingCancel")) {
             assertThat(count(table)).as(table).isZero();
         }
     }

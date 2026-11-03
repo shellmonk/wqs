@@ -148,9 +148,6 @@ create table "wqPrjSession" (
     primary key ("userId", "batchId")
 );
 
--- Reading sessions in time order, newest first, for a user.
-create index "wqPrjSession_startedAt" on "wqPrjSession" ("userId", "startedAt" desc, "batchId" desc);
-
 create table "wqPrjPlay" (
     "userId"                   bigint        not null,
     "batchId"                  text          not null,
@@ -203,37 +200,24 @@ create table "wqPrjTimeline" (
 -- Counters
 -- ---------------------------------------------------------------------------------------------
 
--- Tier 1: whole months, keyed on (productType, type). Periods are UTC (spec 7.1). Rows are
--- sparse -- they exist only for periods where the user had activity. Counters are mutable in
--- place: a cancel arriving today can decrement a counter for a transaction from eight months ago,
--- which rules out append-only storage (spec 5.7).
-create table "wqPrjCountMonth" (
+-- One row per UTC day, keyed on (productType, type). Rows are sparse -- they exist only for days
+-- where the user had activity. A total over [from, to) sums the rows of its whole days in one
+-- index range, a few thousand tiny rows even for a multi-year range (plan D3). Counters are
+-- mutable in place: a cancel arriving today can decrement a counter for a transaction from eight
+-- months ago, which rules out append-only storage (spec 5.7). Monthly RANGE-partitioned on "day";
+-- PartitionManager provisions the partitions.
+create table "wqPrjCount" (
     "userId"            bigint   not null,
     "viewKind"          smallint not null,  -- 1 = WEB, 2 = CC
     "pageUnit"          smallint not null,  -- 0 = TRANSACTION (L0), 1 = HIGH_LEVEL (L1/L2)
     "productType"       text     not null,  -- '' = ALL product types
     "type"              text     not null,  -- '' = ALL transaction types
-    "period"            date     not null,  -- first day of the month, UTC
+    "day"               date     not null,  -- UTC
     "cntAll"            bigint   not null default 0,
     "cntExclCancelled"  bigint   not null default 0,
     check ("cntAll" >= 0 and "cntExclCancelled" >= 0 and "cntExclCancelled" <= "cntAll"),
-    primary key ("userId", "viewKind", "pageUnit", "productType", "type", "period")
-);
-
--- Tier 2: whole days, for the partial months at each end of a requested range. Monthly
--- RANGE-partitioned on "period"; PartitionManager provisions the partitions.
-create table "wqPrjCountDay" (
-    "userId"            bigint   not null,
-    "viewKind"          smallint not null,
-    "pageUnit"          smallint not null,
-    "productType"       text     not null,
-    "type"              text     not null,
-    "period"            date     not null,
-    "cntAll"            bigint   not null default 0,
-    "cntExclCancelled"  bigint   not null default 0,
-    check ("cntAll" >= 0 and "cntExclCancelled" >= 0 and "cntExclCancelled" <= "cntAll"),
-    primary key ("userId", "viewKind", "pageUnit", "productType", "type", "period")
-) partition by range ("period");
+    primary key ("userId", "viewKind", "pageUnit", "productType", "type", "day")
+) partition by range ("day");
 
 -- ---------------------------------------------------------------------------------------------
 -- Pending cancels

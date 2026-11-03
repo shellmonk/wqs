@@ -26,8 +26,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         new PartitionManager(jdbc()).ensurePartitionsAhead(YearMonth.of(2034, 10), 1);
-        db().execute("delete from \"wqPrjCountDay\"");
-        db().execute("delete from \"wqPrjCountMonth\"");
+        db().execute("delete from \"wqPrjCount\"");
     }
 
     private void run(java.util.function.Consumer<CounterUpdater> action) {
@@ -61,11 +60,11 @@ class CounterUpdaterTest extends PostgresTestBase {
         assertThat(dayCount(ViewKind.CC, PageUnit.TRANSACTION, "", T0)).isEqualTo(1);
         assertThat(dayCount(ViewKind.WEB, PageUnit.TRANSACTION, "", T0)).isZero();
         // No product type: (ALL, type) and (ALL, ALL) only.
-        assertThat(rows("wqPrjCountDay")).isEqualTo(2);
+        assertThat(rows("wqPrjCount")).isEqualTo(2);
     }
 
     @Test
-    void day_and_month_tiers_both_advance() {
+    void the_day_row_advances_and_the_month_sums_it() {
         run(u -> {
             u.countTransaction(tx("t1", "t11"));
             u.countTransaction(tx("t2", "t11"));
@@ -111,15 +110,14 @@ class CounterUpdaterTest extends PostgresTestBase {
         // Counted directly at its final key...
         run(u -> u.countHighLevel(1L, ViewKind.WEB, "t7", NEXT_DAY));
         List<String> direct = allCounterRows();
-        db().execute("delete from \"wqPrjCountDay\"");
-        db().execute("delete from \"wqPrjCountMonth\"");
+        db().execute("delete from \"wqPrjCount\"");
 
         // ...or counted elsewhere first and moved there (spec P-1: identical state either way).
         run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
         run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t7", NEXT_DAY, true));
 
         assertThat(allCounterRows()).isEqualTo(direct);
-        assertThat(db().value("select count(*)::int from \"wqPrjCountDay\" where \"cntAll\" = 0", Integer.class)).isZero();
+        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where \"cntAll\" = 0", Integer.class)).isZero();
     }
 
     @Test
@@ -133,7 +131,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     @Test
-    void a_move_across_days_shifts_day_rows_but_not_the_month_row() {
+    void a_move_across_days_shifts_day_rows_and_keeps_the_month_total() {
         run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
 
         run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, true));
@@ -147,7 +145,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     @Test
-    void a_move_across_months_shifts_month_rows_too() {
+    void a_move_across_months_shifts_the_month_totals_too() {
         run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
 
         run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_MONTH, true));
@@ -223,10 +221,8 @@ class CounterUpdaterTest extends PostgresTestBase {
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isZero();
         assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isZero();
         assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isEqualTo(1);
-        // Emptied rows are deleted (sparse): only 0@NEXT_DAY remains in the day tier, and the
-        // month tier keeps only the sentinel.
-        assertThat(rows("wqPrjCountDay")).isEqualTo(1);
-        assertThat(rows("wqPrjCountMonth")).isEqualTo(1);
+        // Emptied rows are deleted (sparse): only the sentinel at NEXT_DAY remains.
+        assertThat(rows("wqPrjCount")).isEqualTo(1);
     }
 
     @Test
@@ -234,7 +230,7 @@ class CounterUpdaterTest extends PostgresTestBase {
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
                 run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, true)))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("wqPrjCountDay")
+                .hasMessageContaining("wqPrjCount")
                 .hasMessageContaining("productType='t11'")
                 .hasMessageContaining("type=''");
     }
@@ -269,14 +265,14 @@ class CounterUpdaterTest extends PostgresTestBase {
                 run(u -> u.recountExclCancelled(1L, ViewKind.CC, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, T0)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("expected 1");
-        assertThat(rows("wqPrjCountDay")).isEqualTo(2);
+        assertThat(rows("wqPrjCount")).isEqualTo(2);
     }
 
     @Test
     void the_check_constraint_rejects_negative_and_excl_above_all() {
         run(u -> u.countTransaction(tx("t1", "t11")));
 
-        for (String table : new String[] {"wqPrjCountDay", "wqPrjCountMonth"}) {
+        for (String table : new String[] {"wqPrjCount"}) {
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> db().execute(
                     "update \"" + table + "\" set \"cntAll\" = -1, \"cntExclCancelled\" = -1"))
                     .hasMessageContaining("check");
@@ -292,8 +288,7 @@ class CounterUpdaterTest extends PostgresTestBase {
 
         assertThat(dayKeys(ViewKind.WEB, PageUnit.TRANSACTION)).containsExactlyInAnyOrder(
                 "instants/" + TxTypes.PLAY, "instants/", "/" + TxTypes.PLAY, "/");
-        assertThat(monthKeys(ViewKind.WEB, PageUnit.TRANSACTION)).containsExactlyInAnyOrder(
-                "instants/" + TxTypes.PLAY, "instants/", "/" + TxTypes.PLAY, "/");
+        assertThat(rows("wqPrjCount")).as("one day row per key, nothing else").isEqualTo(8);
     }
 
     @Test
@@ -301,8 +296,6 @@ class CounterUpdaterTest extends PostgresTestBase {
         run(u -> u.countTransaction(txOfType("t1", null, TxTypes.WIN)));
 
         assertThat(dayKeys(ViewKind.WEB, PageUnit.TRANSACTION))
-                .containsExactlyInAnyOrder("/" + TxTypes.WIN, "/");
-        assertThat(monthKeys(ViewKind.WEB, PageUnit.TRANSACTION))
                 .containsExactlyInAnyOrder("/" + TxTypes.WIN, "/");
     }
 
@@ -315,8 +308,6 @@ class CounterUpdaterTest extends PostgresTestBase {
 
         assertThat(dayKeys(ViewKind.CC, PageUnit.HIGH_LEVEL))
                 .containsExactlyInAnyOrder("instants/", "/");
-        assertThat(monthKeys(ViewKind.CC, PageUnit.HIGH_LEVEL))
-                .containsExactlyInAnyOrder("instants/", "/");
     }
 
     @Test
@@ -326,7 +317,7 @@ class CounterUpdaterTest extends PostgresTestBase {
         run(u -> u.uncountExclCancelled(
                 1L, ViewKind.WEB, PageUnit.TRANSACTION, "instants", TxTypes.PLAY, T0));
 
-        for (String table : new String[] {"wqPrjCountDay", "wqPrjCountMonth"}) {
+        for (String table : new String[] {"wqPrjCount"}) {
             var rows = db().rows("select \"cntAll\", \"cntExclCancelled\" from \"" + table
                     + "\" where \"viewKind\" = 1 and \"pageUnit\" = 0");
             assertThat(rows).hasSize(4);
@@ -336,7 +327,7 @@ class CounterUpdaterTest extends PostgresTestBase {
 
         run(u -> u.recountExclCancelled(
                 1L, ViewKind.WEB, PageUnit.TRANSACTION, "instants", TxTypes.PLAY, T0));
-        assertThat(db().maps("select 1 from \"wqPrjCountDay\" where \"cntExclCancelled\" = 0"))
+        assertThat(db().maps("select 1 from \"wqPrjCount\" where \"cntExclCancelled\" = 0"))
                 .isEmpty();
     }
 
@@ -347,16 +338,12 @@ class CounterUpdaterTest extends PostgresTestBase {
         run(u -> u.uncountExclCancelled(
                 1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "instants", CounterSentinels.ALL_TYPES, T0));
 
-        assertThat(db().maps("select 1 from \"wqPrjCountDay\" where \"cntExclCancelled\" = 0"))
+        assertThat(db().maps("select 1 from \"wqPrjCount\" where \"cntExclCancelled\" = 0"))
                 .hasSize(2);
     }
 
     private List<String> dayKeys(ViewKind v, PageUnit u) {
-        return keys("wqPrjCountDay", v, u);
-    }
-
-    private List<String> monthKeys(ViewKind v, PageUnit u) {
-        return keys("wqPrjCountMonth", v, u);
+        return keys("wqPrjCount", v, u);
     }
 
     private List<String> keys(String table, ViewKind v, PageUnit u) {
@@ -377,23 +364,23 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     private int dayCount(ViewKind v, PageUnit u, String product, Instant at) {
-        return counter("wqPrjCountDay", "cntAll", v, u, product, at, false);
+        return counter("cntAll", v, u, product, at, false);
     }
 
     private int dayExcl(ViewKind v, PageUnit u, String product, Instant at) {
-        return counter("wqPrjCountDay", "cntExclCancelled", v, u, product, at, false);
+        return counter("cntExclCancelled", v, u, product, at, false);
     }
 
     private int monthCount(ViewKind v, PageUnit u, String product, Instant at) {
-        return counter("wqPrjCountMonth", "cntAll", v, u, product, at, true);
+        return counter("cntAll", v, u, product, at, true);
     }
 
     private int monthExcl(ViewKind v, PageUnit u, String product, Instant at) {
-        return counter("wqPrjCountMonth", "cntExclCancelled", v, u, product, at, true);
+        return counter("cntExclCancelled", v, u, product, at, true);
     }
 
     private List<String> allCounterRows() {
-        return java.util.stream.Stream.of("wqPrjCountDay", "wqPrjCountMonth")
+        return java.util.stream.Stream.of("wqPrjCount")
                 .flatMap(t -> db().maps("select * from \"" + t + "\" order by 1, 2, 3, 4, 5, 6")
                         .stream().map(r -> t + r.values()))
                 .toList();
@@ -404,17 +391,19 @@ class CounterUpdaterTest extends PostgresTestBase {
     }
 
     /**
-     * Test-side verification only: reads one counter at (product type, ALL types), 0 when the
-     * sparse row does not exist. {@code ""} is the ALL-product-types sentinel.
+     * Test-side verification only: reads one counter at (product type, ALL types) on the day of
+     * {@code at}, or summed over its whole UTC month when {@code month}; 0 when no sparse row
+     * exists. {@code ""} is the ALL-product-types sentinel.
      */
-    private int counter(String table, String column, ViewKind view, PageUnit unit, String product,
+    private int counter(String column, ViewKind view, PageUnit unit, String product,
                         Instant at, boolean month) {
         java.time.LocalDate day = java.time.LocalDate.ofInstant(at, java.time.ZoneOffset.UTC);
-        java.time.LocalDate period = month ? day.withDayOfMonth(1) : day;
+        java.time.LocalDate first = month ? day.withDayOfMonth(1) : day;
+        java.time.LocalDate last = month ? first.plusMonths(1).minusDays(1) : day;
         return db().value("""
-                select coalesce(sum("%s"), 0)::int from "%s"
+                select coalesce(sum("%s"), 0)::int from "wqPrjCount"
                 where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "productType" = ?
-                  and "type" = '' and "period" = ?
-                """.formatted(column, table), Integer.class, (short) view.code(), unit.code(), product, period);
+                  and "type" = '' and "day" between ? and ?
+                """.formatted(column), Integer.class, (short) view.code(), unit.code(), product, first, last);
     }
 }

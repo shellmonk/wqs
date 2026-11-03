@@ -6,7 +6,7 @@ import wqs.db.TestSql;
 
 /**
  * An order-independent, comparable view of the whole projection: transactions, the transaction locator,
- * rollups, the page index, both counter tiers and parked cancels. Every table is
+ * rollups, the page index, the per-day counters and parked cancels. Every table is
  * ordered by its full primary key, so two snapshots are equal exactly when the stored state is.
  *
  * CRITICAL: "transactionId" and "ingestedAt" (transaction table only) and "parkedAt" (parked cancels) are
@@ -21,8 +21,7 @@ public record ProjectionSnapshot(
         List<String> sessions,
         List<String> plays,
         List<String> timeline,
-        List<String> countDay,
-        List<String> countMonth,
+        List<String> counts,
         List<String> pendingCancels) {
 
     public static ProjectionSnapshot of(JdbcClient jdbc) {
@@ -32,13 +31,12 @@ public record ProjectionSnapshot(
                 all(sql, "wqPrjSession", "\"userId\", \"batchId\""),
                 all(sql, "wqPrjPlay", "\"userId\", \"batchId\", \"subBatchId\""),
                 all(sql, "wqPrjTimeline", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
-                all(sql, "wqPrjCountDay", COUNTER_KEY),
-                all(sql, "wqPrjCountMonth", COUNTER_KEY),
+                all(sql, "wqPrjCount", COUNTER_KEY),
                 pendingCancelRows(sql));
     }
 
     private static final String COUNTER_KEY =
-            "\"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"type\", \"period\"";
+            "\"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"type\", \"day\"";
 
     private static List<String> rows(TestSql sql, String table) {
         return sql.lines("""

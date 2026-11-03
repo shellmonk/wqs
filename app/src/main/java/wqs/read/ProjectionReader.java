@@ -105,7 +105,7 @@ public class ProjectionReader {
         return readerTx.execute(status -> segmentCounts(readerJdbc, transactionUnit(q, f), from, to).total());
     }
 
-    /** Per-segment TRANSACTION counts of [from, to): counters for whole months and days, live for the rest. */
+    /** Per-segment TRANSACTION counts of [from, to): counters for whole days, live for the partial boundary days. */
     public SegmentCounts segmentCounts(
             JdbcClient tx, Level0Query q, Level0Filter f, Instant from, Instant to) {
         return segmentCounts(tx, transactionUnit(q, f), from, to);
@@ -152,7 +152,7 @@ public class ProjectionReader {
         return readerTx.execute(status -> segmentCounts(readerJdbc, highLevelUnit(q, f), from, to).total());
     }
 
-    /** Per-segment HIGH_LEVEL counts of [from, to): counters for whole months and days, live for the rest. */
+    /** Per-segment HIGH_LEVEL counts of [from, to): counters for whole days, live for the partial boundary days. */
     public SegmentCounts segmentCounts(
             JdbcClient tx, HighLevelQuery q, HighLevelFilter f, Instant from, Instant to) {
         return segmentCounts(tx, highLevelUnit(q, f), from, to);
@@ -259,26 +259,18 @@ public class ProjectionReader {
     }
 
     /**
-     * Counts each segment of {@link RangeDecomposition#newestFirst}: whole months and days from
-     * the unit's counters (absent row = 0), sub-day remainders by a live count. Months are read in
-     * one query over their (contiguous) span; days in one query per contiguous run of DAY segments
-     * -- at most two, the partial months at either end -- so a multi-year range never fetches the
-     * daily rows of the whole months in between (spec 7.5 bounded cost).
+     * Counts each segment of {@link RangeDecomposition#newestFirst} (plan D3): whole UTC days from
+     * the unit's per-day counters (absent row = 0), the partial boundary days by a live count. The
+     * DAY segments form one contiguous run between the two LIVE ends, read in ONE query over that
+     * run's index range, so even a multi-year range fetches only its sparse day rows.
      */
     private SegmentCounts segmentCounts(JdbcClient tx, Unit<?> u, Instant from, Instant to) {
         List<Segment> segments = RangeDecomposition.newestFirst(from, to);
-        Map<LocalDate, Long> months = new HashMap<>();
         Map<LocalDate, Long> days = new HashMap<>();
-        for (List<Segment> run : runs(segments)) {
-            LocalDate newest = period(run.get(0));
-            LocalDate oldest = period(run.get(run.size() - 1));
-            if (run.get(0).tier() == Tier.MONTH) {
-                months.putAll(counters.monthCounts(tx, u.userId(), u.view(), u.pageUnit(), u.productTypes(),
-                        u.typeCodes(), u.excludeCancelled(), oldest, newest));
-            } else {
-                days.putAll(counters.dayCounts(tx, u.userId(), u.view(), u.pageUnit(), u.productTypes(),
-                        u.typeCodes(), u.excludeCancelled(), oldest, newest));
-            }
+        for (List<Segment> run : dayRuns(segments)) {
+            days.putAll(counters.dayCounts(tx, u.userId(), u.view(), u.pageUnit(), u.productTypes(),
+                    u.typeCodes(), u.excludeCancelled(),
+                    day(run.get(run.size() - 1)), day(run.get(0))));
         }
         long[] counts = new long[segments.size()];
         int counterRows = 0;
@@ -288,7 +280,7 @@ public class ProjectionReader {
                 counts[i] = u.count().count(tx, s.start(), s.end());
                 continue;
             }
-            Long stored = (s.tier() == Tier.MONTH ? months : days).get(period(s));
+            Long stored = days.get(day(s));
             if (stored != null) {
                 counts[i] = stored;
                 counterRows++;
@@ -297,8 +289,8 @@ public class ProjectionReader {
         return new SegmentCounts(segments, counts, counterRows);
     }
 
-    /** Maximal runs of adjacent MONTH or DAY segments (same tier), in list order; LIVE skipped. */
-    private static List<List<Segment>> runs(List<Segment> segments) {
+    /** Maximal runs of adjacent DAY segments, in list order; LIVE segments split runs. */
+    private static List<List<Segment>> dayRuns(List<Segment> segments) {
         List<List<Segment>> out = new ArrayList<>();
         List<Segment> current = null;
         for (Segment s : segments) {
@@ -306,7 +298,7 @@ public class ProjectionReader {
                 current = null;
                 continue;
             }
-            if (current == null || current.get(0).tier() != s.tier()) {
+            if (current == null) {
                 current = new ArrayList<>();
                 out.add(current);
             }
@@ -315,7 +307,7 @@ public class ProjectionReader {
         return out;
     }
 
-    private static LocalDate period(Segment s) {
+    private static LocalDate day(Segment s) {
         return LocalDate.ofInstant(s.start(), ZoneOffset.UTC);
     }
 }

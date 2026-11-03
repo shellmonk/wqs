@@ -46,13 +46,13 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     // --- P-2 -------------------------------------------------------------------------------------
 
     @Test
-    void a_bumped_month_tier_product_counter_is_counter_drift() {
+    void a_bumped_product_counter_is_counter_drift() {
         execute("""
-                update "wqPrjCountMonth" set "cntAll" = "cntAll" + 1
+                update "wqPrjCount" set "cntAll" = "cntAll" + 1
                 where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
-                .startsWith("counter mismatch").contains("tier=month", "productType=bingo");
+                .startsWith("counter mismatch").contains("pageUnit=HIGH_LEVEL", "productType=bingo");
     }
 
     /**
@@ -62,7 +62,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_counter_row_at_a_real_type_code_is_counter_drift() {
         execute("""
-                update "wqPrjCountMonth" set "type" = 'TT_BUY'
+                update "wqPrjCount" set "type" = 'TT_BUY'
                 where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
 
         assertThat(invariants.counterDrift()).hasSize(2)
@@ -73,7 +73,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_stored_zero_counter_row_is_counter_drift() {
         execute("""
-                insert into "wqPrjCountDay"
+                insert into "wqPrjCount"
                 values (1, 1, 1, 'ghost', '', date '2034-03-30', 0, 0)""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
@@ -83,9 +83,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_deleted_counter_row_is_counter_drift() {
         execute("""
-                delete from "wqPrjCountDay"
+                delete from "wqPrjCount"
                 where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "type" = ''
-                  and "period" = date '2034-04-01'""");
+                  and "day" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
                 .startsWith("missing counter row");
@@ -95,9 +95,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     void a_changed_excl_cancelled_count_alone_is_counter_drift() {
         // /cc transactions on April 1: pay1 (cancelled), c1 and pc1 -- excl is 2 of 3.
         execute("""
-                update "wqPrjCountDay" set "cntExclCancelled" = "cntExclCancelled" - 1
+                update "wqPrjCount" set "cntExclCancelled" = "cntExclCancelled" - 1
                 where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "type" = ''
-                  and "period" = date '2034-04-01'""");
+                  and "day" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
                 .startsWith("counter mismatch").contains("expectedAll=3 storedAll=3",

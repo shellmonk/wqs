@@ -36,11 +36,11 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     /**
-     * T5 ruling (spec 7.5 bounded cost): DAY counters are read per contiguous run of DAY segments,
-     * so a whole middle month's daily rows are never fetched and discarded.
+     * Plan D3 (spec 7.5 bounded cost): the whole days of a range are one contiguous run of DAY
+     * segments, read in ONE counter query that returns only the days holding rows.
      */
     @Test
-    void day_counters_are_read_per_run_not_across_whole_months() {
+    void day_counters_are_read_in_one_query_over_the_run() {
         applyBatches(List.of(
                 transaction("j", "2034-01-20T10:00:00Z"),
                 transaction("f1", "2034-02-01T10:00:00Z"),
@@ -56,11 +56,68 @@ class ProjectionReaderTest extends ReadPropertyBase {
                 probe.segmentCounts(readerJdbc, webQuery, ALL, from, to));
 
         assertThat(sc.total()).isEqualTo(5).isEqualTo(oracle.count(ViewKind.WEB, ALL, from, to));
-        // Feb's month row + the Jan 20 and Mar 5 day rows.
-        assertThat(sc.counterRows()).isEqualTo(3);
+        // One day row per active day, nothing for the empty days in between.
+        assertThat(sc.counterRows()).isEqualTo(5);
         assertThat(counting.dayKeys).containsExactlyInAnyOrder(
-                LocalDate.parse("2034-01-20"), LocalDate.parse("2034-03-05"));
-        assertThat(counting.dayCalls).isEqualTo(2);
+                LocalDate.parse("2034-01-20"), LocalDate.parse("2034-02-01"), LocalDate.parse("2034-02-15"),
+                LocalDate.parse("2034-02-28"), LocalDate.parse("2034-03-05"));
+        assertThat(counting.dayCalls).isEqualTo(1);
+    }
+
+    /**
+     * Plan D3: a multi-year range (over 1,000 whole days) is totalled from its day counter rows
+     * plus a live count of the two partial boundary days, and equals a live COUNT -- at both page
+     * units, in both views, with and without excludeCancelled. Rows sit on both sides of each
+     * bound inside the partial days, sessions span midnight, payments are /cc only, and some
+     * transactions are cancelled.
+     */
+    @Test
+    void totals_over_more_than_1000_days_equal_a_live_count() {
+        Instant from = Instant.parse("2031-03-10T13:00:00Z");
+        Instant to = Instant.parse("2034-06-20T05:00:00Z");
+        List<ProjectionTransaction> d = new ArrayList<>(List.of(
+                transaction("lo-out", "2031-03-10T12:59:59Z"),
+                transaction("lo-in", "2031-03-10T13:00:00Z"),
+                transaction("hi-in", "2034-06-20T04:59:59Z"),
+                transaction("hi-out", "2034-06-20T05:00:00Z")));
+        Instant t = Instant.parse("2031-03-11T08:00:00Z");
+        for (int n = 0; t.isBefore(to); n++, t = t.plus(java.time.Duration.ofHours(4 * 24 + 7))) {
+            if (n % 3 == 0) {
+                d.add(sessioned("s" + n + "a", t.toString(), "b" + n));
+                d.add(sessioned("s" + n + "b", t.plus(java.time.Duration.ofHours(20)).toString(), "b" + n));
+            } else {
+                d.add(transaction("t" + n, t.toString()));
+            }
+            if (n % 5 == 0) {
+                d.add(new ProjectionTransaction(1L, SourceKind.PAYMENT, "pay" + n, t.plusSeconds(60), null, null,
+                        null, null, TxTypes.NEUTRAL, new BigDecimal("3.0000"), "EUR", null, null, null));
+            }
+            if (n % 7 == 1) {
+                d.add(new ProjectionTransaction(1L, SourceKind.TRANSACTION, "t" + n + "-x", t.plusSeconds(120), null,
+                        null, null, null, TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, "t" + n, null));
+            }
+        }
+        applyBatches(d);
+        List<Segment> segments = RangeDecomposition.newestFirst(from, to);
+        assertThat(segments.stream().filter(s -> s.tier() == Segment.Tier.DAY)).hasSizeGreaterThanOrEqualTo(1_000);
+        assertThat(segments.stream().filter(s -> s.tier() == Segment.Tier.LIVE)).hasSize(2);
+
+        for (ViewKind v : ViewKind.values()) {
+            for (boolean excl : new boolean[] {false, true}) {
+                Level0Filter f = new Level0Filter(1L, excl);
+                HighLevelFilter h = new HighLevelFilter(1L, excl);
+                String as = v + " excl=" + excl;
+                long live = oracle.count(v, f, from, to);
+                assertThat(live).as(as).isGreaterThan(250);
+                assertThat(reader.total(queryFor(v), f, from, to)).as(as).isEqualTo(live);
+                assertThat(reader.total(highLevelQueryFor(v), h, from, to)).as(as + " high level")
+                        .isEqualTo(oracle.highLevelCount(v, h, from, to));
+                // The page in the middle of the range lands where naive OFFSET does.
+                long mid = live / 2;
+                assertThat(reader.readLevel0(queryFor(v), new Level0Request(f, from, to, mid / 7 + 1, 7)).transactions())
+                        .as(as).isEqualTo(oracle.page(v, f, from, to, (mid / 7) * 7, 7));
+            }
+        }
     }
 
     // ------------------------------------------------------------------ readLevel0 examples
@@ -166,8 +223,9 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     /**
-     * Spec 11.2. Feb has 3 transactions, Jan 2; page 2 of size 2 starts in the Feb month segment with
-     * residual 2 and returns Feb's 3rd transaction and Jan's 1st -- two distinct months touched.
+     * Spec 11.2. Feb has 3 transactions, Jan 2, each on its own day; page 2 of size 2 skips the
+     * Feb 27 and Feb 14 days, starts in the Feb 2 day segment with residual 0 and returns Feb's 3rd
+     * transaction and Jan's 1st -- two distinct months touched, five day counter rows read.
      */
     @Test
     void metrics_record_residual_and_counter_rows() {
@@ -181,8 +239,8 @@ class ProjectionReaderTest extends ReadPropertyBase {
         ProjectionPage page = probe.readLevel0(webQuery, new Level0Request(ALL, from, to, 2, 2));
 
         assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("f1", "j2");
-        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isEqualTo(2);
-        assertThat(registry.get("wqs.read.counter.rows").summary().max()).isEqualTo(2);
+        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isZero();
+        assertThat(registry.get("wqs.read.counter.rows").summary().max()).isEqualTo(5);
         assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "0").summary().max())
                 .isEqualTo(2);
         assertThat(registry.get("wqs.read.pagesize").tag("endpoint", "web").summary().max()).isEqualTo(2);
@@ -198,8 +256,9 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
     /**
      * Spec 7.6: the walk skips whole segments by their counts, so the key query starts at the
-     * target segment's end with only the residual. Page 3 of size 2 is offset 4; Feb holds 3, so
-     * the walk lands in Jan with residual 1 -- naive OFFSET would query [from, to) with offset 4.
+     * target segment's end with only the residual. Page 3 of size 2 is offset 4; the four newer
+     * days hold one transaction each, so the walk lands in the Jan 5 day with residual 0 -- naive
+     * OFFSET would query [from, to) with offset 4.
      */
     @Test
     void walk_lands_in_the_target_segment_with_a_small_residual() {
@@ -214,12 +273,12 @@ class ProjectionReaderTest extends ReadPropertyBase {
         ProjectionPage page = probe.readLevel0(recording, new Level0Request(ALL, from, to, 3, 2));
 
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
-                from, Instant.parse("2034-02-01T00:00:00Z"), 1, 1));
-        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isEqualTo(1);
+                from, Instant.parse("2034-01-06T00:00:00Z"), 0, 1));
+        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isZero();
         assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("j1");
     }
 
-    /** Zero-count segments are walked past: Feb is empty, so offset 3 skips Mar (3) and Feb (0). */
+    /** Zero-count segments are walked past: Feb is empty, so offset 3 skips Mar's days (3) and Feb's (0). */
     @Test
     void walk_skips_an_empty_middle_segment() {
         applyBatches(List.of(
@@ -235,7 +294,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         ProjectionPage page = reader.readLevel0(recording, new Level0Request(ALL, from, to, 2, 3));
 
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
-                from, Instant.parse("2034-02-01T00:00:00Z"), 0, 2));
+                from, Instant.parse("2034-01-26T00:00:00Z"), 0, 2));
         assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("j2", "j1");
         assertThat(page.transactions()).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3));
     }
@@ -395,9 +454,10 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     /**
-     * Spec 7.6 at HIGH_LEVEL: page 3 of size 2 is offset 4; Feb holds 3 rows, so the walk lands
-     * in Jan with residual 1 and asks for one key -- naive OFFSET would query [from, to) with
-     * offset 4. Metrics carry the request's aggregation level.
+     * Spec 7.6 at HIGH_LEVEL: page 3 of size 2 is offset 4; the four newer days hold one row
+     * each, so the walk lands in the Jan 5 day (session "jb") with residual 0 and asks for one key
+     * -- naive OFFSET would query [from, to) with offset 4. Metrics carry the request's aggregation
+     * level.
      */
     @Test
     void high_level_walk_lands_in_the_target_segment_with_a_small_residual() {
@@ -414,12 +474,12 @@ class ProjectionReaderTest extends ReadPropertyBase {
                 (tx, keys) -> keys);
 
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
-                from, Instant.parse("2034-02-01T00:00:00Z"), 1, 1));
-        assertThat(recording.countCalls).as("whole months need no live count").isZero();
+                from, Instant.parse("2034-01-06T00:00:00Z"), 0, 1));
+        assertThat(recording.countCalls).as("whole days need no live count").isZero();
         assertThat(page.totalRowCount()).isEqualTo(5);
         assertThat(page.entries()).extracting(HighLevelKey::refId).containsExactly("jb");
-        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isEqualTo(1);
-        assertThat(registry.get("wqs.read.counter.rows").summary().max()).isEqualTo(2);
+        assertThat(registry.get("wqs.read.residual.offset").summary().max()).isZero();
+        assertThat(registry.get("wqs.read.counter.rows").summary().max()).isEqualTo(5);
         assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "2").summary().count())
                 .isEqualTo(1);
         assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "0").summary().count())
@@ -554,17 +614,6 @@ class ProjectionReaderTest extends ReadPropertyBase {
     static final class RowCountingCounterReader extends CounterReader {
         final List<LocalDate> dayKeys = new ArrayList<>();
         int dayCalls;
-        int monthCalls;
-
-        @Override
-        public Map<LocalDate, Long> monthCounts(
-                JdbcClient tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
-                java.util.Set<String> productTypes, java.util.Set<String> typeCodes,
-                boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
-            monthCalls++;
-            return super.monthCounts(tx, userId, v, unit, productTypes, typeCodes, excludeCancelled,
-                    firstPeriod, lastPeriod);
-        }
 
         @Override
         public Map<LocalDate, Long> dayCounts(

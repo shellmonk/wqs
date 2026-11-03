@@ -24,7 +24,7 @@ import wqs.gen.TxTypes;
 import wqs.read.Segment.Tier;
 
 /**
- * Property P-5 (spec 7.5, 8.1): the total assembled from monthly counters, daily counters and
+ * Property P-5 (spec 7.5, 8.1): the total assembled from per-day counters and
  * live counts of the sub-day remainders equals a live COUNT over the transaction table, for any range.
  */
 @Tag("property")
@@ -94,7 +94,7 @@ class TotalsPropertyTest extends ReadPropertyBase {
     }
 
     @Example
-    void exact_month_range_reads_no_live_count() {
+    void exact_day_range_reads_no_live_count() {
         reset();
         applyBatches(List.of(
                 transaction("a", "2034-01-01T00:00:00Z"),
@@ -108,8 +108,9 @@ class TotalsPropertyTest extends ReadPropertyBase {
         SegmentCounts sc = readerTx.execute(status ->
                 reader.segmentCounts(readerJdbc, queryFor(ViewKind.WEB), f, from, to));
 
-        assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.MONTH);
-        assertThat(sc.counterRows()).isEqualTo(2);
+        assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.DAY);
+        // One day row each for Jan 1, Jan 17 and Feb 28.
+        assertThat(sc.counterRows()).isEqualTo(3);
         assertThat(sc.total()).isEqualTo(3).isEqualTo(oracle.count(ViewKind.WEB, f, from, to));
         assertThat(reader.total(queryFor(ViewKind.WEB), f, from, to)).isEqualTo(3);
     }

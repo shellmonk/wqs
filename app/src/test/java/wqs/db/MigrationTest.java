@@ -65,8 +65,7 @@ class MigrationTest extends PostgresTestBase {
         assertThat(relkind("wqPrjPlay")).isEqualTo("r");
         assertThat(primaryKey("wqPrjSession")).containsExactly("userId", "batchId");
         assertThat(primaryKey("wqPrjPlay")).containsExactly("userId", "batchId", "subBatchId");
-        assertThat(indexDef("wqPrjSession_startedAt")).endsWith(
-                "(\"userId\", \"startedAt\" DESC, \"batchId\" DESC)");
+        assertThat(relkind("wqPrjSession_startedAt")).as("no session time index: paging reads the timeline").isNull();
         assertThat(relkind("wqPrjGroupLocator")).as("no group locator").isNull();
         assertThat(relkind("wqPrjPlay_batch")).as("the play primary key serves the batch lookup").isNull();
     }
@@ -140,9 +139,10 @@ class MigrationTest extends PostgresTestBase {
                 .as("no product table").isNull();
     }
 
+    /** Plan D3: one per-day counter table, monthly partitioned on "day"; no month tier. */
     @Test
-    void counter_pk_is_user_view_unit_productType_type_period() {
-        for (String table : List.of("wqPrjCountMonth", "wqPrjCountDay")) {
+    void counter_pk_is_user_view_unit_productType_type_day() {
+        for (String table : List.of("wqPrjCount")) {
             List<String> pk = db().column("""
                     select a.attname
                     from pg_index i
@@ -153,18 +153,19 @@ class MigrationTest extends PostgresTestBase {
                     order by k.pos
                     """, String.class, table);
             assertThat(pk).as(table + " primary key").containsExactly(
-                    "userId", "viewKind", "pageUnit", "productType", "type", "period");
+                    "userId", "viewKind", "pageUnit", "productType", "type", "day");
             assertThat(columnType(table, "productType")).as(table).isEqualTo("text");
             assertThat(columnType(table, "type")).as(table).isEqualTo("text");
             assertThat(columnType(table, "productId")).as(table + " has no productId").isNull();
         }
-        // wqPrjCountDay is range-partitioned by "period"; wqPrjCountMonth is not partitioned.
+        assertThat(columnType("wqPrjCount", "day")).isEqualTo("date");
         assertThat(db().value("""
-                select pg_get_partkeydef(to_regclass('"wqPrjCountDay"')::oid)
-                """, String.class)).isEqualTo("RANGE (period)");
-        assertThat(db().value("select relkind::text from pg_class where relname = 'wqPrjCountMonth'", String.class))
-                .isEqualTo("r");
-        for (String table : List.of("wqPrjCountMonth", "wqPrjCountDay")) {
+                select pg_get_partkeydef(to_regclass('"wqPrjCount"')::oid)
+                """, String.class)).isEqualTo("RANGE (day)");
+        for (String gone : List.of("wqPrjCountMonth", "wqPrjCountDay")) {
+            assertThat(relkind(gone)).as(gone + " is gone").isNull();
+        }
+        for (String table : List.of("wqPrjCount")) {
             assertThat(db().value("""
                     select count(*) from pg_constraint
                     where conrelid = to_regclass(?)::oid and contype = 'c'
@@ -176,7 +177,7 @@ class MigrationTest extends PostgresTestBase {
     @Test
     void type_columns_are_text_and_there_is_no_type_table() {
         for (String table : List.of("wqPrjTransaction", "wqPrjPendingCancel",
-                "wqPrjCountMonth", "wqPrjCountDay")) {
+                "wqPrjCount")) {
             assertThat(columnType(table, "type")).as(table + ".type").isEqualTo("text");
             assertThat(nullable(table, "type")).as(table + ".type").isFalse();
         }

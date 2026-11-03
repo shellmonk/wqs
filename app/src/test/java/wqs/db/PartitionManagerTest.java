@@ -27,7 +27,7 @@ class PartitionManagerTest extends PostgresTestBase {
         assertThat(testPartitionNames())
                 .contains("wqPrjTransaction_2031_01", "wqPrjTransaction_2031_02", "wqPrjTransaction_2031_03",
                           "wqPrjTimeline_2031_01", "wqPrjTimeline_2031_02", "wqPrjTimeline_2031_03",
-                          "wqPrjCountDay_2031_01", "wqPrjCountDay_2031_02", "wqPrjCountDay_2031_03");
+                          "wqPrjCount_2031_01", "wqPrjCount_2031_02", "wqPrjCount_2031_03");
     }
 
     @Test
@@ -83,18 +83,18 @@ class PartitionManagerTest extends PostgresTestBase {
 
         for (String day : List.of("2031-01-01", "2031-01-31", "2031-02-01", "2031-02-28")) {
             db().execute("""
-                          insert into "wqPrjCountDay"
-                            ("userId","viewKind","pageUnit","productType","type","period","cntAll","cntExclCancelled")
+                          insert into "wqPrjCount"
+                            ("userId","viewKind","pageUnit","productType","type","day","cntAll","cntExclCancelled")
                           values (1, 1, 0, '', '', date '%s', 1, 1)
                           """.formatted(day));
         }
 
-        assertThat(rowsIn("wqPrjCountDay_2031_01")).containsExactlyInAnyOrder("2031-01-01", "2031-01-31");
-        assertThat(rowsIn("wqPrjCountDay_2031_02")).containsExactlyInAnyOrder("2031-02-01", "2031-02-28");
+        assertThat(rowsIn("wqPrjCount_2031_01")).containsExactlyInAnyOrder("2031-01-01", "2031-01-31");
+        assertThat(rowsIn("wqPrjCount_2031_02")).containsExactlyInAnyOrder("2031-02-01", "2031-02-28");
     }
 
     private List<String> rowsIn(String partition) {
-        return db().column("select \"period\"::text from \"" + partition + "\"", String.class);
+        return db().column("select \"day\"::text from \"" + partition + "\"", String.class);
     }
 
     private void dropTestPartitions() {

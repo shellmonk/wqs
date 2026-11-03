@@ -27,13 +27,14 @@ class RangeDecompositionTest {
         return new Segment(t(from), t(to), tier);
     }
 
-    /** C1 ruling: the full clamped domain [1970, 2200) decomposes into at most 2,760 months. */
+    /** Plan D3: the full clamped domain [1970, 2200) decomposes into its whole days, no live end. */
     @Test
-    void full_clamped_domain_is_at_most_2760_months() {
+    void full_clamped_domain_is_whole_days() {
         List<Segment> segments = RangeDecomposition.newestFirst(
                 wqs.domain.DataDomain.START, wqs.domain.DataDomain.END);
-        assertThat(segments).allMatch(s -> s.tier() == Tier.MONTH);
-        assertThat(segments).hasSizeLessThanOrEqualTo(2_760);
+        assertThat(segments).allMatch(s -> s.tier() == Tier.DAY);
+        assertThat(segments).hasSize((int) ChronoUnit.DAYS.between(
+                wqs.domain.DataDomain.START, wqs.domain.DataDomain.END));
     }
 
     @Test
@@ -43,7 +44,7 @@ class RangeDecompositionTest {
     }
 
     @Test
-    void same_month_has_days_and_two_live_ends_no_month() {
+    void partial_days_are_live_and_whole_days_are_days() {
         assertThat(RangeDecomposition.newestFirst(t("2034-03-05T10:00:00Z"), t("2034-03-09T06:00:00Z")))
                 .containsExactly(
                         seg("2034-03-09T00:00:00Z", "2034-03-09T06:00:00Z", Tier.LIVE),
@@ -55,10 +56,11 @@ class RangeDecompositionTest {
 
     @Test
     void exact_boundaries_produce_no_live_segment() {
-        assertThat(RangeDecomposition.newestFirst(t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z")))
+        assertThat(RangeDecomposition.newestFirst(t("2034-01-01T00:00:00Z"), t("2034-01-04T00:00:00Z")))
                 .containsExactly(
-                        seg("2034-02-01T00:00:00Z", "2034-03-01T00:00:00Z", Tier.MONTH),
-                        seg("2034-01-01T00:00:00Z", "2034-02-01T00:00:00Z", Tier.MONTH));
+                        seg("2034-01-03T00:00:00Z", "2034-01-04T00:00:00Z", Tier.DAY),
+                        seg("2034-01-02T00:00:00Z", "2034-01-03T00:00:00Z", Tier.DAY),
+                        seg("2034-01-01T00:00:00Z", "2034-01-02T00:00:00Z", Tier.DAY));
     }
 
     @Test
@@ -73,8 +75,9 @@ class RangeDecompositionTest {
     @Test
     void five_year_range_counts() {
         List<Segment> s = RangeDecomposition.newestFirst(t("2030-01-15T13:00:00Z"), t("2035-01-15T09:00:00Z"));
-        assertThat(s.stream().filter(x -> x.tier() == Tier.MONTH)).hasSize(59);
-        assertThat(s.stream().filter(x -> x.tier() == Tier.DAY)).hasSize(30);
+        // 2030-01-16 .. 2035-01-14 inclusive: 1,827 days spanning 5 years, two of them leap (2032).
+        assertThat(s.stream().filter(x -> x.tier() == Tier.DAY)).hasSize(
+                (int) ChronoUnit.DAYS.between(LocalDate.parse("2030-01-16"), LocalDate.parse("2035-01-15")));
         assertThat(s.stream().filter(x -> x.tier() == Tier.LIVE)).hasSize(2);
     }
 
@@ -120,17 +123,9 @@ class RangeDecompositionTest {
             assertThat(s.start()).isBefore(s.end());
             LocalDate d = LocalDate.ofInstant(s.start(), ZoneOffset.UTC);
             switch (s.tier()) {
-                case MONTH -> {
-                    assertThat(s.start()).isEqualTo(d.withDayOfMonth(1).atStartOfDay(ZoneOffset.UTC).toInstant());
-                    assertThat(s.end()).isEqualTo(
-                            d.withDayOfMonth(1).plusMonths(1).atStartOfDay(ZoneOffset.UTC).toInstant());
-                }
                 case DAY -> {
                     assertThat(s.start()).isEqualTo(d.atStartOfDay(ZoneOffset.UTC).toInstant());
                     assertThat(s.end()).isEqualTo(d.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant());
-                    Instant ms = d.withDayOfMonth(1).atStartOfDay(ZoneOffset.UTC).toInstant();
-                    Instant me = d.withDayOfMonth(1).plusMonths(1).atStartOfDay(ZoneOffset.UTC).toInstant();
-                    assertThat(!ms.isBefore(a) && !me.isAfter(b)).isFalse();
                 }
                 case LIVE -> {
                     live++;

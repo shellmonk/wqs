@@ -63,8 +63,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "b1", "p1"), tx("t2", "b1", "p1")), 1L));
 
-        assertThat(sentinel("wqPrjCountDay", 0)).isEqualTo(2);   // TRANSACTION
-        assertThat(sentinel("wqPrjCountDay", 1)).isEqualTo(1);   // HIGH_LEVEL -- one session
+        assertThat(sentinel("wqPrjCount", 0)).isEqualTo(2);   // TRANSACTION
+        assertThat(sentinel("wqPrjCount", 1)).isEqualTo(1);   // HIGH_LEVEL -- one session
     }
 
     @Test
@@ -87,7 +87,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         writer.apply(batch);
 
         assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
-        assertThat(sentinel("wqPrjCountDay", 0)).isEqualTo(1);
+        assertThat(sentinel("wqPrjCount", 0)).isEqualTo(1);
         assertThat(sessionTxCount()).isEqualTo(1);
     }
 
@@ -101,9 +101,9 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
         // It is a row in both transaction tables, so P-2 requires it to be counted at TRANSACTION level.
         assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
-        assertThat(sentinel("wqPrjCountDay", 0)).isEqualTo(1);
+        assertThat(sentinel("wqPrjCount", 0)).isEqualTo(1);
         assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isZero();
-        assertThat(sentinel("wqPrjCountDay", 1)).isZero();
+        assertThat(sentinel("wqPrjCount", 1)).isZero();
         assertThat(count("wqPrjSession")).isZero();
     }
 
@@ -306,9 +306,9 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     /** The day counter at test product {@code product}'s type; 0 reads the ALL sentinel ''. */
     private int productDayCount(int view, int pageUnit, int product, Instant at) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqPrjCountDay"
+                select coalesce(sum("cntAll"),0)::int from "wqPrjCount"
                 where "viewKind" = ? and "pageUnit" = ? and "productType" = ? and "type" = ''
-                  and "period" = (?::timestamptz at time zone 'UTC')::date
+                  and "day" = (?::timestamptz at time zone 'UTC')::date
                 """, Integer.class, (short) view, (short) pageUnit, product == 0 ? "" : Products.type(product),
                 at.toString());
     }
@@ -355,18 +355,19 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 """.formatted(table), Integer.class, (short) pageUnit);
     }
 
+    /** The HIGH_LEVEL/TRANSACTION sentinel summed over the day rows of one UTC month. */
     private int monthSentinel(int view, int pageUnit, String period) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqPrjCountMonth"
+                select coalesce(sum("cntAll"),0)::int from "wqPrjCount"
                 where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
-                  and "period" = ?::date
-                """, Integer.class, (short) view, (short) pageUnit, period);
+                  and "day" >= ?::date and "day" < ?::date + interval '1 month'
+                """, Integer.class, (short) view, (short) pageUnit, period, period);
     }
 
     /** Non-zero day-tier sentinel cntAll per UTC day for one view and page unit. */
     private Map<String, Integer> sentinelsByDay(int view, int pageUnit) {
         return toMap(db().rows("""
-                select "period"::text as d, "cntAll"::int as n from "wqPrjCountDay"
+                select "day"::text as d, "cntAll"::int as n from "wqPrjCount"
                 where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
                   and "cntAll" > 0
                 """, (short) view, (short) pageUnit));

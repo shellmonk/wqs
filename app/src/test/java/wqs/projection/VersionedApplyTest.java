@@ -91,8 +91,7 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(after.sessions()).isEqualTo(before.sessions());
         assertThat(after.plays()).isEqualTo(before.plays());
         assertThat(after.timeline()).isEqualTo(before.timeline());
-        assertThat(after.countDay()).isEqualTo(before.countDay());
-        assertThat(after.countMonth()).isEqualTo(before.countMonth());
+        assertThat(after.counts()).isEqualTo(before.counts());
         assertThat(after.locator()).isEqualTo(before.locator());
         // Replaced in every view the source feeds.
         assertThat(detail("wqPrjWebTransaction", "pr1")).isEqualTo(DETAIL_V2);
@@ -217,7 +216,7 @@ class VersionedApplyTest extends PostgresTestBase {
         DeltaResult result = writer.applyDelta(batch(null, retailer));
 
         assertThat(result.skipped()).isEqualTo(1);
-        for (String table : List.of("wqPrjTransactionLocator", "wqPrjTransaction", "wqPrjTimeline", "wqPrjCountDay", "wqDeadLetter")) {
+        for (String table : List.of("wqPrjTransactionLocator", "wqPrjTransaction", "wqPrjTimeline", "wqPrjCount", "wqDeadLetter")) {
             assertThat(count(table)).as(table).isZero();
         }
         assertThat(meters.counter("wqs.ingest.skipped", "reason", "non-player").count()).isEqualTo(skipped + 1);
@@ -293,7 +292,7 @@ class VersionedApplyTest extends PostgresTestBase {
 
     private int transactionSentinel(int view) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqPrjCountDay"
+                select coalesce(sum("cntAll"),0)::int from "wqPrjCount"
                 where "viewKind" = ? and "pageUnit" = 0 and "productType" = '' and "type" = ''
                 """, Integer.class, (short) view);
     }

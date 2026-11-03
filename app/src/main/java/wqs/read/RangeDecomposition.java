@@ -7,8 +7,14 @@ import java.util.ArrayList;
 import java.util.List;
 import wqs.read.Segment.Tier;
 
-/** Splits [from, to) into maximal whole months, whole days and live remainders, newest first (spec 7.5). */
+/**
+ * Splits [from, to) into whole UTC days and the live remainders at either end, newest first
+ * (spec 7.5, plan D3). Whole days are read from the per-day counters, the partial boundary days by
+ * a live count.
+ */
 public final class RangeDecomposition {
+
+    private static final long DAY_SECONDS = 86_400;
 
     private RangeDecomposition() {}
 
@@ -26,18 +32,10 @@ public final class RangeDecomposition {
         if (to.isAfter(toFloorDay)) {
             out.add(new Segment(toFloorDay, to, Tier.LIVE));
         }
-        Instant firstMonth = ceilMonth(fromCeilDay);
-        Instant lastMonth = floorMonth(toFloorDay);
-        if (firstMonth.isAfter(lastMonth)) {
-            days(out, fromCeilDay, toFloorDay);
-        } else {
-            days(out, lastMonth, toFloorDay);
-            for (Instant m = lastMonth; m.isAfter(firstMonth); ) {
-                Instant prev = plusMonths(m, -1);
-                out.add(new Segment(prev, m, Tier.MONTH));
-                m = prev;
-            }
-            days(out, fromCeilDay, firstMonth);
+        for (Instant d = toFloorDay; d.isAfter(fromCeilDay); ) {
+            Instant prev = d.minusSeconds(DAY_SECONDS);
+            out.add(new Segment(prev, d, Tier.DAY));
+            d = prev;
         }
         if (from.isBefore(fromCeilDay)) {
             out.add(new Segment(from, fromCeilDay, Tier.LIVE));
@@ -45,38 +43,12 @@ public final class RangeDecomposition {
         return out;
     }
 
-    /** Appends the days of [start, end) newest first. */
-    private static void days(List<Segment> out, Instant start, Instant end) {
-        for (Instant d = end; d.isAfter(start); ) {
-            Instant prev = d.minusSeconds(86_400);
-            out.add(new Segment(prev, d, Tier.DAY));
-            d = prev;
-        }
-    }
-
     private static Instant floorDay(Instant i) {
-        return date(i).atStartOfDay(ZoneOffset.UTC).toInstant();
+        return LocalDate.ofInstant(i, ZoneOffset.UTC).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 
     private static Instant ceilDay(Instant i) {
         Instant f = floorDay(i);
-        return f.equals(i) ? f : f.plusSeconds(86_400);
-    }
-
-    private static Instant floorMonth(Instant i) {
-        return date(i).withDayOfMonth(1).atStartOfDay(ZoneOffset.UTC).toInstant();
-    }
-
-    private static Instant ceilMonth(Instant i) {
-        Instant f = floorMonth(i);
-        return f.equals(i) ? f : plusMonths(f, 1);
-    }
-
-    private static Instant plusMonths(Instant monthStart, int n) {
-        return date(monthStart).plusMonths(n).atStartOfDay(ZoneOffset.UTC).toInstant();
-    }
-
-    private static LocalDate date(Instant i) {
-        return LocalDate.ofInstant(i, ZoneOffset.UTC);
+        return f.equals(i) ? f : f.plusSeconds(DAY_SECONDS);
     }
 }

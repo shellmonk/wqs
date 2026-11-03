@@ -18,14 +18,14 @@ import wqs.domain.ProjectionTransaction;
 import wqs.domain.ViewKind;
 
 /**
- * Maintains the two-tier pagination counters (spec 5.7): "wqPrjCountMonth" for whole months and
- * "wqPrjCountDay" for the partial months at each end of a range. Periods are UTC.
+ * Maintains the pagination counters (spec 5.7, plan D3): one "wqPrjCount" row per UTC day and
+ * key. A multi-year total sums the day rows of its range in one index range.
  *
- * Keys are (productType, type) per tier. productType = '' is the ALL-product-types
+ * Keys are (productType, type) per day. productType = '' is the ALL-product-types
  * sentinel and type = '' the ALL-transaction-types sentinel ({@link CounterSentinels}), so the
  * common unfiltered query reads one row rather than summing across values.
  *
- * TRANSACTION counters fan out to four keys per tier (plan D4): (pt,t), (pt,ALL), (ALL,t), (ALL,ALL),
+ * TRANSACTION counters fan out to four keys per day (plan D4): (pt,t), (pt,ALL), (ALL,t), (ALL,ALL),
  * where t is the transaction's type. A transaction with no product type writes only the two ALL-product keys.
  * HIGH_LEVEL counters never carry a type: (pt,ALL) and (ALL,ALL), or (ALL,ALL) alone without a
  * product type.
@@ -52,8 +52,7 @@ import wqs.domain.ViewKind;
 @Component
 public class CounterUpdater {
 
-    private static final Tier MONTH = Tier.of("wqPrjCountMonth");
-    private static final Tier DAY = Tier.of("wqPrjCountDay");
+    private static final String TABLE = "wqPrjCount";
 
     private final JdbcClient jdbc;
 
@@ -72,7 +71,7 @@ public class CounterUpdater {
 
     /**
      * Counts one high-level page unit in ONE view: +1 cntAll and +1 cntExclCancelled (a newly
-     * inserted page-index row is visible), at the day and month of {@code at}, for the row's own
+     * inserted page-index row is visible), at the day of {@code at}, for the row's own
      * product type and the sentinel.
      */
     @Transactional(propagation = Propagation.MANDATORY)
@@ -84,7 +83,7 @@ public class CounterUpdater {
     /**
      * Moves one high-level page unit between counter keys in ONE view: -1 cntAll (and -1
      * cntExclCancelled iff {@code visibleExclCancelled}) at keys only the old position has, +1
-     * at keys only the new position has. Keys shared by both (same day / month / product type, and
+     * at keys only the new position has. Keys shared by both (same day / product type, and
      * the sentinel on a product-only change) are left untouched, so a move that maps to the same
      * key set is a no-op.
      */
@@ -113,7 +112,7 @@ public class CounterUpdater {
             long userId, ViewKind view, PageUnit unit, String productType, String type,
             Instant at) {
         for (Key key : keys(unit, productType, type, at)) {
-            decrementExcl(tier(key.month()), userId, view, unit, key);
+            decrementExcl(userId, view, unit, key);
         }
     }
 
@@ -129,22 +128,21 @@ public class CounterUpdater {
             long userId, ViewKind view, PageUnit unit, String productType, String type,
             Instant at) {
         for (Key key : keys(unit, productType, type, at)) {
-            incrementExcl(tier(key.month()), userId, view, unit, key);
+            incrementExcl(userId, view, unit, key);
         }
     }
 
     // --- internals -----------------------------------------------------------------------
 
-    /** One counter row address within a tier. */
-    private record Key(boolean month, String productType, String type, LocalDate period) {}
+    /** One counter row address. */
+    private record Key(String productType, String type, LocalDate day) {}
 
     /**
      * The key set of one page unit: {own product type, ALL} x {own type, ALL} for TRANSACTION,
-     * {own product type, ALL} x {ALL} for HIGH_LEVEL (its {@code type} is ignored), in both tiers.
+     * {own product type, ALL} x {ALL} for HIGH_LEVEL (its {@code type} is ignored), at the UTC day of {@code at}.
      */
     private static Set<Key> keys(PageUnit unit, String productType, String type, Instant at) {
         LocalDate day = LocalDate.ofInstant(at, ZoneOffset.UTC);
-        LocalDate monthStart = day.withDayOfMonth(1);
         Set<String> products = new LinkedHashSet<>();
         if (productType != null) {
             products.add(productType);
@@ -158,8 +156,7 @@ public class CounterUpdater {
         Set<Key> keys = new LinkedHashSet<>();
         for (String p : products) {
             for (String t : types) {
-                keys.add(new Key(false, p, t, day));
-                keys.add(new Key(true, p, t, monthStart));
+                keys.add(new Key(p, t, day));
             }
         }
         return keys;
@@ -168,65 +165,49 @@ public class CounterUpdater {
     private void apply(
             Set<Key> keys, long userId, ViewKind view, PageUnit unit, int delta, boolean excl) {
         for (Key key : keys) {
-            Tier tier = tier(key.month());
             if (delta > 0) {
-                increment(tier, userId, view, unit, key, excl);
+                increment(userId, view, unit, key, excl);
             } else {
-                decrement(tier, userId, view, unit, key, excl);
+                decrement(userId, view, unit, key, excl);
             }
         }
-    }
-
-    private static Tier tier(boolean month) {
-        return month ? MONTH : DAY;
     }
 
     /** The row key every statement below addresses, appended after its SET values. */
     private static final String ROW_IS = """
             where "userId" = ? and "viewKind" = ? and "pageUnit" = ? and "productType" = ?
-              and "type" = ? and "period" = ?
+              and "type" = ? and "day" = ?
             """;
 
-    /** The two counter tables share one column shape; this carries a table's statements. */
-    private record Tier(
-            String table,
-            String increment,
-            String decrement,
-            String decrementWithExcl,
-            String delete,
-            String decrementExcl,
-            String incrementExcl) {
+    // The table name comes from a fixed constant only; every value is bound.
+    private static final String INCREMENT = """
+            insert into "wqPrjCount" ("userId", "viewKind", "pageUnit", "productType", "type", "day",
+                    "cntAll", "cntExclCancelled")
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict ("userId", "viewKind", "pageUnit", "productType", "type", "day")
+            do update set "cntAll" = "wqPrjCount"."cntAll" + ?,
+                          "cntExclCancelled" = "wqPrjCount"."cntExclCancelled" + ?
+            """;
+    private static final String DECREMENT =
+            "update \"wqPrjCount\" set \"cntAll\" = \"wqPrjCount\".\"cntAll\" - ?\n" + ROW_IS
+                    + "returning \"cntAll\"";
+    private static final String DECREMENT_WITH_EXCL =
+            "update \"wqPrjCount\" set \"cntAll\" = \"wqPrjCount\".\"cntAll\" - ?,"
+                    + " \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" - ?\n" + ROW_IS
+                    + "returning \"cntAll\"";
+    private static final String DELETE = "delete from \"wqPrjCount\"\n" + ROW_IS;
+    private static final String DECREMENT_EXCL =
+            "update \"wqPrjCount\" set \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" - ?\n"
+                    + ROW_IS;
+    private static final String INCREMENT_EXCL =
+            "update \"wqPrjCount\" set \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" + ?\n"
+                    + ROW_IS;
 
-        static Tier of(String table) {
-            String t = "\"" + table + "\"";
-            return new Tier(
-                    table,
-                    """
-                    insert into %1$s ("userId", "viewKind", "pageUnit", "productType", "type", "period",
-                            "cntAll", "cntExclCancelled")
-                    values (?, ?, ?, ?, ?, ?, ?, ?)
-                    on conflict ("userId", "viewKind", "pageUnit", "productType", "type", "period")
-                    do update set "cntAll" = %1$s."cntAll" + ?,
-                                  "cntExclCancelled" = %1$s."cntExclCancelled" + ?
-                    """.formatted(t),
-                    ("update %1$s set \"cntAll\" = %1$s.\"cntAll\" - ?\n" + ROW_IS
-                            + "returning \"cntAll\"").formatted(t),
-                    ("update %1$s set \"cntAll\" = %1$s.\"cntAll\" - ?,"
-                            + " \"cntExclCancelled\" = %1$s.\"cntExclCancelled\" - ?\n" + ROW_IS
-                            + "returning \"cntAll\"").formatted(t),
-                    ("delete from %1$s\n" + ROW_IS).formatted(t),
-                    ("update %1$s set \"cntExclCancelled\" = %1$s.\"cntExclCancelled\" - ?\n" + ROW_IS)
-                            .formatted(t),
-                    ("update %1$s set \"cntExclCancelled\" = %1$s.\"cntExclCancelled\" + ?\n" + ROW_IS)
-                            .formatted(t));
-        }
-    }
-
-    private void increment(Tier t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
+    private void increment(long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
         long exclDelta = excl ? 1L : 0L;
-        jdbc.sql(t.increment())
+        jdbc.sql(INCREMENT)
                 .params(userId, (short) view.code(), unit.code(), key.productType(), key.type(),
-                        key.period(), 1L, exclDelta, 1L, exclDelta)
+                        key.day(), 1L, exclDelta, 1L, exclDelta)
                 .update();
     }
 
@@ -236,55 +217,55 @@ public class CounterUpdater {
      * row at every key a page unit passed through, making stored state depend on arrival order
      * (spec P-1). cntExclCancelled &lt;= cntAll (CHECK), so a deleted row holds nothing.
      */
-    private void decrement(Tier t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
+    private void decrement(long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
         var statement = excl
-                ? jdbc.sql(t.decrementWithExcl()).params(1L, 1L)
-                : jdbc.sql(t.decrement()).param(1L);
+                ? jdbc.sql(DECREMENT_WITH_EXCL).params(1L, 1L)
+                : jdbc.sql(DECREMENT).param(1L);
         Long remaining = statement
                 .params(userId, (short) view.code(), unit.code(), key.productType(), key.type(),
-                        key.period())
+                        key.day())
                 .query(Long.class)
                 .optional()
                 .orElse(null);
-        requireOneRow(remaining == null ? 0 : 1, t, userId, view, unit, key);
+        requireOneRow(remaining == null ? 0 : 1, userId, view, unit, key);
         if (remaining == 0L) {
-            jdbc.sql(t.delete())
+            jdbc.sql(DELETE)
                     .params(rowIs(userId, view, unit, key))
                     .update();
         }
     }
 
-    private void decrementExcl(Tier t, long userId, ViewKind view, PageUnit unit, Key key) {
-        int rows = jdbc.sql(t.decrementExcl())
+    private void decrementExcl(long userId, ViewKind view, PageUnit unit, Key key) {
+        int rows = jdbc.sql(DECREMENT_EXCL)
                 .param(1L)
                 .params(rowIs(userId, view, unit, key))
                 .update();
-        requireOneRow(rows, t, userId, view, unit, key);
+        requireOneRow(rows, userId, view, unit, key);
     }
 
-    private void incrementExcl(Tier t, long userId, ViewKind view, PageUnit unit, Key key) {
-        int rows = jdbc.sql(t.incrementExcl())
+    private void incrementExcl(long userId, ViewKind view, PageUnit unit, Key key) {
+        int rows = jdbc.sql(INCREMENT_EXCL)
                 .param(1L)
                 .params(rowIs(userId, view, unit, key))
                 .update();
-        requireOneRow(rows, t, userId, view, unit, key);
+        requireOneRow(rows, userId, view, unit, key);
     }
 
     private static void requireOneRow(
-            int rows, Tier t, long userId, ViewKind view, PageUnit unit, Key key) {
+            int rows, long userId, ViewKind view, PageUnit unit, Key key) {
         if (rows != 1) {
             throw new IllegalStateException(
                     "counter update hit " + rows + " rows, expected 1: table="
-                            + t.table() + " userId=" + userId + " view=" + view
+                            + TABLE + " userId=" + userId + " view=" + view
                             + " unit=" + unit + " productType='" + key.productType() + "'"
                             + " type='" + key.type() + "'"
-                            + " period=" + key.period());
+                            + " day=" + key.day());
         }
     }
 
     /** The bind values of {@link #ROW_IS}, in order. */
     private static Object[] rowIs(long userId, ViewKind view, PageUnit unit, Key key) {
         return new Object[] {
-                userId, (short) view.code(), unit.code(), key.productType(), key.type(), key.period()};
+                userId, (short) view.code(), unit.code(), key.productType(), key.type(), key.day()};
     }
 }
