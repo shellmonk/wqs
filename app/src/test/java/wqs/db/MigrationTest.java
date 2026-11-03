@@ -215,6 +215,38 @@ class MigrationTest extends PostgresTestBase {
         assertThat(db.fetchCount(DSL.table(DSL.name("wqCountDay_2030_03")))).isEqualTo(1);
     }
 
+    /** D5: the versioned-upsert column and the delta poller's watermark table. */
+    @Test
+    void v13_adds_versionAt_and_watermark_table() {
+        assertThat(columnType("wqItemLocator", "versionAt")).isEqualTo("timestamp with time zone");
+        assertThat(nullable("wqItemLocator", "versionAt")).as("null for stream items").isTrue();
+
+        assertThat(columnType("wqIngestWatermark", "source")).isEqualTo("text");
+        assertThat(columnType("wqIngestWatermark", "watermark")).isEqualTo("timestamp with time zone");
+        assertThat(columnType("wqIngestWatermark", "updatedAt")).isEqualTo("timestamp with time zone");
+        assertThat(nullable("wqIngestWatermark", "watermark")).isFalse();
+        assertThat(nullable("wqIngestWatermark", "updatedAt")).isFalse();
+        List<String> pk = dsl().fetch("""
+                select a.attname from pg_index i
+                join pg_class c on c.oid = i.indrelid
+                join pg_attribute a on a.attrelid = c.oid and a.attnum = any(i.indkey)
+                where c.relname = 'wqIngestWatermark' and i.indisprimary
+                """).getValues(0, String.class);
+        assertThat(pk).containsExactly("source");
+        String updatedAtDefault = dsl().fetchOne("""
+                select column_default from information_schema.columns
+                where table_schema = 'public' and table_name = 'wqIngestWatermark' and column_name = 'updatedAt'
+                """).get(0, String.class);
+        assertThat(updatedAtDefault).isEqualTo("now()");
+    }
+
+    private static boolean nullable(String table, String column) {
+        return "YES".equals(dsl().fetchOne("""
+                select is_nullable from information_schema.columns
+                where table_schema = 'public' and table_name = ? and column_name = ?
+                """, table, column).get(0, String.class));
+    }
+
     private static String columnType(String table, String column) {
         var row = dsl().fetchOne("""
                 select data_type from information_schema.columns

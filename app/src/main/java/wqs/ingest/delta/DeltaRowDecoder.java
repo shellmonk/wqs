@@ -1,0 +1,185 @@
+package wqs.ingest.delta;
+
+import static wqs.ingest.StrictJson.detailScalar;
+import static wqs.ingest.StrictJson.instant;
+import static wqs.ingest.StrictJson.integral;
+import static wqs.ingest.StrictJson.money;
+import static wqs.ingest.StrictJson.optional;
+import static wqs.ingest.StrictJson.required;
+import static wqs.ingest.StrictJson.text;
+import static wqs.ingest.StrictJson.textual;
+import static wqs.ingest.StrictJson.typeCode;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import org.springframework.stereotype.Component;
+import wqs.db.TxTypeRegistry;
+import wqs.domain.ProjectionItem;
+import wqs.domain.SourceKind;
+import wqs.projection.source.DeltaRow;
+
+/**
+ * Decodes one {@code /wallet/delta} row -- the union of the four polled tables' columns, keyed by
+ * their camelCase DDL names, plus {@code source} (phase 6 plan D1) -- into a {@link DeltaRow}.
+ *
+ * <p>Field mapping per plan D3, "detail" per the D4 allowlist (never card, bank, e-mail or xml
+ * data: {@code walPayments} holds encrypted PII). Every check is strict ({@link wqs.ingest.StrictJson}):
+ * an unknown {@code source}, a missing required field, a malformed owner or a bad number or
+ * timestamp throws {@link IllegalArgumentException}, which the poller dead-letters as poison.
+ *
+ * <p>The owner is decoded for every row, players or not; the non-player gate is the writer's
+ * (ruling R1), so a malformed non-player row is poison rather than silently skipped, as on the
+ * stream (spec 4.1).
+ *
+ * <p>One class with golden fixtures on purpose: when a real sample of the endpoint arrives, only
+ * this class, its fixtures and {@link DeltaProperties} change.
+ */
+@Component
+public class DeltaRowDecoder {
+
+    /** The synthetic type code of every claimable prize, which has no type column (D3). */
+    public static final String CLAIMABLE_PRIZE_TYPE = "CLAIMABLE_PRIZE";
+    /** ISO 4217 "no currency", for a row whose currency is null (a count-based limit). */
+    public static final String NO_CURRENCY = "XXX";
+
+    private static final int PLAYER = 1;
+    private static final ObjectMapper DETAIL_MAPPER = new ObjectMapper();
+
+    private static final List<String> PAYMENT_DETAIL = List.of(
+            "paymentType", "paymentInOut", "status", "statusDate", "channel", "subChannel", "description",
+            "grossAmount", "serviceCost", "workflowStatus", "reviewHandling", "approved", "verified");
+    private static final List<String> PRIZE_DETAIL = List.of(
+            "status", "prizeLevel", "wagerAmount", "onHold", "holdReason", "workflowStatus",
+            "claimExpiryTimestamp", "prizeClaimedTimestamp", "claimEndedTimestamp");
+    private static final List<String> ADJUSTMENT_DETAIL = List.of(
+            "operation", "transactionType", "transactionSubtype", "status", "statusDate", "reason",
+            "approved", "rejected");
+    private static final List<String> LIMIT_DETAIL = List.of(
+            "quantityType", "limitType", "period", "count", "gameGroup", "paymentMethodType", "channel",
+            "effectiveFrom", "effectiveUntil", "approved", "reason");
+
+    private final DeltaProperties properties;
+
+    public DeltaRowDecoder(DeltaProperties properties) {
+        this.properties = properties;
+    }
+
+    /**
+     * @param registry resolves the type code to its stored id, registering an unseen code as NEUTRAL
+     * @throws IllegalArgumentException if the row is poison
+     */
+    public DeltaRow decode(JsonNode row, TxTypeRegistry registry) {
+        if (row == null || !row.isObject()) {
+            throw new IllegalArgumentException("delta row is not a JSON object");
+        }
+        String sourceValue = textual(required(row, "source"), "source");
+        SourceKind source = properties.sourceOf(sourceValue)
+                .orElseThrow(() -> new IllegalArgumentException("unknown delta source: " + sourceValue));
+        return switch (source) {
+            case PAYMENT -> payment(row, registry);
+            case CLAIMABLE_PRIZE -> prize(row, registry);
+            case MANUAL_ADJUSTMENT -> adjustment(row, registry);
+            case LIMIT -> limit(row, registry);
+            case TRANSACTION -> throw new IllegalArgumentException("transactions are never polled");
+        };
+    }
+
+    private static DeltaRow payment(JsonNode row, TxTypeRegistry registry) {
+        int ownerType = ownerType(row, "ownerType");
+        long userId = id(row, "ownerId");
+        long direction = integral(required(row, "paymentInOut"), "paymentInOut", Integer.MAX_VALUE);
+        BigDecimal amount = money(required(row, "amount"), "amount").abs();
+        if (direction == 2) {
+            amount = amount.negate();
+        } else if (direction != 1) {
+            throw new IllegalArgumentException("paymentInOut must be 1 (IN) or 2 (OUT)");
+        }
+        return row(SourceKind.PAYMENT, ownerType, userId, row, "paymentId", "created", "updated",
+                amount, typeCode(textual(required(row, "paymentType"), "paymentType"), "paymentType"),
+                null, null, null, null, PAYMENT_DETAIL, registry);
+    }
+
+    private static DeltaRow prize(JsonNode row, TxTypeRegistry registry) {
+        return row(SourceKind.CLAIMABLE_PRIZE, PLAYER, id(row, "playerId"), row, "id", "created", "updated",
+                money(required(row, "prizeAmount"), "prizeAmount"), CLAIMABLE_PRIZE_TYPE,
+                text(row, "productId"), text(row, "productType"), text(row, "batchId"), text(row, "subBatchId"),
+                PRIZE_DETAIL, registry);
+    }
+
+    /** No {@code created} column: the request's {@code issued} is when it came to exist; no {@code updated}: {@code statusDate}. */
+    private static DeltaRow adjustment(JsonNode row, TxTypeRegistry registry) {
+        int ownerType = ownerType(row, "userType");
+        long userId = id(row, "userId");
+        String operation = textual(required(row, "operation"), "operation");
+        BigDecimal amount = money(required(row, "amount"), "amount").abs();
+        switch (operation) {
+            case "DEPOSIT" -> { }
+            case "WITHDRAWAL" -> amount = amount.negate();
+            default -> throw new IllegalArgumentException("operation must be DEPOSIT or WITHDRAWAL");
+        }
+        return row(SourceKind.MANUAL_ADJUSTMENT, ownerType, userId, row, "id", "issued", "statusDate",
+                amount, typeCode(textual(required(row, "transactionType"), "transactionType"), "transactionType"),
+                null, null, null, null, ADJUSTMENT_DETAIL, registry);
+    }
+
+    private static DeltaRow limit(JsonNode row, TxTypeRegistry registry) {
+        int ownerType = ownerType(row, "userType");
+        long userId = id(row, "userId");
+        JsonNode amount = optional(row, "amount");
+        return row(SourceKind.LIMIT, ownerType, userId, row, "id", "created", "updated",
+                amount == null ? BigDecimal.ZERO : money(amount, "amount"),
+                typeCode(textual(required(row, "limitType"), "limitType"), "limitType"),
+                null, null, null, null, LIMIT_DETAIL, registry);
+    }
+
+    private static DeltaRow row(
+            SourceKind source, int ownerType, long userId, JsonNode row,
+            String idField, String occurredAtField, String versionField,
+            BigDecimal amount, String typeCode,
+            String productId, String productType, String batchId, String subBatchId,
+            List<String> detailFields, TxTypeRegistry registry) {
+        String sourceId = Long.toString(id(row, idField));
+        Instant occurredAt = instant(required(row, occurredAtField), occurredAtField);
+        Instant version = instant(required(row, versionField), versionField);
+        String currency = text(row, "currency");
+        String detail = detail(row, detailFields);
+        ProjectionItem item = new ProjectionItem(
+                userId, source, sourceId, occurredAt, productId, productType, batchId, subBatchId,
+                registry.idOf(typeCode), amount, currency == null ? NO_CURRENCY : currency,
+                null, null, detail);
+        return new DeltaRow(source, ownerType, userId, version, item);
+    }
+
+    private static int ownerType(JsonNode row, String field) {
+        return (int) integral(required(row, field), field, Integer.MAX_VALUE);
+    }
+
+    private static long id(JsonNode row, String field) {
+        return integral(required(row, field), field, Long.MAX_VALUE);
+    }
+
+    /** Only the allowlisted fields, as text; null, blank and container values are dropped. */
+    private static String detail(JsonNode row, List<String> fields) {
+        Map<String, String> detail = new LinkedHashMap<>();
+        for (String field : fields) {
+            String value = detailScalar(row, field);
+            if (value != null) {
+                detail.put(field, value);
+            }
+        }
+        if (detail.isEmpty()) {
+            return null;
+        }
+        try {
+            return DETAIL_MAPPER.writeValueAsString(detail);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("cannot serialise detail", e);
+        }
+    }
+}
