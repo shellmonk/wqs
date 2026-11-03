@@ -131,20 +131,23 @@ class WebProjectionSecurityTest extends ApiTestBase {
     /**
      * Spec 9 control 3 on the single transaction table: every source is stored once in
      * "wqPrjTransaction" and "wqPrjTimeline", so /web's isolation rests on the "wqPrjWebTransaction"
-     * view and the "onWeb" timeline predicate. A payment -- unsessioned, alone in a session, or in
-     * a session with a /web transaction -- is never visible through the view, never a /web page
-     * unit, never a nested /web transaction and never in a /web total. The mixed session's only
-     * /web transaction is cancelled, so excluding cancelled hides the session on /web while /cc,
-     * where the payment survives, still shows it.
+     * view and the "onWeb" timeline predicate. A payment is never visible through the view, never a
+     * /web page unit, never a nested /web transaction and never in a /web total. A payment can never
+     * join a session either: the writer rejects a sessioned transaction of a source that does not
+     * feed every view, so a session -- here one whose only transaction is cancelled -- looks the
+     * same on both endpoints.
      */
     @Test
     void a_payment_never_reaches_web_through_the_view_the_timeline_or_the_totals() throws Exception {
         writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
-                sessioned(SourceKind.TRANSACTION, "u1-mixed-tx", "2034-02-15T10:00:00Z", "s-mixed", null),
-                sessioned(SourceKind.PAYMENT, "u1-mixed-pay", "2034-02-15T10:05:00Z", "s-mixed", null),
-                sessioned(SourceKind.PAYMENT, "u1-session-pay", "2034-02-16T10:00:00Z", "s-pay", null),
-                sessioned(SourceKind.TRANSACTION, "u1-mixed-c", "2034-02-17T10:00:00Z", null, "u1-mixed-tx")), 2L));
-        List<String> payments = List.of("u1-payment", "u1-mixed-pay", "u1-session-pay");
+                sessioned(SourceKind.TRANSACTION, "u1-s-tx", "2034-02-15T10:00:00Z", "s-web", null),
+                sessioned(SourceKind.PAYMENT, "u1-pay2", "2034-02-16T10:00:00Z", null, null),
+                sessioned(SourceKind.TRANSACTION, "u1-s-c", "2034-02-17T10:00:00Z", null, "u1-s-tx")), 2L));
+        assertThatThrownBy(() -> writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
+                sessioned(SourceKind.PAYMENT, "u1-s-pay", "2034-02-16T11:00:00Z", "s-pay", null)), 3L)))
+                .as("a sessioned payment is rejected, never projected")
+                .isInstanceOf(IllegalArgumentException.class);
+        List<String> payments = List.of("u1-payment", "u1-pay2");
 
         assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" where \"source\" = ?", String.class,
                 (short) SourceKind.PAYMENT.code())).as("stored once, in the one table")
@@ -158,32 +161,40 @@ class WebProjectionSecurityTest extends ApiTestBase {
                 for (String payment : payments) {
                     page.andExpect(jsonPath("$..txId", not(hasItem(payment))));
                 }
-                page.andExpect(jsonPath("$..batchId", not(hasItem("s-pay"))))
-                        .andExpect(jsonPath("$..kind", not(hasItem(SourceKind.PAYMENT.name()))));
+                page.andExpect(jsonPath("$..kind", not(hasItem(SourceKind.PAYMENT.name()))));
             }
         }
-        // L0 totals: u1-tx, u1-prize, u1-mixed-tx, u1-mixed-c; excluding cancelled drops u1-mixed-tx.
+        // L0 totals: u1-tx, u1-prize, u1-s-tx, u1-s-c; excluding cancelled drops u1-s-tx.
         mvc.perform(webAt("0", "false").header(PRINCIPAL_HEADER, "1"))
                 .andExpect(jsonPath("$.totalRowCount").value(4));
         mvc.perform(webAt("0", "true").header(PRINCIPAL_HEADER, "1"))
                 .andExpect(jsonPath("$.totalRowCount").value(3));
-        // Timeline paging and totals: u1-tx, u1-prize and s-mixed; s-pay and u1-payment are /cc only.
+        // Timeline paging and totals: u1-tx, u1-prize and s-web; the payments are /cc only.
         for (String level : List.of("1", "2")) {
             mvc.perform(webAt(level, "false").header(PRINCIPAL_HEADER, "1"))
                     .andExpect(jsonPath("$.totalRowCount").value(3))
-                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-mixed")));
+                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-web")));
             mvc.perform(webAt(level, "true").header(PRINCIPAL_HEADER, "1"))
                     .andExpect(jsonPath("$.totalRowCount").value(2))
                     .andExpect(jsonPath("$.data[*].txId", contains("u1-prize", "u1-tx")));
-            mvc.perform(get("/cc/wallet-data/rest/v1/projection/1")
-                            .param("from", FROM).param("to", TO).param("aggregationLevel", level)
-                            .param("excludeCancelledTransactions", "true")
-                            .param("pageNumber", "1").param("pageSize", "100"))
+            mvc.perform(cc(level, "false"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.totalRowCount").value(5))
-                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-mixed")))
-                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-pay")));
+                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-web")));
+            // The emptied session is hidden on /cc exactly as on /web.
+            mvc.perform(cc(level, "true"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.totalRowCount").value(4))
+                    .andExpect(jsonPath("$.data[*].batchId", not(hasItem("s-web"))))
+                    .andExpect(jsonPath("$.data[*].txId", hasItem("u1-pay2")));
         }
+    }
+
+    private static MockHttpServletRequestBuilder cc(String level, String excludeCancelled) {
+        return get("/cc/wallet-data/rest/v1/projection/1")
+                .param("from", FROM).param("to", TO).param("aggregationLevel", level)
+                .param("excludeCancelledTransactions", excludeCancelled)
+                .param("pageNumber", "1").param("pageSize", "100");
     }
 
     private static MockHttpServletRequestBuilder webAt(String level, String excludeCancelled) {

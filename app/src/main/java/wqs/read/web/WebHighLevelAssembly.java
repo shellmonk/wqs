@@ -27,15 +27,13 @@ public class WebHighLevelAssembly implements HighLevelTransactionQuery {
             "wqPrjWebTransaction"."ingestedAt", "wqPrjWebTransaction"."productType"
             """;
 
-    // Per session: ("userId", "batchId", "occurredAt") probes of "wqPrjTransaction_batch" (through the view), each from the
+    // Per session (its row found by primary key ("userId", "batchId")): ("userId", "batchId", "occurredAt") probes of "wqPrjTransaction_batch" (through the view), each from the
     // session's own start; the OR keeps its whole window (even past the range end, as its totals
     // count it) plus its late cancellations before the range end. %1$s: the excl predicate, %2$s:
     // the type-code predicate -- fixed fragments, never values.
     private static final String SESSION_TRANSACTIONS = "select " + TRANSACTION_COLUMNS + """
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqPrjSession" on ("wqPrjSession"."userId" = :userId and "wqPrjSession"."batchId" = "wanted"."id"
-                   and "wqPrjSession"."startedAt" between cast(:startedFrom as timestamptz)
-                                               and cast(:startedTo as timestamptz))
+            join "wqPrjSession" on ("wqPrjSession"."userId" = :userId and "wqPrjSession"."batchId" = "wanted"."id")
             join "wqPrjWebTransaction" on ("wqPrjWebTransaction"."userId" = :userId and "wqPrjWebTransaction"."batchId" = "wqPrjSession"."batchId"
                    and "wqPrjWebTransaction"."occurredAt" >= "wqPrjSession"."startedAt"
                    and ("wqPrjWebTransaction"."occurredAt" <= "wqPrjSession"."endedAt"
@@ -67,9 +65,8 @@ public class WebHighLevelAssembly implements HighLevelTransactionQuery {
     }
 
     @Override
-    public List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds, Instant startedFrom,
-                                        Instant startedTo, Instant to, Set<String> typeCodes,
-                                        boolean excludeCancelled) {
+    public List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds,
+                                        Instant to, Set<String> typeCodes, boolean excludeCancelled) {
         if (batchIds.isEmpty()) {
             return List.of();
         }
@@ -77,8 +74,6 @@ public class WebHighLevelAssembly implements HighLevelTransactionQuery {
                         excludeCancelled ? NOT_CANCELLED : "", typeCodes.isEmpty() ? "" : TYPE_CODES))
                 .param("ids", array(batchIds))
                 .param("userId", userId)
-                .param("startedFrom", utc(startedFrom))
-                .param("startedTo", utc(startedTo))
                 .param("to", utc(to));
         if (!typeCodes.isEmpty()) {
             spec = spec.param("typeCodes", array(typeCodes));

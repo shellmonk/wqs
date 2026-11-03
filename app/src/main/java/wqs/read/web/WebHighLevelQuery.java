@@ -15,8 +15,8 @@ import wqs.read.HighLevelQuery;
  * Level-1/2 reads of the web view's page index (spec 5.6): the "wqPrjTimeline" rows with "onWeb",
  * never any other. Every predicate and sort column is in "wqPrjTimeline_cover" -- key ("userId",
  * "occurredAt" desc, "kind" desc, "refId" desc), INCLUDE ("productType", "visibleExclCancelled",
- * "onWeb", "webVisibleExclCancelled") -- so both queries are covering index scans. /web's
- * visibility with cancelled excluded is "webVisibleExclCancelled".
+ * "onWeb") -- so both queries are covering index scans. Visibility with cancelled excluded is
+ * "visibleExclCancelled", shared with /cc: a session never mixes sources.
  */
 @Component
 public class WebHighLevelQuery implements HighLevelQuery {
@@ -62,7 +62,7 @@ public class WebHighLevelQuery implements HighLevelQuery {
                 and "wqPrjTimeline"."occurredAt" >= cast(:lo as timestamptz) \
                 and "wqPrjTimeline"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c.append(" and \"wqPrjTimeline\".\"webVisibleExclCancelled\" = true");
+            c.append(" and \"wqPrjTimeline\".\"visibleExclCancelled\" = true");
         }
         if (!f.productTypes().isEmpty()) {
             c.append(" and \"wqPrjTimeline\".\"productType\" in (:productTypes)");

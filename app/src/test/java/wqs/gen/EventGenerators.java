@@ -72,7 +72,7 @@ public final class EventGenerators {
     }
 
     /**
-     * The currency of session 0 (every transaction of it, the /cc-only adjustments included) and of the
+     * The currency of session 0 (every transaction of it, the joining prizes included) and of the
      * claimable prize's session: EUR half the time, otherwise another one, so sessions in other
      * currencies are exercised. A session is single-currency (plan D6): mixing currencies within
      * one would dead-letter whichever transaction arrived second, which depends on arrival order.
@@ -99,10 +99,10 @@ public final class EventGenerators {
      * between 1 and 4 plays, each play 1 to 3 transactions.
      *
      * A session's key is (startedAt, first projected transaction's productType) (plan D6), so products vary to make
-     * the key depend on arrival order on every path: session 0 is joined by a /cc-only adjustment
+     * the key depend on arrival order on every path: session 0 is joined by a claimable prize
      * a day earlier at product P07 (re-anchor: start AND product move) and one after its last
      * transaction at product P03 (must NOT relabel it); odd sessions open with a product-less
-     * play tied, at the same instant, with a lower-sourceId /cc-only adjustment at P03 (the
+     * play tied, at the same instant, with a lower-sourceId claimable prize at P03 (the
      * tie-break relabels the session from no product, or never, depending on order). Every
      * session also has a zero-amount prize step at its first instant (locator-only, D8). Session
      * 0 and the prize session are in EUR, USD or AUD; everything else in EUR.
@@ -124,11 +124,11 @@ public final class EventGenerators {
     /**
      * {@link #transactionSequences()} with cancellations (spec 8.1 requires cancels on both sides of their
      * originals). Every cancel targets a transaction of its OWN source and user (spec 6.3, R86) -- any
-     * source, so unsessioned payments, play-less /cc-only adjustments and the cross-source
+     * source, so unsessioned payments, play-less claimable prizes and the cross-source
      * sourceId collisions are cancelled too.
      *
      * <ul>
-     *   <li>A third of sessions (decided once per session) have EVERY transaction cancelled, /cc-only
+     *   <li>A third of sessions (decided once per session) have EVERY transaction cancelled, prizes
      *       ones included, so they end hidden in both views. Measured over 1000 samples: of the
      *       sessions with two or more transactions, 34% end fully cancelled, 51% partially cancelled
      *       (most of those across several plays) and 15% untouched. Interleaved with their
@@ -250,26 +250,26 @@ public final class EventGenerators {
                     null, null, null));
             if (s % 2 == 1) {
                 // A tie with the session's first transaction (product-less): same instant, lower
-                // sourceId ("-a" < "-t"), so this /cc-only projected transaction is the session's first projected transaction and
-                // its pair labels the session, whichever arrives first.
+                // sourceId ("-a" < "-t"), so this claimable prize is the session's first projected transaction and
+                // its pair labels the session, whichever arrives first. Only sources feeding every
+                // view are sessioned (RollupUpdater.requireSessionable).
                 transactions.add(new ProjectionTransaction(
-                        userId, SourceKind.MANUAL_ADJUSTMENT, batchId + "-a", firstAt, P03[0], P03[1],
+                        userId, SourceKind.CLAIMABLE_PRIZE, batchId + "-a", firstAt, P03[0], P03[1],
                         batchId, null, TxTypes.NEUTRAL, amount, currency, null, null, null));
             }
         }
 
-        // /cc-only projected transactions joining the first session. Whichever of these and the session's
-        // TRANSACTIONs arrives first decides which view's page-index row is created first and
-        // which is materialised later. The early one, a day before the session at a lower
+        // Claimable prizes joining the first session, in any order with the session's TRANSACTIONs.
+        // The early one, a day before the session at a lower
         // product, re-anchors the session across a UTC day (and a month when the session starts
         // on April 1) while changing its product; the late one, after the session's last
         // transaction at a lower product still, changes only the product.
         transactions.add(new ProjectionTransaction(
-                userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adj" + sequence,
+                userId, SourceKind.CLAIMABLE_PRIZE, "u" + userId + "-adj" + sequence,
                 start.minus(1, ChronoUnit.DAYS), P07[0], P07[1],
                 "u" + userId + "-s0", null, TxTypes.NEUTRAL, amount, joiningCurrency, null, null, null));
         transactions.add(new ProjectionTransaction(
-                userId, SourceKind.MANUAL_ADJUSTMENT, "u" + userId + "-adjlate" + sequence,
+                userId, SourceKind.CLAIMABLE_PRIZE, "u" + userId + "-adjlate" + sequence,
                 start.plusSeconds(sequence * 7L + 5), P03[0], P03[1],
                 "u" + userId + "-s0", null, TxTypes.NEUTRAL, amount, joiningCurrency, null, null, null));
 

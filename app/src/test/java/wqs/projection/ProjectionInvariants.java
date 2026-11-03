@@ -8,7 +8,7 @@ import wqs.domain.MoneyDirection;
 
 /**
  * The one oracle for the projection's derived state (spec 8.1 P-2, P-4, P-8). Each method
- * recomputes what the incremental write path maintains -- counters, rollups and group locators,
+ * recomputes what the incremental write path maintains -- counters, rollups,
  * the page index -- from the transaction rows alone, compares it with what is stored, and returns one
  * human-readable line per discrepancy: empty when the invariant holds.
  *
@@ -39,11 +39,12 @@ public final class ProjectionInvariants {
 
     /**
      * Each view's page index, as a relation of the old per-view shape: /web is the "onWeb" rows of
-     * "wqPrjTimeline" with /web's visibility, /cc every row with /cc's.
+     * "wqPrjTimeline", /cc every row; both share "visibleExclCancelled" (a session never mixes
+     * sources).
      */
     public static final String WEB_TIMELINE = """
             (select "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
-                    "webVisibleExclCancelled" as "visibleExclCancelled"
+                    "visibleExclCancelled"
              from "wqPrjTimeline" where "onWeb")""";
     /** A table name double-quoted, or a parenthesised relation such as {@link #WEB_TIMELINE} as is. */
     public static String relation(String tableOrQuery) {
@@ -220,8 +221,8 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * P-4: every session and play row equals a fold over its transactions, and "wqPrjGroupLocator" points
-     * at each group's row.
+     * P-4: every session and play row, matched by its key ("userId", "batchId"[, "subBatchId"]),
+     * equals a fold over its transactions.
      *
      * Expected from the non-cancellation sessioned rows of "wqPrjTransaction" (every source):
      * txCount and its ExclCancelled form; playCount = distinct non-null subBatchId,
@@ -230,8 +231,7 @@ public final class ProjectionInvariants {
      * {@link RollupUpdater}) and net
      * = wins - plays, each with its ExclCancelled form; startedAt = MIN occurredAt, endedAt = MAX,
      * productId and productType = the first transaction's pair by (occurredAt, sourceId, source),
-     * currency = MIN (the session is single-currency). Session and play locators sit at the row's
-     * startedAt. Orphan rows (no transactions) and missing rows are reported too.
+     * currency = MIN (the session is single-currency). Orphan rows (no transactions) and missing rows are reported too.
      */
     public List<String> aggregationDrift() {
         String plays = money(MoneyDirection.PLAY);
@@ -320,31 +320,6 @@ public final class ProjectionInvariants {
                 where e."batchId" is null or s."batchId" is null or %3$s
                 order by 2, 3, 4
                 """.formatted(sessioned, folded, compared))
-                .stream().map(ProjectionInvariants::describe).toList());
-        drift.addAll(sql.rows("""
-                with transactions as (%1$s),
-                expected as (
-                    select "userId", "batchId", '' as "subBatchId", min("occurredAt") as "startedAt"
-                    from transactions group by 1, 2
-                  union all
-                    select "userId", "batchId", "subBatchId", min("occurredAt")
-                    from transactions where "subBatchId" is not null group by 1, 2, 3
-                )
-                select case when e."batchId" is null then 'orphan group locator'
-                            when l."batchId" is null then 'missing group locator'
-                            else 'group locator startedAt mismatch' end as problem,
-                       coalesce(e."userId", l."userId") as "userId",
-                       coalesce(e."batchId", l."batchId") as "batchId",
-                       coalesce(e."subBatchId", l."subBatchId") as "subBatchId",
-                       e."startedAt" as "expectedStartedAt", l."startedAt" as "storedStartedAt"
-                from expected e
-                full outer join "wqPrjGroupLocator" l
-                  on l."userId" = e."userId" and l."batchId" = e."batchId"
-                 and l."subBatchId" = e."subBatchId"
-                where e."batchId" is null or l."batchId" is null
-                   or e."startedAt" <> l."startedAt"
-                order by 2, 3, 4
-                """.formatted(sessioned))
                 .stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }

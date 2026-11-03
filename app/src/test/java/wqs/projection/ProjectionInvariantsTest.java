@@ -31,8 +31,8 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "p1", T0, TxTypes.PLAY, "5.0000"),
                 tx("t2", "p2", T0.plusSeconds(30), TxTypes.WIN, "-7.0000"),
-                // A /cc-only transaction a day earlier at a lower product: the session's key moves.
-                new ProjectionTransaction(1L, SourceKind.MANUAL_ADJUSTMENT, "a1",
+                // A claimable prize a day earlier at a lower product: the session's key moves.
+                new ProjectionTransaction(1L, SourceKind.CLAIMABLE_PRIZE, "a1",
                         T0.minusSeconds(86_400), "P07", "bingo", "b1", null, TxTypes.NEUTRAL,
                         new BigDecimal("1.0000"), "EUR", null, null, null),
                 new ProjectionTransaction(1L, SourceKind.PAYMENT, "pay1", T0.plusSeconds(3_600), null,
@@ -166,13 +166,12 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     }
 
     @Test
-    void a_misplaced_group_locator_is_aggregation_drift() {
+    void a_session_start_not_at_its_earliest_transaction_is_aggregation_drift() {
         execute("""
-                update "wqPrjGroupLocator" set "startedAt" = "startedAt" + interval '1 second'
-                where "subBatchId" = ''""");
+                update "wqPrjSession" set "startedAt" = "startedAt" - interval '1 second'""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
-                .startsWith("group locator startedAt mismatch");
+                .startsWith("session mismatch").contains("batchId=b1");
     }
 
     @Test
@@ -190,19 +189,22 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
     @Test
     void a_flipped_page_row_visibility_is_high_level_drift() {
+        // One flag serves both endpoints, so both views report it.
         execute("""
-                update "wqPrjTimeline" set "webVisibleExclCancelled" = not "webVisibleExclCancelled"
+                update "wqPrjTimeline" set "visibleExclCancelled" = not "visibleExclCancelled"
                 where "kind" = 0""");
 
-        assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("page row visibility mismatch").contains("view=WEB", "refId=b1");
+        assertThat(invariants.highLevelDrift()).hasSize(2)
+                .allSatisfy(l -> assertThat(l).startsWith("page row visibility mismatch").contains("refId=b1"))
+                .anySatisfy(l -> assertThat(l).contains("view=WEB"))
+                .anySatisfy(l -> assertThat(l).contains("view=CC"));
     }
 
     @Test
     void a_session_row_missing_from_one_view_is_high_level_drift() {
         // Materialisation is per view: the session must be on /web as well as /cc.
         execute("""
-                update "wqPrjTimeline" set "onWeb" = false, "webVisibleExclCancelled" = false
+                update "wqPrjTimeline" set "onWeb" = false
                 where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()

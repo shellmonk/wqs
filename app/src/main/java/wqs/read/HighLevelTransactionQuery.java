@@ -19,16 +19,15 @@ public interface HighLevelTransactionQuery {
     ViewKind view();
 
     /**
-     * The view's rows of the given sessions (those of {@code batchIds} with "startedAt" in
-     * {@code [startedFrom, startedTo]}), newest first ("occurredAt" desc, "transactionId" desc, as level
+     * The view's rows of the given sessions (by ("userId", "batchId")), newest first ("occurredAt" desc, "transactionId" desc, as level
      * 0): each session's transactions in its own {@code ["startedAt", "endedAt"]}, plus its cancellation
      * rows dated after "endedAt" and before {@code to} (cancels never roll up, so a late cancel
      * leaves "endedAt" alone; final review F3). Only types whose code is in {@code typeCodes} when
      * it is non-empty; only non-cancelled transactions when {@code excludeCancelled} (level 0's
      * predicate, so cancellation rows stay).
      */
-    List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds, Instant startedFrom,
-                                 Instant startedTo, Instant to, Set<String> typeCodes, boolean excludeCancelled);
+    List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds,
+                                 Instant to, Set<String> typeCodes, boolean excludeCancelled);
 
     /** The view's transactions for unsessioned page-index keys ("kind" = source code, "refId" = sourceId). */
     Map<HighLevelKey, TransactionEntry> unsessioned(JdbcClient tx, long userId, List<HighLevelKey> keys);

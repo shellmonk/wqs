@@ -96,8 +96,8 @@ public class ProjectionWriter {
     public WriteResult apply(ProjectionBatch batch) {
         // FIRST, before any projection write, and in its own transaction: no DDL ever runs inside
         // this one (spec 5.8, R100). The occurredAt months cover every partitioned row the batch
-        // can write -- projected transaction rows, session/play re-anchor targets (MIN(occurredAt)), page-index
-        // rows and "wqPrjCountDay" periods. A month beyond the sanity window throws, which is poison.
+        // can write -- projected transaction rows, page-index rows (a session's re-anchored start is
+        // a transaction's occurredAt) and "wqPrjCountDay" periods. A month beyond the sanity window throws, which is poison.
         partitionProvisioner.ensureMonths(batch.transactions().stream()
                 .map(transaction -> YearMonth.from(transaction.occurredAt().atZone(ZoneOffset.UTC)))
                 .collect(Collectors.toSet()));

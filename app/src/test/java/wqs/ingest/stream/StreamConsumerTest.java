@@ -271,7 +271,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.poll();
 
-        for (String table : java.util.List.of("wqPrjTransactionLocator", "wqPrjTransaction", "wqPrjGroupLocator",
+        for (String table : java.util.List.of("wqPrjTransactionLocator", "wqPrjTransaction",
                 "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCountDay", "wqPrjCountMonth",
                 "wqPrjPendingCancel", "wqDeadLetter")) {
             assertThat(count(table)).as(table).isZero();

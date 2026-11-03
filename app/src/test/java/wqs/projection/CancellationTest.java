@@ -298,19 +298,20 @@ class CancellationTest extends PostgresTestBase {
         assertThat(pendingCancelStore.depth()).isZero();
     }
 
-    // --- R87: per-view visibility ----------------------------------------------------------------
+    // --- R87: one visibility for both endpoints --------------------------------------------------
 
+    /** A session never mixes sources, so a surviving transaction keeps it visible on both endpoints. */
     @Test
-    void cancelling_the_only_web_transaction_hides_the_web_row_but_not_the_cc_row() {
-        apply(tx("t1", "b1", "p1"), adjustment("a1", "b1", T0.plusSeconds(30), 11));
+    void cancelling_one_transaction_of_a_session_with_a_surviving_prize_keeps_it_visible_on_both() {
+        apply(tx("t1", "b1", "p1"), prize("a1", "b1", T0.plusSeconds(30), 11));
 
         apply(cancelOf("c1", "t1"));
 
-        assertThat(sessionVisible(WEB)).isFalse();
+        assertThat(sessionVisible(WEB)).isTrue();
         assertThat(sessionVisible(CC)).isTrue();
-        assertThat(highLevelSentinel(WEB, "cntExclCancelled")).isZero();
+        assertThat(highLevelSentinel(WEB, "cntExclCancelled")).isEqualTo(1);
         assertThat(highLevelSentinel(CC, "cntExclCancelled")).isEqualTo(1);
-        // The adjustment still survives in the session's rollup.
+        // The prize still survives in the session's rollup.
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
         assertNoDrift();
     }
@@ -322,6 +323,7 @@ class CancellationTest extends PostgresTestBase {
         apply(tx("t1", "b1", "p1"));
         apply(cancelOf("c1", "t1"));
         assertThat(sessionVisible(WEB)).isFalse();
+        assertThat(sessionVisible(CC)).isFalse();
 
         apply(tx("t2", "b1", "p2"));
 
@@ -333,14 +335,16 @@ class CancellationTest extends PostgresTestBase {
     }
 
     @Test
-    void a_cc_only_transaction_revives_only_the_cc_row() {
+    void a_claimable_prize_revives_the_row_on_both_endpoints() {
         apply(tx("t1", "b1", "p1"));
         apply(cancelOf("c1", "t1"));
 
-        apply(adjustment("a1", "b1", T0.plusSeconds(30), 11));
+        apply(prize("a1", "b1", T0.plusSeconds(30), 11));
 
-        assertThat(sessionVisible(WEB)).isFalse();
+        assertThat(sessionVisible(WEB)).isTrue();
         assertThat(sessionVisible(CC)).isTrue();
+        assertThat(highLevelSentinel(WEB, "cntExclCancelled")).isEqualTo(1);
+        assertThat(highLevelSentinel(CC, "cntExclCancelled")).isEqualTo(1);
         assertNoDrift();
     }
 
@@ -363,29 +367,31 @@ class CancellationTest extends PostgresTestBase {
     void a_cancelled_session_that_later_re_anchors_keeps_its_counters_consistent() {
         apply(txProduct("t1", "b1", "p1", T0, 11));
         apply(cancelOf("c1", "t1"));
+        assertThat(sessionVisible(WEB)).isFalse();
         assertNoDrift();
 
-        // Earlier by a day at a lower product: start AND product move, invisible WEB row moves
-        // with its visibility, and the CC row is revived at the new key.
-        apply(adjustment("a0", "b1", T0.minus(1, ChronoUnit.DAYS), 7));
+        // Earlier by a day at a lower product: start AND product move, the hidden row moves with
+        // its visibility, and the live prize revives it at the new key on both endpoints.
+        apply(prize("a0", "b1", T0.minus(1, ChronoUnit.DAYS), 7));
 
-        assertThat(sessionVisible(WEB)).isFalse();
+        assertThat(sessionVisible(WEB)).isTrue();
         assertThat(sessionVisible(CC)).isTrue();
         assertThat(sessionStart()).isEqualTo(T0.minus(1, ChronoUnit.DAYS));
+        assertThat(highLevelProduct(WEB)).isEqualTo("P07");
         assertNoDrift();
 
         // At the session's start with a lower sourceId than a0 ("a" < "a0"): it is now the first
-        // transaction (D6), so a product-only change, and the WEB row is revived.
+        // transaction (D6), so a product-only change.
         apply(txProduct("a", "b1", "p9", T0.minus(1, ChronoUnit.DAYS), 3));
 
         assertThat(sessionVisible(WEB)).isTrue();
         assertThat(highLevelProduct(WEB)).isEqualTo("P03");
         assertNoDrift();
 
-        // And cancelling within the re-anchored session uncounts at the session's NEW key.
+        // Cancelling within the re-anchored session leaves the prize, so the row stays visible.
         apply(cancelOf("c9", "a"));
 
-        assertThat(sessionVisible(WEB)).isFalse();
+        assertThat(sessionVisible(WEB)).isTrue();
         assertThat(sessionVisible(CC)).isTrue();
         assertNoDrift();
     }
@@ -393,14 +399,14 @@ class CancellationTest extends PostgresTestBase {
     // --- R90: order independence -----------------------------------------------------------------
 
     @Test
-    void every_order_of_a_cancel_its_original_and_a_cc_only_transaction_converges() {
-        // t1 and t2 in different plays; a1 is /cc-only and a day earlier at a lower product, so
-        // it re-anchors the session (start and product) whenever it arrives after the others.
+    void every_order_of_a_cancel_its_original_and_a_prize_converges() {
+        // t1 and t2 in different plays; a1 is a prize a day earlier at a lower product, so it
+        // re-anchors the session (start and product) whenever it arrives after the others.
         List<ProjectionTransaction> transactions = List.of(
                 txProduct("t1", "b1", "p1", T0, 11),
                 txProduct("t2", "b1", "p2", T0.plusSeconds(10), 11),
                 cancelOf("c1", "t1"),
-                adjustment("a1", "b1", T0.minus(1, ChronoUnit.DAYS), 7));
+                prize("a1", "b1", T0.minus(1, ChronoUnit.DAYS), 7));
 
         ProjectionSnapshot expected = assertAllOrdersConverge(transactions);
 
@@ -411,16 +417,18 @@ class CancellationTest extends PostgresTestBase {
     }
 
     @Test
-    void every_order_of_a_cancel_of_the_only_web_transaction_and_a_cc_only_transaction_converges() {
+    void every_order_of_a_cancel_of_a_sessions_only_transaction_and_a_late_earlier_one_converges() {
+        // a0 re-anchors the session whenever it arrives after t1; c1 hides it until a0 arrives.
         List<ProjectionTransaction> transactions = List.of(
                 txProduct("t1", "b1", "p1", T0, 11),
                 cancelOf("c1", "t1"),
-                adjustment("a1", "b1", T0.minus(1, ChronoUnit.DAYS), 7));
+                txProduct("a0", "b1", "p2", T0.minus(1, ChronoUnit.DAYS), 7));
 
         assertAllOrdersConverge(transactions);
 
-        assertThat(sessionVisible(WEB)).isFalse();
+        assertThat(sessionVisible(WEB)).isTrue();
         assertThat(sessionVisible(CC)).isTrue();
+        assertThat(sessionStart()).isEqualTo(T0.minus(1, ChronoUnit.DAYS));
     }
 
     /**
@@ -473,7 +481,7 @@ class CancellationTest extends PostgresTestBase {
         return result;
     }
 
-    /** Counters, rollups, group locators and the page index all agree with the transaction rows. */
+    /** Counters, rollups and the page index all agree with the transaction rows. */
     private void assertNoDrift() {
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
@@ -522,10 +530,10 @@ class CancellationTest extends PostgresTestBase {
                 TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, cancels, null);
     }
 
-    private ProjectionTransaction adjustment(String id, String batchId, Instant at, int product) {
+    private ProjectionTransaction prize(String id, String batchId, Instant at, int product) {
         return new ProjectionTransaction(
-                1L, SourceKind.MANUAL_ADJUSTMENT, id, at, Products.id(product), Products.type(product),
-                batchId, null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
+                1L, SourceKind.CLAIMABLE_PRIZE, id, at, Products.id(product), Products.type(product),
+                batchId, null, TxTypes.WIN, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private ProjectionTransaction payment(String id, Instant at) {

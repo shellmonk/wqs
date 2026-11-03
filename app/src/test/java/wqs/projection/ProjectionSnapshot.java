@@ -5,8 +5,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.db.TestSql;
 
 /**
- * An order-independent, comparable view of the whole projection: transactions, the transaction locator, the
- * group locator, rollups, the page index, both counter tiers and parked cancels. Every table is
+ * An order-independent, comparable view of the whole projection: transactions, the transaction locator,
+ * rollups, the page index, both counter tiers and parked cancels. Every table is
  * ordered by its full primary key, so two snapshots are equal exactly when the stored state is.
  *
  * CRITICAL: "transactionId" and "ingestedAt" (transaction table only) and "parkedAt" (parked cancels) are
@@ -18,7 +18,6 @@ import wqs.db.TestSql;
 public record ProjectionSnapshot(
         List<String> transactions,
         List<String> locator,
-        List<String> groupLocator,
         List<String> sessions,
         List<String> plays,
         List<String> timeline,
@@ -30,9 +29,8 @@ public record ProjectionSnapshot(
         TestSql sql = new TestSql(jdbc);
         return new ProjectionSnapshot(
                 rows(sql, "wqPrjTransaction"), locatorRows(sql),
-                all(sql, "wqPrjGroupLocator", "\"userId\", \"batchId\", \"subBatchId\""),
-                all(sql, "wqPrjSession", "\"userId\", \"startedAt\", \"batchId\""),
-                all(sql, "wqPrjPlay", "\"userId\", \"startedAt\", \"batchId\", \"subBatchId\""),
+                all(sql, "wqPrjSession", "\"userId\", \"batchId\""),
+                all(sql, "wqPrjPlay", "\"userId\", \"batchId\", \"subBatchId\""),
                 all(sql, "wqPrjTimeline", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
                 all(sql, "wqPrjCountDay", COUNTER_KEY),
                 all(sql, "wqPrjCountMonth", COUNTER_KEY),

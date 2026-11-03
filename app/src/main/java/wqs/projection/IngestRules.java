@@ -28,16 +28,9 @@ import wqs.domain.ProjectionTransaction;
 @Component
 public class IngestRules {
 
-    private static final String SESSION_MARKER = "";
-
     private static final String SESSION_CURRENCY = """
-            select "wqPrjSession"."currency"
-            from "wqPrjGroupLocator"
-            join "wqPrjSession" on "wqPrjSession"."userId" = "wqPrjGroupLocator"."userId"
-                and "wqPrjSession"."startedAt" = "wqPrjGroupLocator"."startedAt"
-                and "wqPrjSession"."batchId" = "wqPrjGroupLocator"."batchId"
-            where "wqPrjGroupLocator"."userId" = ? and "wqPrjGroupLocator"."batchId" = ?
-              and "wqPrjGroupLocator"."subBatchId" = ?
+            select "currency" from "wqPrjSession"
+            where "userId" = ? and "batchId" = ?
             """;
 
     private final JdbcClient jdbc;
@@ -63,7 +56,7 @@ public class IngestRules {
             return eInstant.isEInstant(transaction.productType()) ? RejectedTransactionDeadLetters.EINSTANT_UNSESSIONED : null;
         }
         String sessionCurrency = jdbc.sql(SESSION_CURRENCY)
-                .params(transaction.userId(), transaction.batchId(), SESSION_MARKER)
+                .params(transaction.userId(), transaction.batchId())
                 .query(String.class)
                 .optional()
                 .orElse(null);

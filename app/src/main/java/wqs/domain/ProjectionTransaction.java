@@ -14,8 +14,7 @@ import java.time.Instant;
  * the batch ids, so "not a cancellation" has exactly one representation.
  *
  * A blank {@code batchId} or {@code subBatchId} is normalised to null here, at the domain
- * boundary: "no session" and "no play" have exactly one representation, and the empty string --
- * which "wqPrjGroupLocator" reserves as the session marker -- is unreachable from input.
+ * boundary: "no session" and "no play" have exactly one representation.
  *
  * {@code productId} and {@code productType} are the wire strings (spec 4.1), normalised the same
  * way. The empty string is the counters' ALL-product-types sentinel, so it too must be

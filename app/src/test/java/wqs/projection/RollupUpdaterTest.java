@@ -1,6 +1,7 @@
 package wqs.projection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -12,12 +13,14 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
 import wqs.db.TestSql;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
+import wqs.ingest.TransientFailures;
 import wqs.gen.Products;
 import wqs.gen.TxTypes;
 
@@ -99,8 +102,6 @@ class RollupUpdaterTest extends PostgresTestBase {
         Rollup play = play("b1", "p1");
         assertThat(play.startedAt()).isEqualTo(utc(T0));
         assertThat(play.endedAt()).isEqualTo(utc(T0.plusSeconds(100)));
-        assertThat(db().column("select \"startedAt\" from \"wqPrjGroupLocator\"", Instant.class))
-                .containsExactly(T0, T0);
 
         clean();
         apply(earlier);
@@ -109,13 +110,13 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     /**
-     * The re-key path (delete returning the whole row, re-insert at the new start) keeps every
-     * column: numeric values at full scale, and null productId / productType / firstSource* bound
-     * as typed nulls. The nullable columns are first set to null, so the re-insert
-     * must carry nulls through; the re-keyed rows then equal the rows of the in-order run.
+     * A re-anchor updates the row in place (plan D5) and keeps every column: numeric values at
+     * full scale, and null productId / productType bound as typed nulls. The first-transaction
+     * columns are first set to null, so the earlier transaction must replace them; the re-anchored
+     * rows then equal the rows of the in-order run.
      */
     @Test
-    void the_re_key_reinsert_keeps_numeric_scale_and_nullable_columns() {
+    void re_anchoring_in_place_keeps_numeric_scale_and_nullable_columns() {
         ProjectionTransaction later = transaction("t2", "b1", "p1", "1.2345", T0.plusSeconds(100), TxTypes.PLAY, null);
         ProjectionTransaction earlier = transaction("t1", "b1", "p1", "0.0001", T0, TxTypes.WIN, null);
 
@@ -148,17 +149,18 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     @Test
-    void re_anchoring_moves_the_row_across_a_month_boundary() {
+    void re_anchoring_across_a_month_boundary_keeps_one_row() {
         Instant mayFirst = Instant.parse("2034-05-01T00:00:10Z");
         Instant aprilLast = Instant.parse("2034-04-30T23:59:50Z");
 
         apply(wager("t1", "b1", "p1", "5.0000", mayFirst));
-        apply(wager("t2", "b1", "p1", "4.0000", aprilLast));
+        RollupResult reanchor = apply(wager("t2", "b1", "p1", "4.0000", aprilLast));
 
-        assertThat(db().count("\"wqPrjSession_2034_04\"")).isEqualTo(1);
-        assertThat(db().count("\"wqPrjSession_2034_05\"")).isZero();
-        assertThat(db().count("\"wqPrjPlay_2034_04\"")).isEqualTo(1);
-        assertThat(db().count("\"wqPrjPlay_2034_05\"")).isZero();
+        assertThat(reanchor.sessionKeyChanged()).isTrue();
+        assertThat(reanchor.previousSessionStart()).isEqualTo(mayFirst);
+        assertThat(reanchor.sessionStart()).isEqualTo(aprilLast);
+        assertThat(db().count("\"wqPrjSession\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPrjPlay\"")).isEqualTo(1);
         Rollup session = session("b1");
         assertThat(session.startedAt()).isEqualTo(utc(aprilLast));
         assertThat(session.endedAt()).isEqualTo(utc(mayFirst));
@@ -339,7 +341,6 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         assertThat(db().count("\"wqPrjSession\"")).isZero();
         assertThat(db().count("\"wqPrjPlay\"")).isZero();
-        assertThat(db().count("\"wqPrjGroupLocator\"")).isZero();
     }
 
     @ParameterizedTest
@@ -358,12 +359,6 @@ class RollupUpdaterTest extends PostgresTestBase {
         assertThat(session.startedAt()).isEqualTo(utc(T0));
         assertThat(session.txCount()).isEqualTo(2);
         assertThat(session.playCount()).isZero();
-        assertThat(db().rows("select * from \"wqPrjGroupLocator\""))
-                .singleElement()
-                .satisfies(locator -> {
-                    assertThat(locator.get("subBatchId", String.class)).isEmpty();
-                    assertThat(locator.get("startedAt", Instant.class)).isEqualTo(T0);
-                });
     }
 
     @Test
@@ -371,7 +366,35 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(payment());
 
         assertThat(db().count("\"wqPrjSession\"")).isZero();
-        assertThat(db().count("\"wqPrjGroupLocator\"")).isZero();
+    }
+
+    /**
+     * A session never mixes sources: only sources feeding every view may carry a batch id. Any
+     * other is rejected before anything is written, and the non-transient exception dead-letters it.
+     */
+    @ParameterizedTest
+    @EnumSource(value = SourceKind.class, names = {"PAYMENT", "MANUAL_ADJUSTMENT", "LIMIT"})
+    void a_sessioned_transaction_of_a_cc_only_source_is_rejected(SourceKind source) {
+        ProjectionTransaction sessioned = new ProjectionTransaction(
+                1L, source, "x1", T0, null, null, "b1", "p1",
+                TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
+
+        Throwable failure = catchThrowable(() -> apply(sessioned));
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("batchId b1");
+        assertThat(TransientFailures.isTransient(failure)).as("dead-lettered, not retried").isFalse();
+        assertThat(db().count("\"wqPrjSession\"")).isZero();
+        assertThat(db().count("\"wqPrjPlay\"")).isZero();
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = SourceKind.class, names = {"TRANSACTION", "CLAIMABLE_PRIZE"})
+    void a_sessioned_transaction_of_a_source_feeding_every_view_rolls_up(SourceKind source) {
+        apply(new ProjectionTransaction(
+                1L, source, "x1", T0, null, null, "b1", "p1",
+                TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null));
+
+        assertThat(session("b1").txCount()).isEqualTo(1);
     }
 
     private RollupResult apply(ProjectionTransaction transaction) {
@@ -379,7 +402,6 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     private void clean() {
-        db().execute("delete from \"wqPrjGroupLocator\"");
         db().execute("delete from \"wqPrjPlay\"");
         db().execute("delete from \"wqPrjSession\"");
     }
@@ -387,9 +409,7 @@ class RollupUpdaterTest extends PostgresTestBase {
     private Map<String, List<Map<String, Object>>> snapshot() {
         return Map.of(
                 "session", db().maps("select * from \"wqPrjSession\" order by \"userId\", \"batchId\""),
-                "play", db().maps("select * from \"wqPrjPlay\" order by \"userId\", \"batchId\", \"subBatchId\""),
-                "locator", db().maps(
-                        "select * from \"wqPrjGroupLocator\" order by \"userId\", \"batchId\", \"subBatchId\""));
+                "play", db().maps("select * from \"wqPrjPlay\" order by \"userId\", \"batchId\", \"subBatchId\""));
     }
 
     private static ProjectionTransaction payment() {

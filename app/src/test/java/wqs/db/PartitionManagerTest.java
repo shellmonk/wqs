@@ -22,12 +22,10 @@ class PartitionManagerTest extends PostgresTestBase {
     void creates_partitions_for_the_requested_window() {
         int created = manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 2);
 
-        // 3 months (Jan, Feb, Mar) x 5 partitioned tables
-        assertThat(created).isEqualTo(15);
+        // 3 months (Jan, Feb, Mar) x 3 partitioned tables
+        assertThat(created).isEqualTo(9);
         assertThat(testPartitionNames())
                 .contains("wqPrjTransaction_2031_01", "wqPrjTransaction_2031_02", "wqPrjTransaction_2031_03",
-                          "wqPrjSession_2031_01", "wqPrjSession_2031_02", "wqPrjSession_2031_03",
-                          "wqPrjPlay_2031_01", "wqPrjPlay_2031_02", "wqPrjPlay_2031_03",
                           "wqPrjTimeline_2031_01", "wqPrjTimeline_2031_02", "wqPrjTimeline_2031_03",
                           "wqPrjCountDay_2031_01", "wqPrjCountDay_2031_02", "wqPrjCountDay_2031_03");
     }

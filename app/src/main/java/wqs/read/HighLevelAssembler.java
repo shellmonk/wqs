@@ -5,9 +5,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -70,22 +68,18 @@ public class HighLevelAssembler {
         Map<String, List<TxView>> txsByBatch = Map.of();
         Map<String, Map<String, List<TxView>>> txsByPlay = Map.of();
         if (!sessions.isEmpty()) {
-            // Bounds of the page's sessions' "startedAt" only (partition pruning of "wqPrjSession");
-            // every member probe is per session, inside its own window (final review F1).
-            Instant lo = sessions.values().stream().map(s -> s.startedAt())
-                    .min(Comparator.naturalOrder()).orElseThrow();
-            Instant hi = sessions.values().stream().map(s -> s.startedAt())
-                    .max(Comparator.naturalOrder()).orElseThrow();
+            // Sessions and plays by primary key ("userId", "batchId"); every transaction probe is per
+            // session, inside its own window (final review F1).
             Map<String, SessionRow> byBatch = new HashMap<>();
             sessions.values().forEach(s -> byBatch.put(s.batchId(), s));
             if (n.level() == AggregationLevel.L2) {
-                plays = plays(tx, userId, byBatch, lo, hi, n.excludeCancelled());
+                plays = plays(tx, userId, byBatch, n.excludeCancelled());
             }
             Map<String, Set<String>> listedPlays = new HashMap<>();
             plays.forEach((b, ps) -> ps.forEach(
                     p -> listedPlays.computeIfAbsent(b, x -> new HashSet<>()).add(p.subBatchId())));
             List<TransactionEntry> children = transactions.sessionTransactions(
-                    tx, userId, byBatch.keySet(), lo, hi, n.to(), n.transactionTypes(), n.excludeCancelled());
+                    tx, userId, byBatch.keySet(), n.to(), n.transactionTypes(), n.excludeCancelled());
             txsByBatch = new HashMap<>();
             txsByPlay = new HashMap<>();
             for (TransactionEntry e : children) {
@@ -149,21 +143,21 @@ public class HighLevelAssembler {
                 sessionTxs, subitems);
     }
 
-    /** The page's sessions by key: one query, the batch ids array-bound, startedAt range-pruned. */
+    /**
+     * The page's sessions: one query by primary key ("userId", "batchId"), the batch ids
+     * array-bound. A row whose "startedAt" is not its key's (cannot happen inside one snapshot) is
+     * dropped.
+     */
     private static Map<HighLevelKey, SessionRow> sessions(JdbcClient tx, long userId, List<HighLevelKey> keys) {
         if (keys.isEmpty()) {
             return Map.of();
         }
-        Instant lo = keys.stream().map(HighLevelKey::occurredAt).min(Comparator.naturalOrder()).orElseThrow();
-        Instant hi = keys.stream().map(HighLevelKey::occurredAt).max(Comparator.naturalOrder()).orElseThrow();
         Set<HighLevelKey> wanted = Set.copyOf(keys);
         Map<HighLevelKey, SessionRow> out = new HashMap<>();
         tx.sql(SESSIONS)
                 .param("ids", batchIds(keys.stream().map(HighLevelKey::refId)
                         .collect(LinkedHashSet::new, Set::add, Set::addAll)))
                 .param("userId", userId)
-                .param("lo", utc(lo))
-                .param("hi", utc(hi))
                 .query(HighLevelAssembler::sessionRow)
                 .list()
                 .forEach(r -> {
@@ -177,17 +171,15 @@ public class HighLevelAssembler {
 
     /**
      * The sessions' plays, newest first ("startedAt" desc, "subBatchId" desc), grouped by batch:
-     * per session, through "wqPrjPlay_batch", inside the session's own window (final review F1).
+     * per session, by the primary key prefix ("userId", "batchId").
      * Under excludeCancelled a play with no surviving transaction is omitted.
      */
     private static Map<String, List<PlayRow>> plays(JdbcClient tx, long userId,
-            Map<String, SessionRow> sessions, Instant lo, Instant hi, boolean excludeCancelled) {
+            Map<String, SessionRow> sessions, boolean excludeCancelled) {
         Map<String, List<PlayRow>> out = new LinkedHashMap<>();
         JdbcClient.StatementSpec spec = tx.sql(excludeCancelled ? PLAYS_EXCL : PLAYS)
                 .param("ids", batchIds(sessions.keySet()))
-                .param("userId", userId)
-                .param("lo", utc(lo))
-                .param("hi", utc(hi));
+                .param("userId", userId);
         if (excludeCancelled) {
             spec = spec.param("zero", 0);
         }
@@ -212,8 +204,7 @@ public class HighLevelAssembler {
                    "wqPrjSession"."firstSource"
             from "wqPrjSession"
             join unnest(cast(:ids as text[])) as "wanted" ("id") on "wqPrjSession"."batchId" = "wanted"."id"
-            where ("wqPrjSession"."userId" = :userId
-                   and "wqPrjSession"."startedAt" between cast(:lo as timestamptz) and cast(:hi as timestamptz))
+            where "wqPrjSession"."userId" = :userId
             """;
 
     private static final String PLAYS_FROM = """
@@ -223,10 +214,7 @@ public class HighLevelAssembler {
                    "wqPrjPlay"."totalPlaysExclCancelled", "wqPrjPlay"."totalWinsExclCancelled", "wqPrjPlay"."netExclCancelled",
                    "wqPrjPlay"."productType", "wqPrjPlay"."firstSourceId", "wqPrjPlay"."firstSource"
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqPrjSession" on ("wqPrjSession"."userId" = :userId and "wqPrjSession"."batchId" = "wanted"."id"
-                   and "wqPrjSession"."startedAt" between cast(:lo as timestamptz) and cast(:hi as timestamptz))
-            join "wqPrjPlay" on ("wqPrjPlay"."userId" = :userId and "wqPrjPlay"."batchId" = "wqPrjSession"."batchId"
-                   and "wqPrjPlay"."startedAt" between "wqPrjSession"."startedAt" and "wqPrjSession"."endedAt")
+            join "wqPrjPlay" on ("wqPrjPlay"."userId" = :userId and "wqPrjPlay"."batchId" = "wanted"."id")
             """;
     private static final String PLAYS_ORDER = """
             order by "wqPrjPlay"."startedAt" desc, "wqPrjPlay"."subBatchId" desc
@@ -270,9 +258,5 @@ public class HighLevelAssembler {
     /** One array bind, joined through unnest(?) as the phase-4 transaction fetch does. */
     private static String[] batchIds(Set<String> ids) {
         return ids.toArray(String[]::new);
-    }
-
-    private static OffsetDateTime utc(Instant i) {
-        return i.atOffset(ZoneOffset.UTC);
     }
 }

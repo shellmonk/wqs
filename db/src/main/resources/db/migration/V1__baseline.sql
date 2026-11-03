@@ -39,17 +39,6 @@ create table "wqPrjTransactionLocator" (
 
 create index "wqPrjTransactionLocator_user_idx" on "wqPrjTransactionLocator" ("userId");
 
--- Locates a session or play by its business key, so a later transaction joining an existing group
--- can find the row whose primary key includes the partition key. Same pattern and same reason as
--- "wqPrjTransactionLocator" (spec 5.4). "subBatchId" = '' identifies the session itself.
-create table "wqPrjGroupLocator" (
-    "userId"     bigint      not null,
-    "batchId"    text        not null,
-    "subBatchId" text        not null default '',
-    "startedAt"  timestamptz not null,
-    primary key ("userId", "batchId", "subBatchId")
-);
-
 -- ---------------------------------------------------------------------------------------------
 -- Level-0 transactions
 -- ---------------------------------------------------------------------------------------------
@@ -128,6 +117,10 @@ create index "wqDeadLetter_failedAt_idx" on "wqDeadLetter" ("failedAt" desc);
 -- Rollups
 -- ---------------------------------------------------------------------------------------------
 
+-- Sessions and plays are keyed by their business key and NOT partitioned: a transaction joining a
+-- group finds its row by ("userId", "batchId"[, "subBatchId"]) alone, and a late, earlier
+-- transaction only updates "startedAt" in place (plan D5) -- no row move, no locator.
+--
 -- A session's (and a play's) product pair is its FIRST transaction's, first by
 -- ("occurredAt", "sourceId", "source"). "startedAt" already is the first transaction's occurredAt;
 -- "firstSourceId" and "firstSource" hold the rest of that transaction's identity, the tie-break for transactions
@@ -152,8 +145,11 @@ create table "wqPrjSession" (
     "productType"              text,
     "firstSourceId"            text,
     "firstSource"              smallint,
-    primary key ("userId", "startedAt", "batchId")
-) partition by range ("startedAt");
+    primary key ("userId", "batchId")
+);
+
+-- Reading sessions in time order, newest first, for a user.
+create index "wqPrjSession_startedAt" on "wqPrjSession" ("userId", "startedAt" desc, "batchId" desc);
 
 create table "wqPrjPlay" (
     "userId"                   bigint        not null,
@@ -174,8 +170,8 @@ create table "wqPrjPlay" (
     "productType"              text,
     "firstSourceId"            text,
     "firstSource"              smallint,
-    primary key ("userId", "startedAt", "batchId", "subBatchId")
-) partition by range ("startedAt");
+    primary key ("userId", "batchId", "subBatchId")
+);
 
 -- ---------------------------------------------------------------------------------------------
 -- Level-1/2 page index
@@ -187,9 +183,9 @@ create table "wqPrjPlay" (
 --
 -- Both endpoints share the rows. "onWeb": the row is on /web's timeline -- an unsessioned
 -- transaction whose source feeds WEB, or a session holding at least one such transaction. /cc reads
--- every row. Visibility with cancelled transactions excluded is per endpoint, because a session can
--- mix sources: "visibleExclCancelled" is /cc's (a surviving transaction of any source),
--- "webVisibleExclCancelled" /web's (a surviving WEB-source transaction; false when not "onWeb").
+-- every row. "visibleExclCancelled" serves both endpoints: a session cannot mix sources -- only
+-- TRANSACTION and CLAIMABLE_PRIZE carry a batch id, both feed /web and /cc, and the writer
+-- rejects any other sessioned source -- so a session's surviving transactions are the same on both.
 create table "wqPrjTimeline" (
     "userId"                  bigint      not null,
     "occurredAt"              timestamptz not null,  -- session "startedAt", or the transaction's "occurredAt"
@@ -199,10 +195,8 @@ create table "wqPrjTimeline" (
     "currency"                char(3)     not null,
     "onWeb"                   boolean     not null,
     "visibleExclCancelled"    boolean     not null default true,
-    "webVisibleExclCancelled" boolean     not null,
     "productType"             text,
-    primary key ("userId", "occurredAt", "kind", "refId"),
-    constraint "wqPrjTimeline_webVisible_onWeb" check (not "webVisibleExclCancelled" or "onWeb")
+    primary key ("userId", "occurredAt", "kind", "refId")
 ) partition by range ("occurredAt");
 
 -- ---------------------------------------------------------------------------------------------
@@ -289,21 +283,21 @@ create index "wqPrjPendingCancel_target_idx" on "wqPrjPendingCancel" ("source", 
 -- on the transactions.
 --
 -- One index per table serves both endpoints. "source" is INCLUDEd so the /web view's
--- "source" in (1, 3) is checked inside an index-only scan; "onWeb" and "webVisibleExclCancelled"
--- likewise for the /web timeline. They are INCLUDE, not leading key columns: a key
+-- "source" in (1, 3) is checked inside an index-only scan; "onWeb" likewise for the /web
+-- timeline. They are INCLUDE, not leading key columns: a key
 -- ("userId", "onWeb", ...) would give /web an exact range but leave /cc (every row, ordered by
 -- time) with no ordered scan short of a second index, and PG16 has no skip scan. /web pays a
 -- filter on rows of other sources inside the same user's time range -- payments and adjustments,
 -- a minority -- and keeps index order, so a LIMIT still stops early.
 create index "wqPrjTransaction_cover" on "wqPrjTransaction" ("userId", "occurredAt" desc, "transactionId" desc) include ("cancelled", "productType", "type", "source");
-create index "wqPrjTimeline_cover" on "wqPrjTimeline" ("userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled", "onWeb", "webVisibleExclCancelled");
+create index "wqPrjTimeline_cover" on "wqPrjTimeline" ("userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled", "onWeb");
 
--- Level-1/2 assembly (spec 7.3 "each bounded by the page size"): a page's sessions' transactions and
--- plays are fetched per session by batch id. Without these the only usable index is
--- ("userId", "occurredAt"/"startedAt"), so a long-lived session made the fetch read every row of
--- the user inside its window. Partial on sessioned transactions: unsessioned rows never probe it.
+-- Level-1/2 assembly (spec 7.3 "each bounded by the page size"): a page's sessions' transactions are
+-- fetched per session by batch id. Without this the only usable index is ("userId", "occurredAt"),
+-- so a long-lived session made the fetch read every row of the user inside its window. Partial on
+-- sessioned transactions: unsessioned rows never probe it. Sessions and plays need no extra index:
+-- their primary keys lead with ("userId", "batchId").
 create index "wqPrjTransaction_batch" on "wqPrjTransaction" ("userId", "batchId", "occurredAt") where "batchId" is not null;
-create index "wqPrjPlay_batch"    on "wqPrjPlay"    ("userId", "batchId", "startedAt");
 
 -- ---------------------------------------------------------------------------------------------
 -- Quartz JobStore

@@ -125,11 +125,11 @@ class HighLevelQueryTest extends Level0TestSupport {
             // 60 users x 2000 rows over May 2034; a quarter are /cc-only payment rows.
             db().execute("""
                     insert into "wqPrjTimeline" ("userId", "occurredAt", "kind", "refId", "productType",
-                            "currency", "onWeb", "visibleExclCancelled", "webVisibleExclCancelled")
+                            "currency", "onWeb", "visibleExclCancelled")
                     select ?::bigint + (i % 60),
                            timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '20 minutes' + (i % 60) * interval '1 second',
                            (array[1, 3, 0, 4])[1 + (i % 4)], 'hl' || i, (array['keno','lottery','bingo'])[1 + (i % 3)],
-                           'EUR', i % 4 <> 3, true, i % 4 <> 3
+                           'EUR', i % 4 <> 3, true
                     from generate_series(0, 119999) as i
                     """, USER);
             db().execute("vacuum (analyze) \"wqPrjTimeline\"");

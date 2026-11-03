@@ -88,7 +88,6 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(result.updated()).isEqualTo(1);
         ProjectionSnapshot after = ProjectionSnapshot.of(jdbc());
         assertThat(transactionsWithoutDetail()).isEqualTo(transactionsBefore);
-        assertThat(after.groupLocator()).isEqualTo(before.groupLocator());
         assertThat(after.sessions()).isEqualTo(before.sessions());
         assertThat(after.plays()).isEqualTo(before.plays());
         assertThat(after.timeline()).isEqualTo(before.timeline());

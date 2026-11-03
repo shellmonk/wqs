@@ -52,7 +52,7 @@ class CoveringIndexTest extends PostgresTestBase {
     @Test
     void cover_index_key_and_include_columns() {
         String transactions = "(userId, occurredAt DESC, transactionId DESC) INCLUDE (cancelled, productType, type, source)";
-        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled, onWeb, webVisibleExclCancelled)";
+        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled, onWeb)";
         for (String parent : PARENTS) {
             String def = db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class,
                     "\"" + parent + "_cover\"").replace("\"", "");

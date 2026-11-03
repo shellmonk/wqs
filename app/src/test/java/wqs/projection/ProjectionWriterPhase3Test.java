@@ -143,9 +143,46 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     /**
+     * Plan D5 end to end: a late, earlier transaction re-anchors the session IN PLACE. Its one
+     * "wqPrjSession" row gets the new "startedAt", its timeline row moves to that instant on both
+     * endpoints, and its HIGH_LEVEL counters move from the old day and month to the new ones. The
+     * totals do not change: still one session page unit, and the rollup sums every transaction.
+     */
+    @Test
+    void a_late_earlier_transaction_re_anchors_the_session_its_timeline_row_and_counters() {
+        Instant oct30 = Instant.parse("2034-10-30T08:00:00Z");
+        writer.apply(new ProjectionBatch("s", List.of(
+                txProduct("r1", "b5", "p1", T0, 11),
+                txProduct("r2", "b5", "p2", T0.plusSeconds(10), 11)), 1L));
+        assertThat(monthSentinel(2, 1, "2034-11-01")).isEqualTo(1);
+
+        writer.apply(new ProjectionBatch("s", List.of(txProduct("r0", "b5", "p1", oct30, 11)), 2L));
+
+        assertThat(db().value("select count(*)::int from \"wqPrjSession\"", Integer.class)).isEqualTo(1);
+        assertThat(db().value("select \"startedAt\" from \"wqPrjSession\"", Instant.class)).isEqualTo(oct30);
+        assertThat(db().value("select \"txCount\" from \"wqPrjSession\"", Integer.class)).isEqualTo(3);
+        assertThat(db().value("select \"totalPlays\" from \"wqPrjSession\"", BigDecimal.class))
+                .isEqualByComparingTo("15.0000");
+        assertThat(db().value("select \"startedAt\" from \"wqPrjPlay\" where \"subBatchId\" = 'p1'", Instant.class))
+                .isEqualTo(oct30);
+        for (String timeline : List.of(ProjectionInvariants.WEB_TIMELINE, ProjectionInvariants.CC_TIMELINE)) {
+            assertThat(db().column("select \"occurredAt\" from " + ProjectionInvariants.relation(timeline)
+                    + " where \"kind\" = 0", Instant.class)).as(timeline).containsExactly(oct30);
+        }
+        for (int view : List.of(1, 2)) {
+            assertThat(monthSentinel(view, 1, "2034-11-01")).as("view %d, old month", view).isZero();
+            assertThat(monthSentinel(view, 1, "2034-10-01")).as("view %d, new month", view).isEqualTo(1);
+            assertThat(productDayCount(view, 1, 11, T0)).as("view %d, old day", view).isZero();
+            assertThat(productDayCount(view, 1, 11, oct30)).as("view %d, new day", view).isEqualTo(1);
+        }
+        assertEveryCounterMatchesTheProjection();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+    }
+
+    /**
      * Oracle check for product changes: session b2's key (start, LEAST(productType)) depends on
      * arrival order. It opens with no product, is raised to 11 in place, lowered to 7 in place by
-     * a /cc-only projected transaction (which also materialises nothing new: /cc already holds the row), then
+     * a claimable prize (which materialises nothing new: both views already hold the row), then
      * re-anchored a day earlier by a TRANSACTION at product 5. Per-product HIGH_LEVEL rows must
      * follow every step, not only the all-products sentinel.
      */
@@ -156,7 +193,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 txProduct("u1", "b2", "p1", T0, null),
                 txProduct("u2", "b2", "p2", T0.plusSeconds(10), 11),
                 // Ties u1 at the session's start with a lower sourceId: the first transaction (D6).
-                ccOnlyAdjustment("a1", "b2", T0, 7)), 1L));
+                prize("a1", "b2", T0, 7)), 1L));
 
         // Product-only changes: still one row per view, now at product 7.
         assertThat(highLevelProducts(ProjectionInvariants.WEB_TIMELINE)).containsExactly(Products.id(7));
@@ -179,8 +216,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
     /**
      * R98 / D6: a session's page rows carry the SESSION's currency in every view, whatever order
-     * its transactions arrive in. t1 (both views) and a1 (/cc only) each open the session's row in a view
-     * first depending on order; t0 (a day earlier) re-anchors it, so the row is also moved. Every
+     * its transactions arrive in. t1 (a transaction) and a1 (a claimable prize) each open the session's
+     * row first depending on order; t0 (a day earlier) re-anchors it, so the row is also moved. Every
      * order leaves both views' rows at USD, identical, and agreeing with the session. A later
      * transaction in another currency is dead-lettered and changes nothing (single-currency session).
      */
@@ -189,7 +226,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         Instant dayBefore = T0.minus(1, java.time.temporal.ChronoUnit.DAYS);
         List<ProjectionTransaction> transactions = List.of(
                 txCurrency("t1", T0, "USD"),
-                new ProjectionTransaction(1L, SourceKind.MANUAL_ADJUSTMENT, "a1", T0.plusSeconds(10), "P11",
+                new ProjectionTransaction(1L, SourceKind.CLAIMABLE_PRIZE, "a1", T0.plusSeconds(10), "P11",
                         "instants", "b9", null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "USD", null, null, null),
                 txCurrency("t0", dayBefore, "USD"));
 
@@ -214,7 +251,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         }
 
         WriteResult mismatch = writer.apply(new ProjectionBatch("s", List.of(
-                new ProjectionTransaction(1L, SourceKind.MANUAL_ADJUSTMENT, "a2", dayBefore.minusSeconds(5), "P11",
+                new ProjectionTransaction(1L, SourceKind.CLAIMABLE_PRIZE, "a2", dayBefore.minusSeconds(5), "P11",
                         "instants", "b9", null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "AUD", null, null, null)),
                 9L));
         assertThat(mismatch.deadLettered()).isEqualTo(1);
@@ -295,10 +332,10 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
-    private ProjectionTransaction ccOnlyAdjustment(String id, String batchId, Instant at, int product) {
+    private ProjectionTransaction prize(String id, String batchId, Instant at, int product) {
         return new ProjectionTransaction(
-                1L, SourceKind.MANUAL_ADJUSTMENT, id, at, Products.id(product), Products.type(product),
-                batchId, null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
+                1L, SourceKind.CLAIMABLE_PRIZE, id, at, Products.id(product), Products.type(product),
+                batchId, null, TxTypes.WIN, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
     private ProjectionTransaction ccOnlyPayment(String id, Instant at) {

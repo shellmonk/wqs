@@ -45,18 +45,42 @@ class MigrationTest extends PostgresTestBase {
         assertThat(relkind("wqPrjCcHighLevel")).as("no per-view page index").isNull();
     }
 
-    /** One page index for both endpoints: "onWeb" marks /web's rows, each endpoint has its own visibility. */
+    /**
+     * One page index for both endpoints: "onWeb" marks /web's rows and one "visibleExclCancelled"
+     * serves both, because a session never mixes sources.
+     */
     @Test
-    void the_timeline_carries_on_web_and_per_endpoint_visibility() {
-        for (String column : List.of("onWeb", "visibleExclCancelled", "webVisibleExclCancelled")) {
+    void the_timeline_carries_on_web_and_one_visibility() {
+        for (String column : List.of("onWeb", "visibleExclCancelled")) {
             assertThat(columnType("wqPrjTimeline", column)).as(column).isEqualTo("boolean");
             assertThat(nullable("wqPrjTimeline", column)).as(column).isFalse();
         }
-        assertThat(db().value("""
-                select pg_get_constraintdef(oid) from pg_constraint
-                where conname = 'wqPrjTimeline_webVisible_onWeb'
-                  and conrelid = to_regclass('"wqPrjTimeline"')::oid
-                """, String.class)).contains("webVisibleExclCancelled").contains("onWeb");
+        assertThat(columnType("wqPrjTimeline", "webVisibleExclCancelled")).as("no per-endpoint visibility").isNull();
+    }
+
+    /** Plan D5: sessions and plays are keyed by batch, not partitioned, and need no group locator. */
+    @Test
+    void sessions_and_plays_are_unpartitioned_and_keyed_by_batch() {
+        assertThat(relkind("wqPrjSession")).isEqualTo("r");
+        assertThat(relkind("wqPrjPlay")).isEqualTo("r");
+        assertThat(primaryKey("wqPrjSession")).containsExactly("userId", "batchId");
+        assertThat(primaryKey("wqPrjPlay")).containsExactly("userId", "batchId", "subBatchId");
+        assertThat(indexDef("wqPrjSession_startedAt")).endsWith(
+                "(\"userId\", \"startedAt\" DESC, \"batchId\" DESC)");
+        assertThat(relkind("wqPrjGroupLocator")).as("no group locator").isNull();
+        assertThat(relkind("wqPrjPlay_batch")).as("the play primary key serves the batch lookup").isNull();
+    }
+
+    private static List<String> primaryKey(String table) {
+        return db().column("""
+                select a.attname
+                from pg_index i
+                join pg_class c on c.oid = i.indrelid
+                cross join lateral unnest(i.indkey) with ordinality as k(attnum, pos)
+                join pg_attribute a on a.attrelid = c.oid and a.attnum = k.attnum
+                where c.relname = ? and i.indisprimary
+                order by k.pos
+                """, String.class, table);
     }
 
     private static String relkind(String name) {
@@ -182,10 +206,9 @@ class MigrationTest extends PostgresTestBase {
         assertThat(indexDef("wqPrjTransaction_cover")).endsWith(
                 "(\"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (cancelled, \"productType\", type, source)");
         assertThat(indexDef("wqPrjTimeline_cover")).endsWith(
-                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\", \"onWeb\", \"webVisibleExclCancelled\")");
+                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\", \"onWeb\")");
         assertThat(indexDef("wqPrjTransaction_batch")).endsWith(
                 "(\"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
-        assertThat(indexDef("wqPrjPlay_batch")).endsWith("(\"userId\", \"batchId\", \"startedAt\")");
     }
 
     /** The Quartz JobStore lives in its own schema. */
