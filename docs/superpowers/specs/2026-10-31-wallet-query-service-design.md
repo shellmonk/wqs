@@ -196,18 +196,18 @@ not.
 VERIFIED / CANCELLED / REJECTED / EXPIRED, claims UNCLAIMED → CLAIMED → COMPLETED / REJECTED /
 EXPIRED, adjustment requests PENDING → APPROVED / REJECTED, limits are requested then approved —
 and `/wallet/delta` returns the **current version** of every row changed since the cursor. A
-periodic Quartz job per source (§6.5) polls it and applies each row as an **upsert of a newer
+single periodic Quartz job, `deltaPoll` (§6.5), polls the mixed feed and applies each row as an **upsert of a newer
 version**, not an insert. Consequences:
 
 - The idempotency gate cannot be "seen this sourceId → drop": a re-read of the same version (the
   overlap window) must be a no-op, but a newer version must replace the stored one. The row's own
   change timestamp (`updated` / `statusDate`) is its version: apply when strictly newer, treat as
   duplicate when equal, ignore (and count) when older.
-- Any field a counter, a rollup or `"visibleExclCancelled"` depends on can change on an update.
-  Applying a new version therefore retracts the old version's contributions and adds the new
-  one's, in the same transaction — the same mechanism cancellation already uses.
-- `"occurredAt"` is the source's `created`, which never changes, so a new version never moves
-  partitions.
+- Only `"detail"` (which carries the status) changes on a newer version; a version that changes
+  anything a counter, rollup or `"visibleExclCancelled"` depends on is dead-lettered (see
+  "Versioned apply" below), so no contribution is ever retracted.
+- `"occurredAt"` is the source's creation time (`created`; `issued` for adjustment requests),
+  which never changes, so a new version never moves partitions.
 
 **Grouping.** Sessions are keyed by `batchId` and plays by `subBatchId` (§5.5). The source column
 `aggregationId` is **obsolete** and is not used.
@@ -299,6 +299,17 @@ status) in every view the source feeds; equal is a duplicate; older is ignored a
 currency, type, product, batch, user) is dead-lettered `immutable-field-changed` — the O-15
 default says only status changes, and refusing anything else loudly is safer than an untested
 retract-and-reapply.
+
+**Poll loop.** A run reads from `watermark − overlap` (the epoch on first poll) and applies each page
+in one transaction with the watermark, which only moves forward (`greatest`). A saturated page
+that does not pass the stored watermark is walked inside the run — the next page starts at the
+previous page's max version — so a burst inside the overlap window neither stalls the cursor nor
+skips late commits. The timestamp cliff is raised only for a saturated page whose rows all share
+one version at or after the watermark. A run fetches at most `max-pages-per-run` pages. A poison
+row (undecodable, or a data-integrity violation) is dead-lettered once and the watermark still
+advances past it; any other failure (HTTP, timeout, pool, deadlock) fails the run with no
+watermark movement, and the next fire retries. **Assumed of the endpoint (confirm with the wallet
+team):** rows are ordered by version ascending, and the cursor parameter is inclusive.
 
 Two hazards follow from a timestamp-only cursor:
 
@@ -645,7 +656,7 @@ RabbitMQ stream ──> StreamConsumer ──┐
 ```
 
 Everything that mutates a `wq*` table goes through `ProjectionWriter`. Nothing else holds a write
-connection. The stream consumer, the delta pollers and any future backfill loader are all merely
+connection. The stream consumer, the delta poller and any future backfill loader are all merely
 drivers of that one component.
 
 ### 6.1 Stream consumption
@@ -820,7 +831,7 @@ follow §3. Those tables therefore live in a **separate `quartz` schema**, keepi
 | `pendingCancelSweep` | Report pending cancels older than a threshold | §6.3 |
 | `deadLetterReport` | Surface dead-letter depth and age | §6.4 |
 
-Every job class carries `@DisallowConcurrentExecution`. For the delta pollers this is a
+Every job class carries `@DisallowConcurrentExecution`. For the delta poller this is a
 correctness requirement, not tidiness: two overlapping polls of the same source would race the
 same watermark row.
 
@@ -833,12 +844,6 @@ wqs:
       enabled: false                   # closed by default, like the stream
       intervalSeconds: 5
       misfirePolicy: DO_NOTHING        # never queue catch-up fires
-  delta:                               # poller settings (phase 6)
-    base-url: http://wallet:8080       # no default; WQS_DELTA_BASE_URL
-    cursor-param: from
-    page-limit: 1000
-    overlap: 120s
-    max-pages-per-run: 20
     partition-rollover:
       enabled: true
       cron: "0 0 3 * * ?"
@@ -847,6 +852,14 @@ wqs:
       enabled: true
       cron: "0 15 * * * ?"
       sampleSize: 500
+  delta:                               # poller settings (phase 6)
+    base-url: http://wallet:8080       # no default; WQS_DELTA_BASE_URL
+    cursor-param: from
+    page-limit: 1000
+    overlap: 120s
+    max-pages-per-run: 20
+    connect-timeout: 2s
+    read-timeout: 10s
 ```
 
 A job accepts either `cron` or `intervalSeconds`. Bound via `@ConfigurationProperties` to a map of
@@ -1475,10 +1488,14 @@ none can freeze when the code that would have "set" it stops running.
 | `wqs.ingest.events` | counter | source, outcome | `projected` \| `duplicate` \| `deadlettered` |
 | `wqs.pendingcancel.depth` | gauge | — | |
 | `wqs.pendingcancel.oldest.age.seconds` | gauge | — | an *aging* set means cancels never resolve |
-| `wqs.delta.rows.fetched` | histogram | source | *phase 6* |
-| `wqs.delta.page.saturated` | counter | source | polls returning exactly `pageLimit` — saturation; *phase 6* |
-| `wqs.delta.watermark.age.seconds` | gauge | source | detects a stuck poller; *phase 6* |
-| `wqs.delta.timestampcliff` | counter | source | the unhandleable condition in §4; *phase 6* |
+| `wqs.delta.rows.fetched` | histogram | — | rows per page |
+| `wqs.delta.page.saturated` | counter | — | pages returning `>= page-limit` rows |
+| `wqs.delta.overlap.saturated` | counter | — | a saturated page that did not pass the watermark — the in-run window walk took over |
+| `wqs.delta.watermark.age.seconds` | gauge | — | now − watermark; data age (a quiet feed also raises it) |
+| `wqs.delta.timestampcliff` | counter | — | the unhandleable condition in §4 |
+| `wqs.delta.rows` | counter | `outcome` = inserted, updated, duplicate, stale, skipped, dead-lettered | per-row result |
+| `wqs.delta.stale` | counter | — | older versions ignored |
+| `wqs.delta.poll.failures` | counter | — | failed runs (HTTP, decode-of-page, transient DB); retried next fire |
 
 The `duplicate` outcome is a signal, not noise: a rising duplicate ratio means the delta overlap
 window is wider than it needs to be, or the stream is replaying.
