@@ -73,4 +73,19 @@
 
 ## Execution notes
 
-(Rulings recorded during execution go here.)
+Executed 2026-11-03 with subagent-driven development on main; reviews of tasks N and implementation of N+1 overlapped to save time.
+
+### Rulings
+
+- R1 Ruling: T2 adds a test proving jOOQ and JdbcClient writes in one @Transactional share one connection/tx (rollback undoes both) — guards incremental porting — cost if wrong: mixed-tx partial commits during T3/T4
+- Ruling: Task 3 dispatched in parallel with Task 2 review (time) — T3 builds on T2 infra; a T2 infra finding would be carried into T3 — cost if wrong: T3 rework
+- Ruling: Task 5 task gate folded into the final whole-branch review (time) — cost if wrong: none extra
+
+### Deferred minors
+
+- Task 1: minor (deferred): buildSrc junit-platform-launcher unversioned; junit-jupiter version hard-coded; Files.readString strict on malformed UTF-8
+- Task 2: minor (deferred): MigrationTest builds a second PGSimpleDataSource needlessly
+- Task 4: minor (deferred): Level0 fetch maps inside streaming RowCallbackHandler (codeOf on same connection with open ResultSet; fine at default fetch size); StatementRecorder wraps prepareCall as plain PreparedStatement; unsessioned binds timestamps as ISO text cast to timestamptz[] (as jOOQ did)
+- Final: minor (deferred): D5b covers only JdbcClient — a wqs.read class injecting the writer DataSource/JdbcTemplate/NamedParameterJdbcTemplate bypasses routing (none today)
+- Final: minor (deferred): T1 hard-coded junit version in buildSrc; T4 codeOf on open ResultSet safe only while no fetch size is set on the reader
+
