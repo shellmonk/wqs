@@ -4,7 +4,7 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 
 /**
@@ -12,17 +12,11 @@ import org.springframework.stereotype.Component;
  * because the stock Testcontainers Postgres image lacks the extension and partition
  * rollover must be testable locally (spec section 5.8).
  *
- * JUSTIFIED EXCEPTION to spec section 2.2 rule 1 (no string-built SQL): jOOQ has no DSL for
- * CREATE TABLE ... PARTITION OF, and Postgres does not accept bind parameters in FOR VALUES.
- * Every input here is program-generated -- an enum constant and a LocalDate -- and all
- * identifiers pass through quoteIdent.
+ * JUSTIFIED EXCEPTION to spec section 2.2 rule 1 (no string-built SQL): Postgres accepts no bind
+ * parameters in DDL, so CREATE TABLE ... PARTITION OF ... FOR VALUES is built as text. Every input
+ * to it is program-generated -- an enum constant and a LocalDate -- and all identifiers pass
+ * through quoteIdent. The pg_inherits existence check binds its (quoted) names.
  */
-@RawSqlJustified(
-        "jOOQ has no DSL for CREATE TABLE ... PARTITION OF, and Postgres does not accept bind "
-        + "parameters in FOR VALUES, so DSLContext.execute(String) is required. The pg_inherits "
-        + "existence check uses from(String), where(String, Object...) and and(String, Object...) because the catalog table "
-        + "is not in the generated schema and to_regclass(?) takes a quoted regclass name. All "
-        + "inputs are program-generated and identifiers pass through quoteIdent.")
 @Component
 public class PartitionManager {
 
@@ -36,10 +30,17 @@ public class PartitionManager {
     // database on every scheduled gauge scrape (Task 8).
     private static final int MAX_RUNWAY_MONTHS = 60;
 
-    private final DSLContext dsl;
+    private static final String PARTITION_EXISTS = """
+            select exists(
+                select 1 from pg_inherits
+                where inhrelid = to_regclass(?)::oid
+                  and inhparent = to_regclass(?)::oid)
+            """;
 
-    public PartitionManager(DSLContext dsl) {
-        this.dsl = dsl;
+    private final JdbcClient jdbc;
+
+    public PartitionManager(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     /** Ensures partitions exist for [from, from + monthsAhead]. Returns how many were created. */
@@ -85,10 +86,10 @@ public class PartitionManager {
         String lower = utcInstantLiteral(month.atDay(1));
         String upper = utcInstantLiteral(month.plusMonths(1).atDay(1));
 
-        dsl.execute(
-                "create table if not exists " + quoteIdent(child)
+        jdbc.sql("create table if not exists " + quoteIdent(child)
                         + " partition of " + quoteIdent(table.tableName())
-                        + " for values from ('" + lower + "') to ('" + upper + "')");
+                        + " for values from ('" + lower + "') to ('" + upper + "')")
+                .update();
         return true;
     }
 
@@ -112,11 +113,10 @@ public class PartitionManager {
      * partition of this named parent with this exact child name.
      */
     private boolean partitionExists(PartitionedTable table, String child) {
-        return dsl.fetchExists(
-                dsl.selectOne()
-                        .from("pg_inherits")
-                        .where("inhrelid = to_regclass(?)::oid", quoteIdent(child))
-                        .and("inhparent = to_regclass(?)::oid", quoteIdent(table.tableName())));
+        return Boolean.TRUE.equals(jdbc.sql(PARTITION_EXISTS)
+                .params(quoteIdent(child), quoteIdent(table.tableName()))
+                .query(Boolean.class)
+                .single());
     }
 
     private static String partitionName(PartitionedTable table, YearMonth month) {

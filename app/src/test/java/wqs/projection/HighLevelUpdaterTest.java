@@ -28,7 +28,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         // July and August 2034: the month-boundary move needs both partitions.
-        new PartitionManager(dsl()).ensurePartitionsAhead(YearMonth.of(2034, 7), 1);
+        new PartitionManager(jdbc()).ensurePartitionsAhead(YearMonth.of(2034, 7), 1);
         clean();
     }
 

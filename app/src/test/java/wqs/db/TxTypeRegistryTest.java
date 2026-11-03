@@ -9,6 +9,7 @@ import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -17,14 +18,15 @@ import wqs.domain.MoneyDirection;
 /** Plan D2: the data-driven transaction-type table and its cached registry. */
 class TxTypeRegistryTest extends PostgresTestBase {
 
-    // Bound the way the app binds its DSLContext: to the Spring-managed connection, so a registry
-    // call made inside an outer transaction would join it unless the registry isolates itself.
+    // A JdbcClient joins the Spring-managed connection of its DataSource, as in the app, so a
+    // registry call made inside an outer transaction would join it unless the registry isolates
+    // itself.
     private static final DataSourceTransactionManager TM = new DataSourceTransactionManager(dataSource());
     private static final DSLContext TX_DSL =
             DSL.using(new TransactionAwareDataSourceProxy(dataSource()), SQLDialect.POSTGRES);
 
     private static TxTypeRegistry registry() {
-        return new TxTypeRegistry(TX_DSL, TM);
+        return new TxTypeRegistry(jdbc(), TM);
     }
 
     @Test
@@ -98,21 +100,63 @@ class TxTypeRegistryTest extends PostgresTestBase {
             codes.add("TT_BOGUS_" + i + "_" + UUID.randomUUID());
         }
         java.util.concurrent.atomic.AtomicInteger statements = new java.util.concurrent.atomic.AtomicInteger();
-        DSLContext counting = DSL.using(TX_DSL.configuration().derive(
+        DSLContext countingDsl = DSL.using(TX_DSL.configuration().derive(
                 org.jooq.ExecuteListener.onExecuteStart(ctx -> statements.incrementAndGet())));
+        JdbcClient counting = JdbcClient.create(countingStatements(statements));
 
         // reader overload, cold registry
         var viaReader = registry().idsOf(counting, codes);
         assertThat(statements.get()).as("reader overload statements").isEqualTo(1);
 
-        // writer overload, cold registry built on the counting DSL
+        // the jOOQ reader overload kept for unported read-path callers, cold registry
+        statements.set(0);
+        var viaReaderDsl = registry().idsOf(countingDsl, codes);
+        assertThat(statements.get()).as("jOOQ reader overload statements").isEqualTo(1);
+
+        // writer overload, cold registry built on the counting client
         statements.set(0);
         var viaWriter = new TxTypeRegistry(counting, TM).idsOf(codes);
         assertThat(statements.get()).as("writer overload statements").isEqualTo(1);
 
         TxTypeRegistry warm = registry();
         assertThat(viaReader).containsExactlyInAnyOrder(warm.idOf("TT_BUY"), warm.idOf("PRIZE"));
+        assertThat(viaReaderDsl).isEqualTo(viaReader);
         assertThat(viaWriter).isEqualTo(viaReader);
+    }
+
+    @Test
+    void code_of_reads_through_either_reader_overload() {
+        short prize = registry().idOf("PRIZE");
+        assertThat(registry().codeOf(jdbc(), prize)).isEqualTo("PRIZE");
+        assertThat(registry().codeOf(TX_DSL, prize)).isEqualTo("PRIZE");
+        assertThatThrownBy(() -> registry().codeOf(jdbc(), (short) 32000))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("32000");
+        assertThatThrownBy(() -> registry().codeOf(TX_DSL, (short) 32000))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("32000");
+    }
+
+    /** The shared DataSource, its connections counting every statement they prepare or create. */
+    private static javax.sql.DataSource countingStatements(java.util.concurrent.atomic.AtomicInteger statements) {
+        return new org.springframework.jdbc.datasource.DelegatingDataSource(dataSource()) {
+            @Override
+            public java.sql.Connection getConnection() throws java.sql.SQLException {
+                java.sql.Connection target = super.getConnection();
+                return (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(
+                        getClass().getClassLoader(), new Class<?>[] {java.sql.Connection.class},
+                        (proxy, method, args) -> {
+                            String name = method.getName();
+                            if (name.equals("prepareStatement") || name.equals("createStatement")
+                                    || name.equals("prepareCall")) {
+                                statements.incrementAndGet();
+                            }
+                            try {
+                                return method.invoke(target, args);
+                            } catch (java.lang.reflect.InvocationTargetException e) {
+                                throw e.getCause();
+                            }
+                        });
+            }
+        };
     }
 
     @Test

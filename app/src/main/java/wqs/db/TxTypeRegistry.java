@@ -10,6 +10,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -35,13 +37,26 @@ import wqs.domain.MoneyDirection;
 @Component
 public class TxTypeRegistry {
 
-    private final DSLContext dsl;
+    private static final String SELECT = """
+            select "typeId", "code", "direction" from "wqTxType"
+            """;
+    private static final String BY_CODE = SELECT + "where \"code\" = ?";
+    private static final String BY_CODES = SELECT + "where \"code\" = any(cast(? as text[]))";
+    private static final String BY_ID = SELECT + "where \"typeId\" = ?";
+    private static final String INSERT = """
+            insert into "wqTxType" ("code", "direction") values (?, ?)
+            on conflict ("code") do nothing
+            """;
+    private static final RowMapper<Entry> ROW = (rs, n) -> new Entry(
+            rs.getShort("typeId"), rs.getString("code"), MoneyDirection.ofCode(rs.getShort("direction")));
+
+    private final JdbcClient jdbc;
     private final TransactionTemplate requiresNew;
     private final Map<String, Short> idsByCode = new ConcurrentHashMap<>();
     private final Map<Short, Entry> byId = new ConcurrentHashMap<>();
 
-    public TxTypeRegistry(DSLContext dsl, PlatformTransactionManager transactionManager) {
-        this.dsl = dsl;
+    public TxTypeRegistry(JdbcClient jdbc, PlatformTransactionManager transactionManager) {
+        this.jdbc = jdbc;
         this.requiresNew = new TransactionTemplate(transactionManager);
         this.requiresNew.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -55,15 +70,10 @@ public class TxTypeRegistry {
         if (cached != null) {
             return cached;
         }
-        WqTxTypeRecord row = find(code);
+        Entry row = find(code);
         if (row == null) {
             row = requiresNew.execute(status -> {
-                dsl.insertInto(WQ_TX_TYPE)
-                        .set(WQ_TX_TYPE.code, code)
-                        .set(WQ_TX_TYPE.direction, MoneyDirection.NEUTRAL.code())
-                        .onConflict(WQ_TX_TYPE.code)
-                        .doNothing()
-                        .execute();
+                jdbc.sql(INSERT).params(code, MoneyDirection.NEUTRAL.code()).update();
                 return find(code);
             });
         }
@@ -73,11 +83,11 @@ public class TxTypeRegistry {
     /**
      * The ids of those {@code codes} that are registered. An unknown code contributes nothing and
      * is never registered: filters must not grow the table. A cache miss reads through this
-     * registry's own (writer) DSL -- the write path's overload; the read path uses
-     * {@link #idsOf(DSLContext, Collection)}.
+     * registry's own (writer) client -- the write path's overload; the read path uses
+     * {@link #idsOf(JdbcClient, Collection)}.
      */
     public Set<Short> idsOf(Collection<String> codes) {
-        return idsOf(dsl, codes);
+        return idsOf(jdbc, codes);
     }
 
     /**
@@ -85,8 +95,18 @@ public class TxTypeRegistry {
      * path's single REPEATABLE READ transaction, so resolving a filter never touches the writer
      * pool nor steps outside the reader's snapshot (M2).
      */
-    public Set<Short> idsOf(DSLContext reader, Collection<String> codes) {
+    public Set<Short> idsOf(JdbcClient reader, Collection<String> codes) {
         Set<Short> ids = new LinkedHashSet<>();
+        Set<String> missing = cachedIds(codes, ids);
+        if (!missing.isEmpty()) {
+            // One statement for every uncached code (final review F4), the array a single bind.
+            reader.sql(BY_CODES).param(missing.toArray(String[]::new)).query(ROW).list()
+                    .forEach(row -> ids.add(remember(row).typeId()));
+        }
+        return ids;
+    }
+
+    private Set<String> cachedIds(Collection<String> codes, Set<Short> ids) {
         Set<String> missing = new LinkedHashSet<>();
         for (String code : codes) {
             Short id = idsByCode.get(code);
@@ -96,54 +116,74 @@ public class TxTypeRegistry {
                 missing.add(code);
             }
         }
+        return missing;
+    }
+
+    /**
+     * The jOOQ form of {@link #idsOf(JdbcClient, Collection)}, for read-path callers not yet ported
+     * off jOOQ (removed with them).
+     */
+    public Set<Short> idsOf(DSLContext reader, Collection<String> codes) {
+        Set<Short> ids = new LinkedHashSet<>();
+        Set<String> missing = cachedIds(codes, ids);
         if (!missing.isEmpty()) {
             // One statement for every uncached code (final review F4), the array a single bind.
             reader.selectFrom(WQ_TX_TYPE)
                     .where(WQ_TX_TYPE.code.eq(DSL.any(DSL.val(missing.toArray(String[]::new),
                             SQLDataType.CLOB.getArrayDataType()))))
                     .fetch()
-                    .forEach(row -> ids.add(remember(row).typeId()));
+                    .forEach(row -> ids.add(remember(entryOf(row)).typeId()));
         }
         return ids;
     }
 
     /** @throws IllegalArgumentException if no type has this id -- a stored id always exists */
     public MoneyDirection directionOf(short typeId) {
-        return entry(dsl, typeId).direction();
+        return entry(jdbc, typeId).direction();
     }
 
     /** @throws IllegalArgumentException if no type has this id -- a stored id always exists */
     public String codeOf(short typeId) {
-        return entry(dsl, typeId).code();
+        return entry(jdbc, typeId).code();
     }
 
     /** As {@link #codeOf(short)}, a cache miss read through {@code reader} (the read path's tx; M2). */
-    public String codeOf(DSLContext reader, short typeId) {
+    public String codeOf(JdbcClient reader, short typeId) {
         return entry(reader, typeId).code();
     }
 
-    private Entry entry(DSLContext source, short typeId) {
+    /** The jOOQ form of {@link #codeOf(JdbcClient, short)}, for read-path callers not yet ported. */
+    public String codeOf(DSLContext reader, short typeId) {
+        Entry cached = byId.get(typeId);
+        if (cached != null) {
+            return cached.code();
+        }
+        WqTxTypeRecord row = reader.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.typeId.eq(typeId)).fetchOne();
+        if (row == null) {
+            throw new IllegalArgumentException("no transaction type with id " + typeId);
+        }
+        return remember(entryOf(row)).code();
+    }
+
+    private Entry entry(JdbcClient source, short typeId) {
         Entry cached = byId.get(typeId);
         if (cached != null) {
             return cached;
         }
-        WqTxTypeRecord row = source.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.typeId.eq(typeId)).fetchOne();
-        if (row == null) {
-            throw new IllegalArgumentException("no transaction type with id " + typeId);
-        }
+        Entry row = source.sql(BY_ID).param(typeId).query(ROW).optional()
+                .orElseThrow(() -> new IllegalArgumentException("no transaction type with id " + typeId));
         return remember(row);
     }
 
-    private WqTxTypeRecord find(String code) {
-        return find(dsl, code);
+    private Entry find(String code) {
+        return jdbc.sql(BY_CODE).param(code).query(ROW).optional().orElse(null);
     }
 
-    private static WqTxTypeRecord find(DSLContext source, String code) {
-        return source.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.code.eq(code)).fetchOne();
+    private static Entry entryOf(WqTxTypeRecord row) {
+        return new Entry(row.getTypeId(), row.getCode(), MoneyDirection.ofCode(row.getDirection()));
     }
 
-    private Entry remember(WqTxTypeRecord row) {
-        Entry entry = new Entry(row.getTypeId(), row.getCode(), MoneyDirection.ofCode(row.getDirection()));
+    private Entry remember(Entry entry) {
         byId.putIfAbsent(entry.typeId(), entry);
         idsByCode.putIfAbsent(entry.code(), entry.typeId());
         return entry;

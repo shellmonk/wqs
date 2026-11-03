@@ -21,7 +21,7 @@ class CoveringIndexTest extends PostgresTestBase {
     static void createPartition() {
         // Created AFTER migration, so this proves the index propagates to future partitions.
         // Empty partitions are left behind deliberately (no rows; later tests re-ensure them).
-        new PartitionManager(dsl()).ensurePartitionsAhead(YearMonth.of(2036, 7), 0);
+        new PartitionManager(jdbc()).ensurePartitionsAhead(YearMonth.of(2036, 7), 0);
     }
 
     @Test

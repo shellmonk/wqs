@@ -19,7 +19,7 @@ class PartitionProvisionerTest extends PostgresTestBase {
     private static final Clock NOV_2026 = Clock.fixed(Instant.parse("2026-11-15T10:00:00Z"), ZoneOffset.UTC);
 
     private final List<YearMonth> calls = new ArrayList<>();
-    private final PartitionManager counting = new PartitionManager(dsl()) {
+    private final PartitionManager counting = new PartitionManager(jdbc()) {
         @Override
         public int ensurePartitionsAhead(YearMonth from, int monthsAhead) {
             calls.add(from);

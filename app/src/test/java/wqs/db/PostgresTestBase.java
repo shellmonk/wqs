@@ -42,6 +42,11 @@ public abstract class PostgresTestBase {
         return DSL.using(dataSource, SQLDialect.POSTGRES);
     }
 
+    /** A JdbcClient over the shared container; it joins a Spring transaction on {@link #dataSource()}. */
+    protected static org.springframework.jdbc.core.simple.JdbcClient jdbc() {
+        return org.springframework.jdbc.core.simple.JdbcClient.create(dataSource);
+    }
+
     private static volatile TxTypeRegistry txTypes;
 
     /**
@@ -51,7 +56,7 @@ public abstract class PostgresTestBase {
      */
     protected static TxTypeRegistry txTypes() {
         if (txTypes == null) {
-            txTypes = new TxTypeRegistry(dsl(),
+            txTypes = new TxTypeRegistry(jdbc(),
                     new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
         }
         return txTypes;

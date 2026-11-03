@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import org.flywaydb.core.Flyway;
 import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
@@ -147,7 +148,7 @@ class MigrationTest extends PostgresTestBase {
         PGSimpleDataSource ds = dataSourceFor("wqsV10Reset");
         Flyway.configure().dataSource(ds).locations("classpath:db/migration").target("9").load().migrate();
         // Phase-4 provisioning, then one row in every projection table.
-        new PartitionManager(db).ensurePartitionsAhead(YearMonth.of(2030, 1), 0);
+        new PartitionManager(JdbcClient.create(dataSourceFor("wqsV10Reset"))).ensurePartitionsAhead(YearMonth.of(2030, 1), 0);
         db.execute("""
                 insert into "wqProduct" values (11, 'p11', 'P 11', 1);
                 insert into "wqItemLocator" values (1, 's1', 7, '2030-01-05T00:00:00Z', 1);
@@ -192,7 +193,7 @@ class MigrationTest extends PostgresTestBase {
         DSLContext db = freshDatabase("wqsV10Partitions");
         PGSimpleDataSource ds = dataSourceFor("wqsV10Partitions");
         Flyway.configure().dataSource(ds).locations("classpath:db/migration").target("9").load().migrate();
-        PartitionManager manager = new PartitionManager(db);
+        PartitionManager manager = new PartitionManager(JdbcClient.create(dataSourceFor("wqsV10Partitions")));
         YearMonth month = YearMonth.of(2030, 3);
         manager.ensurePartitionsAhead(month, 0);
         assertThat(partitionsOf(db, "wqCountDay")).containsExactly("wqCountDay_2030_03");

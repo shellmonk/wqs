@@ -1,18 +1,17 @@
 package wqs.ingest;
 
-import static wqs.db.generated.Tables.WQ_DEAD_LETTER;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.sql.Types;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
-import org.jooq.DSLContext;
-import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.SqlParameterValue;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -42,12 +41,26 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
 
     private static final Logger log = LoggerFactory.getLogger(DeadLetterStore.class);
 
-    private final DSLContext dsl;
+    private static final String REPEATED = """
+            select exists(
+                select 1 from "wqDeadLetter"
+                where "stream" = ?
+                  and "source" is not distinct from ?
+                  and "sourceId" is not distinct from ?
+                  and "payload" = cast(? as jsonb))
+            """;
+    private static final String INSERT = """
+            insert into "wqDeadLetter"
+                ("stream", "streamOffset", "source", "sourceId", "payload", "error", "attempts")
+            values (?, ?, ?, ?, cast(? as jsonb), ?, ?)
+            """;
+
+    private final JdbcClient jdbc;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate requiresNew;
 
-    public DeadLetterStore(DSLContext dsl, ObjectMapper objectMapper, PlatformTransactionManager transactionManager) {
-        this.dsl = dsl;
+    public DeadLetterStore(JdbcClient jdbc, ObjectMapper objectMapper, PlatformTransactionManager transactionManager) {
+        this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.requiresNew = new TransactionTemplate(transactionManager);
         this.requiresNew.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -147,7 +160,7 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
             Object payload, String errorText, int attempts) {
         try {
             requiresNew.executeWithoutResult(status -> {
-                JSONB json = JSONB.valueOf(serialize(payload));
+                String json = serialize(payload);
                 if (!isRepeatedPolledRow(stream, source, sourceId, json)) {
                     insert(stream, offset, source, sourceId, json, errorText, attempts);
                 }
@@ -157,7 +170,7 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
                     sanitise(String.valueOf(sourceId)), offset, normalFailure);
             String fallbackError = errorText + "\ndead-letter fallback: " + describe(normalFailure);
             requiresNew.executeWithoutResult(status ->
-                    insert(stream, offset, source, null, JSONB.valueOf(serialize(rawBase64(rawBytes(payload)))),
+                    insert(stream, offset, source, null, serialize(rawBase64(rawBytes(payload))),
                             fallbackError, attempts));
         }
     }
@@ -168,29 +181,32 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
      * the same source, sourceId and payload exists -- the payload carries the row's version field,
      * or for a non-object row its SHA-256 -- so a new version of the row is still recorded.
      */
-    private boolean isRepeatedPolledRow(String stream, Short source, String sourceId, JSONB payload) {
+    private boolean isRepeatedPolledRow(String stream, Short source, String sourceId, String payload) {
         if (!DeltaWatermarkStore.WALLET_DELTA.equals(stream)) {
             return false;
         }
-        return dsl.fetchExists(dsl.selectOne().from(WQ_DEAD_LETTER).where(
-                WQ_DEAD_LETTER.stream.eq(stream),
-                WQ_DEAD_LETTER.source.isNotDistinctFrom(source),
-                WQ_DEAD_LETTER.sourceId.isNotDistinctFrom(sourceId),
-                WQ_DEAD_LETTER.payload.eq(payload)));
+        return Boolean.TRUE.equals(jdbc.sql(REPEATED)
+                .params(text(stream), smallint(source), text(sourceId), payload)
+                .query(Boolean.class)
+                .single());
     }
 
     private void insert(
             String stream, Long offset, Short source, String sourceId,
-            JSONB payload, String error, int attempts) {
-        dsl.insertInto(WQ_DEAD_LETTER)
-                .set(WQ_DEAD_LETTER.stream, stream)
-                .set(WQ_DEAD_LETTER.streamOffset, offset)
-                .set(WQ_DEAD_LETTER.source, source)
-                .set(WQ_DEAD_LETTER.sourceId, sourceId)
-                .set(WQ_DEAD_LETTER.payload, payload)
-                .set(WQ_DEAD_LETTER.error, sanitise(error))
-                .set(WQ_DEAD_LETTER.attempts, attempts)
-                .execute();
+            String payload, String error, int attempts) {
+        jdbc.sql(INSERT)
+                .params(text(stream), new SqlParameterValue(Types.BIGINT, offset), smallint(source),
+                        text(sourceId), payload, sanitise(error), attempts)
+                .update();
+    }
+
+    // Typed binds, so a null is sent with its column's type rather than an unknown one.
+    private static SqlParameterValue text(String value) {
+        return new SqlParameterValue(Types.VARCHAR, value);
+    }
+
+    private static SqlParameterValue smallint(Short value) {
+        return new SqlParameterValue(Types.SMALLINT, value);
     }
 
     private static Map<String, String> rawBase64(byte[] bytes) {

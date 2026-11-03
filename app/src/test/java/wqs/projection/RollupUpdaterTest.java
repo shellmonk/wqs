@@ -33,7 +33,7 @@ class RollupUpdaterTest extends PostgresTestBase {
     @BeforeEach
     void setUp() {
         // April and May 2034: the month-boundary re-anchor test needs both partitions.
-        new PartitionManager(dsl()).ensurePartitionsAhead(YearMonth.of(2034, 4), 1);
+        new PartitionManager(jdbc()).ensurePartitionsAhead(YearMonth.of(2034, 4), 1);
         clean();
     }
 

@@ -24,7 +24,7 @@ class DeadLetterMetricsTest extends PostgresTestBase {
             @Override public Instant instant() { return now[0]; }
         };
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        new DeadLetterMetrics(dsl(), registry, clock);
+        new DeadLetterMetrics(jdbc(), registry, clock);
         var gauge = registry.find("wqs.deadletter.depth").gauge();
         assertThat(gauge.value()).isZero();
 

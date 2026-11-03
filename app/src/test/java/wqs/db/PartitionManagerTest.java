@@ -14,7 +14,7 @@ class PartitionManagerTest extends PostgresTestBase {
 
     @BeforeEach
     void setUp() {
-        manager = new PartitionManager(dsl());
+        manager = new PartitionManager(jdbc());
         dropTestPartitions();
     }
 

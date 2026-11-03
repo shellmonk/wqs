@@ -1,12 +1,10 @@
 package wqs.ingest;
 
-import static wqs.db.generated.Tables.WQ_DEAD_LETTER;
-
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import wqs.metrics.CachedGaugeValue;
 
@@ -20,8 +18,9 @@ public class DeadLetterMetrics {
 
     private static final Duration TTL = Duration.ofSeconds(60);
 
-    public DeadLetterMetrics(DSLContext dsl, MeterRegistry registry, Clock clock) {
-        CachedGaugeValue depth = new CachedGaugeValue(() -> dsl.fetchCount(WQ_DEAD_LETTER), clock, TTL);
+    public DeadLetterMetrics(JdbcClient jdbc, MeterRegistry registry, Clock clock) {
+        CachedGaugeValue depth = new CachedGaugeValue(
+                () -> jdbc.sql("select count(*) from \"wqDeadLetter\"").query(Long.class).single(), clock, TTL);
         // strongReference: Micrometer holds gauge state weakly, and nothing else holds this one.
         Gauge.builder("wqs.deadletter.depth", depth, CachedGaugeValue::get)
                 .strongReference(true)

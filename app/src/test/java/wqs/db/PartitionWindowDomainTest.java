@@ -5,8 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -26,7 +24,8 @@ class PartitionWindowDomainTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withBean(Clock.class, () -> Clock.fixed(Instant.parse("2026-11-02T12:00:00Z"), ZoneOffset.UTC))
-            .withBean(PartitionManager.class, () -> new PartitionManager(DSL.using(SQLDialect.POSTGRES)))
+            .withBean(PartitionManager.class, () -> new PartitionManager(org.springframework.jdbc.core.simple.JdbcClient.create(
+                    org.mockito.Mockito.mock(javax.sql.DataSource.class))))
             .withBean(PlatformTransactionManager.class, NoTransactions::new)
             .withBean(PartitionProvisioner.class);
 

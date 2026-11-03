@@ -12,7 +12,7 @@ class TxTypesTest extends PostgresTestBase {
 
     @Test
     void test_constants_name_the_seeded_types() {
-        TxTypeRegistry registry = new TxTypeRegistry(dsl(), new DataSourceTransactionManager(dataSource()));
+        TxTypeRegistry registry = new TxTypeRegistry(jdbc(), new DataSourceTransactionManager(dataSource()));
 
         assertThat(registry.codeOf(TxTypes.PLAY)).isEqualTo("TT_BUY");
         assertThat(registry.codeOf(TxTypes.WIN)).isEqualTo("PRIZE");

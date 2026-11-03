@@ -373,7 +373,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
             throw new AssertionError(e);
         }
         TxTypeRegistry isolated = new TxTypeRegistry(
-                DSL.using(dead, org.jooq.SQLDialect.POSTGRES),
+                org.springframework.jdbc.core.simple.JdbcClient.create(dead),
                 org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class));
         WebLevel0Query web = new WebLevel0Query(webMapper, isolated);
         ProjectionReader probe = new ProjectionReader(readerDsl, isolated, new CounterReader(),

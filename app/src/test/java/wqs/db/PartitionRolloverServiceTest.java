@@ -38,7 +38,7 @@ class PartitionRolloverServiceTest extends PostgresTestBase {
     void creates_the_current_month_and_the_requested_runway() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PartitionRolloverService service =
-                new PartitionRolloverService(new PartitionManager(dsl()), registry, FIXED);
+                new PartitionRolloverService(new PartitionManager(jdbc()), registry, FIXED);
 
         int created = service.rollOver(2);
 
@@ -50,7 +50,7 @@ class PartitionRolloverServiceTest extends PostgresTestBase {
     void exposes_runway_as_a_gauge() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PartitionRolloverService service =
-                new PartitionRolloverService(new PartitionManager(dsl()), registry, FIXED);
+                new PartitionRolloverService(new PartitionManager(jdbc()), registry, FIXED);
 
         service.rollOver(3);
 
@@ -63,7 +63,7 @@ class PartitionRolloverServiceTest extends PostgresTestBase {
     @Test
     void the_runway_gauge_decreases_as_time_passes_without_the_job_running() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        PartitionManager manager = new PartitionManager(dsl());
+        PartitionManager manager = new PartitionManager(jdbc());
         manager.ensurePartitionsAhead(YearMonth.of(2032, 6), 3); // June..September, no job involved
         Instant[] now = {FIXED.instant()};
         Clock moving = new Clock() {

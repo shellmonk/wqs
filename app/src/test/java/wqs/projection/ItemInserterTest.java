@@ -20,7 +20,7 @@ class ItemInserterTest extends PostgresTestBase {
 
     @BeforeEach
     void setUp() {
-        new PartitionManager(dsl()).ensurePartitionsAhead(java.time.YearMonth.of(2033, 4), 0);
+        new PartitionManager(jdbc()).ensurePartitionsAhead(java.time.YearMonth.of(2033, 4), 0);
         inserter = new ItemInserter(dsl());
         dsl().execute("delete from \"wqItemLocator\"");
         dsl().execute("delete from \"wqWebItem\"");

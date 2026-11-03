@@ -25,7 +25,7 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @BeforeEach
     void setUp() {
-        new PartitionManager(dsl()).ensurePartitionsAhead(YearMonth.of(2034, 10), 1);
+        new PartitionManager(jdbc()).ensurePartitionsAhead(YearMonth.of(2034, 10), 1);
         dsl().execute("delete from \"wqCountDay\"");
         dsl().execute("delete from \"wqCountMonth\"");
     }
