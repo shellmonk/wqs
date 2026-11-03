@@ -60,9 +60,13 @@ public class DataSourceConfig {
                 .orElse(writer.determinePassword()));
         binder.bind("wqs.datasource.reader.hikari", Bindable.ofInstance(ds));
         // Set in code, after binding, so configuration cannot weaken them: P-3 within a request
-        // relies on one repeatable-read snapshot, and the pool must be unable to write.
+        // relies on one repeatable-read snapshot, and the pool must be unable to write. pgjdbc's
+        // default readOnlyMode=transaction honours setReadOnly(true) only inside a transaction;
+        // "always" makes autocommit statements read-only too (a @ReaderJdbc statement run outside
+        // @ReaderTx). Flyway, Quartz and every write use the writer pool.
         ds.setPoolName("reader");
         ds.setReadOnly(true);
+        ds.addDataSourceProperty("readOnlyMode", "always");
         ds.setTransactionIsolation("TRANSACTION_REPEATABLE_READ");
         return ds;
     }
@@ -103,7 +107,7 @@ public class DataSourceConfig {
 
     /**
      * Statements join the {@link ReaderTx} transaction they run in. Used outside one, each
-     * statement autocommits in its own snapshot; ArchitectureTest requires every {@code wqs.read..}
+     * statement autocommits in its own snapshot (still read-only: see {@link #readerDataSource}); ArchitectureTest requires every {@code wqs.read..}
      * class that injects this client to inject {@link ReaderTx} too, and ProjectionReader runs
      * every read inside one {@code readerTx.execute(..)}.
      */
@@ -114,8 +118,9 @@ public class DataSourceConfig {
     }
 
     /**
-     * The read path's ONE transaction: read-only, REPEATABLE READ, on the reader pool. The pool already pins both (see
-     * {@link #readerDataSource}); stating them here keeps them if the pool ever stops doing so.
+     * The read path's ONE transaction: read-only, REPEATABLE READ, on the reader pool. The pool
+     * already pins both (see {@link #readerDataSource}); stating them here keeps them if the pool
+     * ever stops doing so.
      */
     @Bean
     @ReaderTx

@@ -158,6 +158,21 @@ class DataSourceConfigTest extends PostgresTestBase {
                 .hasMessageContaining("read-only transaction");
     }
 
+    /** Outside a @ReaderTx (autocommit), the reader pool still refuses writes: readOnlyMode=always. */
+    @Test
+    void reader_jdbc_rejects_writes_outside_the_reader_transaction() {
+        String stream = "reader-autocommit-" + UUID.randomUUID();
+        try {
+            assertThatThrownBy(() -> readerJdbc
+                            .sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 1)")
+                            .param(stream).update())
+                    .rootCause()
+                    .hasMessageContaining("read-only transaction");
+        } finally {
+            writerJdbc.sql("delete from \"wqStreamOffset\" where \"stream\" = ?").param(stream).update();
+        }
+    }
+
     @Test
     void hikari_metrics_are_tagged_by_pool() throws Exception {
         // The reader pool is lazy: its gauges exist only after the first connection.

@@ -19,7 +19,9 @@ import org.junit.jupiter.api.io.TempDir;
  * too), and no file under the cc packages mentions a web one ({@code wqWeb...}).
  *
  * <p>Replaces an ArchUnit rule over generated {@code WqCc*} table types, which SQL text strings
- * bypass. {@code WebProjectionSecurityTest} covers the same control end to end.
+ * bypass. The scan sees only names written literally in those directories: a table name built
+ * indirectly (concatenated, or taken from a constant elsewhere) is not covered, and
+ * {@code WebProjectionSecurityTest} is the end-to-end guard for the same control.
  */
 class ViewSourceIsolationTest {
 
