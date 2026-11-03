@@ -23,11 +23,17 @@ final class DeltaRows {
     /** A claimable prize for player {@code userId}; {@code batchId} null for an unsessioned one. */
     static String prize(String id, long userId, Instant created, Instant updated, String status,
             String productType, String batchId) {
+        return prize(id, userId, created, updated, status, productType, batchId, "");
+    }
+
+    /** A prize in play {@code subBatchId} of session {@code batchId}. */
+    static String prize(String id, long userId, Instant created, Instant updated, String status,
+            String productType, String batchId, String subBatchId) {
         return "{\"source\":\"walClaimablePrizes\",\"id\":" + id + ",\"playerId\":\"" + userId + "\","
                 + "\"created\":\"" + created + "\",\"updated\":\"" + updated + "\","
                 + "\"prizeAmount\":150.000,\"currency\":\"EUR\",\"status\":\"" + status + "\","
                 + "\"productId\":\"LOTTO6\",\"productType\":\"" + productType + "\","
-                + "\"batchId\":" + (batchId == null ? "null" : "\"" + batchId + "\"") + ",\"subBatchId\":\"\"}";
+                + "\"batchId\":" + (batchId == null ? "null" : "\"" + batchId + "\"") + ",\"subBatchId\":\"" + subBatchId + "\"}";
     }
 
     static String payment(String paymentId, int ownerType, long ownerId, Instant created, Instant updated, int status) {
