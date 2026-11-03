@@ -12,24 +12,24 @@ import wqs.read.HighLevelKey;
 import wqs.read.HighLevelQuery;
 
 /**
- * Level-1/2 reads of the cc view's page index (spec 5.6); touches only "wqPrjCcHighLevel". Every
- * predicate and sort column is in "wqPrjCcHighLevel_cover" -- key ("userId", "occurredAt" desc,
- * "kind" desc, "refId" desc), INCLUDE ("productType", "visibleExclCancelled") -- so both queries
- * are covering index scans.
+ * Level-1/2 reads of the cc view's page index (spec 5.6): every "wqPrjTimeline" row. Every
+ * predicate and sort column is in "wqPrjTimeline_cover" -- key ("userId", "occurredAt" desc,
+ * "kind" desc, "refId" desc), INCLUDE ("productType", "visibleExclCancelled", ...) -- so both
+ * queries are covering index scans. /cc's visibility with cancelled excluded is "visibleExclCancelled".
  */
 @Component
 public class CcHighLevelQuery implements HighLevelQuery {
 
     private static final String COUNT = """
-            select count(*) from "wqPrjCcHighLevel"
+            select count(*) from "wqPrjTimeline"
             where %s
             """;
 
     private static final String KEYS = """
-            select "wqPrjCcHighLevel"."occurredAt", "wqPrjCcHighLevel"."kind", "wqPrjCcHighLevel"."refId"
-            from "wqPrjCcHighLevel"
+            select "wqPrjTimeline"."occurredAt", "wqPrjTimeline"."kind", "wqPrjTimeline"."refId"
+            from "wqPrjTimeline"
             where %s
-            order by "wqPrjCcHighLevel"."occurredAt" desc, "wqPrjCcHighLevel"."kind" desc, "wqPrjCcHighLevel"."refId" desc
+            order by "wqPrjTimeline"."occurredAt" desc, "wqPrjTimeline"."kind" desc, "wqPrjTimeline"."refId" desc
             offset :offset rows fetch next :limit rows only
             """;
 
@@ -57,13 +57,13 @@ public class CcHighLevelQuery implements HighLevelQuery {
     /** The key-range predicate, value-free: the filter only decides which fixed fragments appear. */
     private static String range(HighLevelFilter f) {
         StringBuilder c = new StringBuilder("""
-                ("wqPrjCcHighLevel"."userId" = :userId and "wqPrjCcHighLevel"."occurredAt" >= cast(:lo as timestamptz) \
-                and "wqPrjCcHighLevel"."occurredAt" < cast(:hi as timestamptz)""");
+                ("wqPrjTimeline"."userId" = :userId and "wqPrjTimeline"."occurredAt" >= cast(:lo as timestamptz) \
+                and "wqPrjTimeline"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c.append(" and \"wqPrjCcHighLevel\".\"visibleExclCancelled\" = true");
+            c.append(" and \"wqPrjTimeline\".\"visibleExclCancelled\" = true");
         }
         if (!f.productTypes().isEmpty()) {
-            c.append(" and \"wqPrjCcHighLevel\".\"productType\" in (:productTypes)");
+            c.append(" and \"wqPrjTimeline\".\"productType\" in (:productTypes)");
         }
         return c.append(')').toString();
     }

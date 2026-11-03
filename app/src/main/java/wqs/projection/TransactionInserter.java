@@ -11,10 +11,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import wqs.domain.ProjectionTransaction;
-import wqs.domain.ViewKind;
 
 /**
- * Inserts a transaction into the view tables its source feeds, gated on the global locator.
+ * Inserts a transaction once into "wqPrjTransaction", gated on the global locator. Which endpoint
+ * sees it is decided by the per-endpoint SQL views over that table, never here.
  *
  * The locator insert IS the idempotency gate: ON CONFLICT DO NOTHING affecting zero rows means
  * the event has already been applied, so no source needs its own dedupe logic (spec 5.4).
@@ -36,13 +36,11 @@ public class TransactionInserter {
             on conflict do nothing
             """;
     private static final String INSERT_TRANSACTION = """
-            insert into "%s" ("userId", "transactionId", "source", "sourceId", "occurredAt", "productId",
+            insert into "wqPrjTransaction" ("userId", "transactionId", "source", "sourceId", "occurredAt", "productId",
                     "productType", "batchId", "subBatchId", "type", "amount", "currency", "balanceAfter",
                     "cancels", "detail")
             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
             """;
-    private static final String INSERT_WEB_TRANSACTION = INSERT_TRANSACTION.formatted("wqPrjWebTransaction");
-    private static final String INSERT_CC_TRANSACTION = INSERT_TRANSACTION.formatted("wqPrjCcTransaction");
 
     private final JdbcClient jdbc;
 
@@ -79,15 +77,19 @@ public class TransactionInserter {
             return false;
         }
 
-        for (ViewKind view : transaction.source().views()) {
-            insertInto(view, transaction, transactionId, occurredAt);
-        }
+        jdbc.sql(INSERT_TRANSACTION)
+                .params(transaction.userId(), transactionId, (short) transaction.source().code(), transaction.sourceId(),
+                        timestamptz(occurredAt), text(transaction.productId()), text(transaction.productType()),
+                        text(transaction.batchId()), text(transaction.subBatchId()), text(transaction.type()), transaction.amount(),
+                        text(transaction.currency()), numeric(transaction.balanceAfter()), text(transaction.cancels()),
+                        text(transaction.detailJson()))
+                .update();
         return true;
     }
 
     /**
      * Records a zero-amount transaction in the locator ONLY (spec 4.1, plan D8): it stays idempotent and a
-     * cancel referencing it resolves, but it is written to no view. A zero-amount cancel keeps its
+     * cancel referencing it resolves, but it is written to no transaction row. A zero-amount cancel keeps its
      * target in "cancels" here, having no transaction row to carry it.
      *
      * @return true if newly recorded, false if already applied.
@@ -101,19 +103,5 @@ public class TransactionInserter {
                 .params((short) transaction.source().code(), transaction.sourceId(), transaction.userId(),
                         timestamptz(transaction.occurredAt()), text(transaction.cancels()))
                 .update() == 1;
-    }
-
-    private void insertInto(ViewKind view, ProjectionTransaction transaction, long transactionId, OffsetDateTime occurredAt) {
-        String sql = switch (view) {
-            case WEB -> INSERT_WEB_TRANSACTION;
-            case CC -> INSERT_CC_TRANSACTION;
-        };
-        jdbc.sql(sql)
-                .params(transaction.userId(), transactionId, (short) transaction.source().code(), transaction.sourceId(),
-                        timestamptz(occurredAt), text(transaction.productId()), text(transaction.productType()),
-                        text(transaction.batchId()), text(transaction.subBatchId()), text(transaction.type()), transaction.amount(),
-                        text(transaction.currency()), numeric(transaction.balanceAfter()), text(transaction.cancels()),
-                        text(transaction.detailJson()))
-                .update();
     }
 }

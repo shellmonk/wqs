@@ -129,6 +129,78 @@ class WebProjectionSecurityTest extends ApiTestBase {
     }
 
     /**
+     * Spec 9 control 3 on the single transaction table: every source is stored once in
+     * "wqPrjTransaction" and "wqPrjTimeline", so /web's isolation rests on the "wqPrjWebTransaction"
+     * view and the "onWeb" timeline predicate. A payment -- unsessioned, alone in a session, or in
+     * a session with a /web transaction -- is never visible through the view, never a /web page
+     * unit, never a nested /web transaction and never in a /web total. The mixed session's only
+     * /web transaction is cancelled, so excluding cancelled hides the session on /web while /cc,
+     * where the payment survives, still shows it.
+     */
+    @Test
+    void a_payment_never_reaches_web_through_the_view_the_timeline_or_the_totals() throws Exception {
+        writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
+                sessioned(SourceKind.TRANSACTION, "u1-mixed-tx", "2034-02-15T10:00:00Z", "s-mixed", null),
+                sessioned(SourceKind.PAYMENT, "u1-mixed-pay", "2034-02-15T10:05:00Z", "s-mixed", null),
+                sessioned(SourceKind.PAYMENT, "u1-session-pay", "2034-02-16T10:00:00Z", "s-pay", null),
+                sessioned(SourceKind.TRANSACTION, "u1-mixed-c", "2034-02-17T10:00:00Z", null, "u1-mixed-tx")), 2L));
+        List<String> payments = List.of("u1-payment", "u1-mixed-pay", "u1-session-pay");
+
+        assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" where \"source\" = ?", String.class,
+                (short) SourceKind.PAYMENT.code())).as("stored once, in the one table")
+                .containsExactlyInAnyOrderElementsOf(payments);
+        assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\" where \"source\" = ?",
+                Integer.class, (short) SourceKind.PAYMENT.code())).as("never through the /web view").isZero();
+
+        for (String level : List.of("0", "1", "2")) {
+            for (String excl : List.of("false", "true")) {
+                var page = mvc.perform(webAt(level, excl).header(PRINCIPAL_HEADER, "1")).andExpect(status().isOk());
+                for (String payment : payments) {
+                    page.andExpect(jsonPath("$..txId", not(hasItem(payment))));
+                }
+                page.andExpect(jsonPath("$..batchId", not(hasItem("s-pay"))))
+                        .andExpect(jsonPath("$..kind", not(hasItem(SourceKind.PAYMENT.name()))));
+            }
+        }
+        // L0 totals: u1-tx, u1-prize, u1-mixed-tx, u1-mixed-c; excluding cancelled drops u1-mixed-tx.
+        mvc.perform(webAt("0", "false").header(PRINCIPAL_HEADER, "1"))
+                .andExpect(jsonPath("$.totalRowCount").value(4));
+        mvc.perform(webAt("0", "true").header(PRINCIPAL_HEADER, "1"))
+                .andExpect(jsonPath("$.totalRowCount").value(3));
+        // Timeline paging and totals: u1-tx, u1-prize and s-mixed; s-pay and u1-payment are /cc only.
+        for (String level : List.of("1", "2")) {
+            mvc.perform(webAt(level, "false").header(PRINCIPAL_HEADER, "1"))
+                    .andExpect(jsonPath("$.totalRowCount").value(3))
+                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-mixed")));
+            mvc.perform(webAt(level, "true").header(PRINCIPAL_HEADER, "1"))
+                    .andExpect(jsonPath("$.totalRowCount").value(2))
+                    .andExpect(jsonPath("$.data[*].txId", contains("u1-prize", "u1-tx")));
+            mvc.perform(get("/cc/wallet-data/rest/v1/projection/1")
+                            .param("from", FROM).param("to", TO).param("aggregationLevel", level)
+                            .param("excludeCancelledTransactions", "true")
+                            .param("pageNumber", "1").param("pageSize", "100"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.totalRowCount").value(5))
+                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-mixed")))
+                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-pay")));
+        }
+    }
+
+    private static MockHttpServletRequestBuilder webAt(String level, String excludeCancelled) {
+        return get("/web/wallet-data/rest/v1/projection")
+                .param("from", FROM).param("to", TO).param("aggregationLevel", level)
+                .param("excludeCancelledTransactions", excludeCancelled)
+                .param("pageNumber", "1").param("pageSize", "100");
+    }
+
+    private static wqs.domain.ProjectionTransaction sessioned(
+            SourceKind source, String sourceId, String at, String batchId, String cancels) {
+        return new wqs.domain.ProjectionTransaction(1L, source, sourceId, java.time.Instant.parse(at), "P10", "keno",
+                batchId, null, cancels == null ? wqs.gen.TxTypes.PLAY : wqs.gen.TxTypes.CANCEL,
+                new java.math.BigDecimal(cancels == null ? "12.5000" : "-12.5000"), "EUR", null, cancels, null);
+    }
+
+    /**
      * Spec 9 control 1, as an ALLOWLIST: every parameter of every /web handler is either the raw
      * {@code HttpServletRequest} (handed only to the PrincipalResolver; ArchitectureTest bans its
      * parameter accessors) or an explicitly named {@code @RequestParam} of a simple type from the

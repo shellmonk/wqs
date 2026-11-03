@@ -60,8 +60,8 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(result.inserted()).isEqualTo(2);
         assertThat(count("wqPrjWebTransaction")).isEqualTo(1);    // the prize; payments are /cc only
         assertThat(count("wqPrjCcTransaction")).isEqualTo(2);
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(2);
+        assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.CC_TIMELINE)).isEqualTo(2);
         assertThat(transactionSentinel(1)).isEqualTo(1);       // web TRANSACTION counter
         assertThat(transactionSentinel(2)).isEqualTo(2);       // cc TRANSACTION counter
         assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).isEqualTo(V1);
@@ -91,8 +91,7 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(after.groupLocator()).isEqualTo(before.groupLocator());
         assertThat(after.sessions()).isEqualTo(before.sessions());
         assertThat(after.plays()).isEqualTo(before.plays());
-        assertThat(after.webHighLevel()).isEqualTo(before.webHighLevel());
-        assertThat(after.ccHighLevel()).isEqualTo(before.ccHighLevel());
+        assertThat(after.timeline()).isEqualTo(before.timeline());
         assertThat(after.countDay()).isEqualTo(before.countDay());
         assertThat(after.countMonth()).isEqualTo(before.countMonth());
         assertThat(after.locator()).isEqualTo(before.locator());
@@ -219,7 +218,7 @@ class VersionedApplyTest extends PostgresTestBase {
         DeltaResult result = writer.applyDelta(batch(null, retailer));
 
         assertThat(result.skipped()).isEqualTo(1);
-        for (String table : List.of("wqPrjTransactionLocator", "wqPrjCcTransaction", "wqPrjCcHighLevel", "wqPrjCountDay", "wqDeadLetter")) {
+        for (String table : List.of("wqPrjTransactionLocator", "wqPrjTransaction", "wqPrjTimeline", "wqPrjCountDay", "wqDeadLetter")) {
             assertThat(count(table)).as(table).isZero();
         }
         assertThat(meters.counter("wqs.ingest.skipped", "reason", "non-player").count()).isEqualTo(skipped + 1);
@@ -262,8 +261,8 @@ class VersionedApplyTest extends PostgresTestBase {
 
         assertThat(count("wqPrjSession")).isEqualTo(1);
         assertThat(db().value("select \"txCount\" from \"wqPrjSession\"", Integer.class)).isEqualTo(2);
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.CC_TIMELINE)).isEqualTo(1);
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
@@ -290,7 +289,7 @@ class VersionedApplyTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
+        return db().value("select count(*)::int from " + ProjectionInvariants.relation(table), Integer.class);
     }
 
     private int transactionSentinel(int view) {

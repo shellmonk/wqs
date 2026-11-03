@@ -271,8 +271,8 @@ class ProjectionWriterTest extends PostgresTestBase {
     }
 
     private void assertNothingProjected() {
-        for (String table : List.of("wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjGroupLocator", "wqPrjSession", "wqPrjPlay",
-                "wqPrjWebHighLevel", "wqPrjCcHighLevel", "wqPrjCountDay", "wqPrjCountMonth", "wqPrjPendingCancel")) {
+        for (String table : List.of("wqPrjTransaction", "wqPrjGroupLocator", "wqPrjSession", "wqPrjPlay",
+                "wqPrjTimeline", "wqPrjCountDay", "wqPrjCountMonth", "wqPrjPendingCancel")) {
             assertThat(count(table)).as(table).isZero();
         }
     }

@@ -4,7 +4,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * A normalized, source-agnostic transaction, ready to be written to one or more view tables.
+ * A normalized, source-agnostic transaction, ready to be written once to "wqPrjTransaction" (each view sees it through its own SQL view).
  *
  * Unenumerated source-specific fields live in {@code detailJson} until O-13 is answered
  * (spec section 13). {@code detailJson} is the raw JSON text, so that the domain package carries no

@@ -23,6 +23,8 @@ class HighLevelQueryTest extends Level0TestSupport {
 
     @Autowired WebHighLevelQuery web;
     @Autowired CcHighLevelQuery cc;
+    @Autowired @org.springframework.beans.factory.annotation.Qualifier("readerDataSource")
+    javax.sql.DataSource readerDataSource;
 
     private static final Instant FEB = t("2034-02-01T00:00:00Z");
     private static final Instant MAR = t("2034-03-01T00:00:00Z");
@@ -108,6 +110,50 @@ class HighLevelQueryTest extends Level0TestSupport {
         assertThat(seqScan(web, f, 0, 20)).isEqualTo(all.subList(2, 8));
         // The index-ordered plan agrees.
         assertThat(cc.keys(readerJdbc, f, FEB, MAR, 0, 20)).isEqualTo(all);
+    }
+
+    /**
+     * Both endpoints page the one "wqPrjTimeline". After ANALYZE on realistic data the default plan
+     * of each key query -- /web's with its "onWeb" and /web-visibility predicates -- is an
+     * index-only scan of "wqPrjTimeline_cover", pruned to the requested month: the per-endpoint
+     * columns ride in INCLUDE.
+     */
+    @Test
+    void both_endpoints_page_the_timeline_by_an_index_only_scan_of_its_cover() throws Exception {
+        partitionManager.ensurePartitionsAhead(java.time.YearMonth.of(2034, 5), 0);
+        try {
+            // 60 users x 2000 rows over May 2034; a quarter are /cc-only payment rows.
+            db().execute("""
+                    insert into "wqPrjTimeline" ("userId", "occurredAt", "kind", "refId", "productType",
+                            "currency", "onWeb", "visibleExclCancelled", "webVisibleExclCancelled")
+                    select ?::bigint + (i % 60),
+                           timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '20 minutes' + (i % 60) * interval '1 second',
+                           (array[1, 3, 0, 4])[1 + (i % 4)], 'hl' || i, (array['keno','lottery','bingo'])[1 + (i % 3)],
+                           'EUR', i % 4 <> 3, true, i % 4 <> 3
+                    from generate_series(0, 119999) as i
+                    """, USER);
+            db().execute("vacuum (analyze) \"wqPrjTimeline\"");
+            for (HighLevelQuery q : List.of(web, cc)) {
+                for (boolean excl : new boolean[] {false, true}) {
+                    HighLevelFilter f = new HighLevelFilter(USER, Set.of("keno", "bingo"), excl);
+                    StatementRecorder recording = new StatementRecorder(readerDataSource);
+                    List<StatementRecorder.Executed> executed = recording.executed();
+                    q.keys(recording.client(), f, t("2034-05-10T00:00:00Z"), t("2034-05-17T00:00:00Z"), 0, 50);
+                    assertThat(executed).hasSize(1);
+                    String plan = String.join("\n", recording.rerun("explain", executed.get(0)));
+                    String as = q.view() + " excl=" + excl + " plan:\n" + plan;
+                    assertThat(plan).as(as)
+                            .containsPattern("Index Only Scan using \"wqPrjTimeline_2034_05_userId_occurredAt_kind_\\w*idx\"")
+                            .doesNotContain("Seq Scan")
+                            .doesNotContainPattern("wqPrjTimeline_2034_0[^5]");
+                    if (q == web) {
+                        assertThat(plan).as(as).contains("\"onWeb\"");
+                    }
+                }
+            }
+        } finally {
+            clearProjection();
+        }
     }
 
     private List<HighLevelKey> seqScan(HighLevelQuery q, HighLevelFilter f, long offset, int limit) {

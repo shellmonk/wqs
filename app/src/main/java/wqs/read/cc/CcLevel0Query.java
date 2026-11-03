@@ -16,7 +16,7 @@ import wqs.read.TransactionKey;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
 
-/** Level-0 reads of the cc view; touches only "wqPrjCcTransaction". */
+/** Level-0 reads of the cc view; reads only the "wqPrjCcTransaction" view (every source). */
 @Component
 public class CcLevel0Query implements Level0Query {
 

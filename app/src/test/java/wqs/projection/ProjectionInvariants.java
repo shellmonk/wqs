@@ -37,6 +37,24 @@ public final class ProjectionInvariants {
 
     private static final String NOT_A_CANCELLATION = "(i.\"cancels\" is null or btrim(i.\"cancels\") = '')";
 
+    /**
+     * Each view's page index, as a relation of the old per-view shape: /web is the "onWeb" rows of
+     * "wqPrjTimeline" with /web's visibility, /cc every row with /cc's.
+     */
+    public static final String WEB_TIMELINE = """
+            (select "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
+                    "webVisibleExclCancelled" as "visibleExclCancelled"
+             from "wqPrjTimeline" where "onWeb")""";
+    /** A table name double-quoted, or a parenthesised relation such as {@link #WEB_TIMELINE} as is. */
+    public static String relation(String tableOrQuery) {
+        return tableOrQuery.startsWith("(") ? tableOrQuery + " r" : "\"" + tableOrQuery + "\"";
+    }
+
+    public static final String CC_TIMELINE = """
+            (select "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
+                    "visibleExclCancelled"
+             from "wqPrjTimeline")""";
+
     private final TestSql sql;
 
     public ProjectionInvariants(JdbcClient jdbc) {
@@ -54,7 +72,8 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * Cancellation itself (spec 6.3), per view transaction table: a transaction is "cancelled" exactly when a
+     * Cancellation itself (spec 6.3), on "wqPrjTransaction" (each transaction is stored once, so
+     * both views see the same flag): a transaction is "cancelled" exactly when a
      * cancel for it exists -- a cancel transaction row, or a zero-amount cancel's locator row -- same source, same user, "cancels" = its sourceId -- and then
      * "cancelledBy" is the least such cancel's sourceId (null otherwise). And "wqPrjPendingCancel"
      * holds exactly the cancels whose target is absent (no locator row with that source,
@@ -70,33 +89,31 @@ public final class ProjectionInvariants {
         // only (spec 4.1) yet still cancel their target.
         String allCancels = """
                 select c."source", c."userId", c."sourceId", c."cancels" as target
-                from "wqPrjCcTransaction" c where %s
+                from "wqPrjTransaction" c where %s
                 union all
                 select l."source", l."userId", l."sourceId", l."cancels"
                 from "wqPrjTransactionLocator" l where l."zeroAmount" and l."cancels" is not null
                 """.formatted(cancels);
-        for (String[] view : new String[][] {{"WEB", "wqPrjWebTransaction"}, {"CC", "wqPrjCcTransaction"}}) {
-            drift.addAll(sql.rows("""
-                    with cancel as (
-                        select "source", "userId", target, min("sourceId") as "by"
-                        from (%4$s) all_cancels
-                        group by 1, 2, 3
-                    )
-                    select case when i."cancelled" and k.target is null then 'cancelled without a cancel'
-                                when not i."cancelled" and k.target is not null then 'cancel not applied'
-                                else 'cancelledBy mismatch' end as problem,
-                           '%2$s' as view, i."userId", i."source", i."sourceId",
-                           i."cancelled" as "storedCancelled",
-                           k."by" as "expectedCancelledBy", i."cancelledBy" as "storedCancelledBy"
-                    from "%1$s" i
-                    left join cancel k
-                      on k."source" = i."source" and k."userId" = i."userId" and k.target = i."sourceId"
-                    where i."cancelled" <> (k.target is not null)
-                       or i."cancelledBy" is distinct from k."by"
-                    order by 3, 4, 5
-                    """.formatted(view[1], view[0], cancels, allCancels))
-                    .stream().map(ProjectionInvariants::describe).toList());
-        }
+        drift.addAll(sql.rows("""
+                with cancel as (
+                    select "source", "userId", target, min("sourceId") as "by"
+                    from (%1$s) all_cancels
+                    group by 1, 2, 3
+                )
+                select case when i."cancelled" and k.target is null then 'cancelled without a cancel'
+                            when not i."cancelled" and k.target is not null then 'cancel not applied'
+                            else 'cancelledBy mismatch' end as problem,
+                       i."userId", i."source", i."sourceId",
+                       i."cancelled" as "storedCancelled",
+                       k."by" as "expectedCancelledBy", i."cancelledBy" as "storedCancelledBy"
+                from "wqPrjTransaction" i
+                left join cancel k
+                  on k."source" = i."source" and k."userId" = i."userId" and k.target = i."sourceId"
+                where i."cancelled" <> (k.target is not null)
+                   or i."cancelledBy" is distinct from k."by"
+                order by 2, 3, 4
+                """.formatted(allCancels))
+                .stream().map(ProjectionInvariants::describe).toList());
         drift.addAll(sql.rows("""
                 with expected as (
                     select c."source", c."sourceId", c.target as "cancels", c."userId"
@@ -146,10 +163,10 @@ public final class ProjectionInvariants {
                     from "wqPrjCcTransaction"
                   union all
                     select 1, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", ''
-                    from "wqPrjWebHighLevel"
+                    from %1$s web
                   union all
                     select 2, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", ''
-                    from "wqPrjCcHighLevel"
+                    from %2$s cc
                 ),
                 keyed as (
                     select distinct v, u, "userId", pk.prod, tk.typ, t, vis, src_id
@@ -198,7 +215,7 @@ public final class ProjectionInvariants {
                 where e.tier is null or s.tier is null
                    or e."cntAll" <> s."cntAll" or e."cntExcl" <> s."cntExcl"
                 order by 2, 3, 4, 5, 6, 7, 8
-                """)
+                """.formatted(WEB_TIMELINE, CC_TIMELINE))
                 .stream().map(ProjectionInvariants::describe).toList();
     }
 
@@ -206,7 +223,7 @@ public final class ProjectionInvariants {
      * P-4: every session and play row equals a fold over its transactions, and "wqPrjGroupLocator" points
      * at each group's row.
      *
-     * Expected from the non-cancellation sessioned rows of "wqPrjCcTransaction" (every source feeds /cc):
+     * Expected from the non-cancellation sessioned rows of "wqPrjTransaction" (every source):
      * txCount and its ExclCancelled form; playCount = distinct non-null subBatchId,
      * playCountExclCancelled = plays with at least one non-cancelled transaction; totalPlays, totalWins
      * (abs(amount) by the type's {@link wqs.domain.TransactionType} direction, exactly as
@@ -224,7 +241,7 @@ public final class ProjectionInvariants {
                        i."productType", i."currency"::text as currency, i."cancelled",
                        i."sourceId", i."source",
                        %s as plays, %s as wins
-                from "wqPrjCcTransaction" i
+                from "wqPrjTransaction" i
                 where i."batchId" is not null and %s
                 """.formatted(plays, wins, NOT_A_CANCELLATION);
         String folded = """
@@ -333,10 +350,11 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * P-8: each page-index table holds exactly the rows its view's transactions justify, at the right
+     * P-8: each view's page index ("wqPrjTimeline" read as {@link #WEB_TIMELINE} or
+     * {@link #CC_TIMELINE}) holds exactly the rows its view's transactions justify, at the right
      * key and with the right visibility.
      *
-     * Per view V (its transaction table holds exactly the transactions whose source feeds V): one session row
+     * Per view V (its transaction view holds exactly the transactions whose source feeds V): one session row
      * for each session with at least one non-cancellation transaction in V, at the session key
      * (startedAt, productType) over ALL the session's non-cancellation transactions -- the product being
      * the first transaction's by (occurredAt, sourceId, source), productId from the same transaction and carried
@@ -350,7 +368,7 @@ public final class ProjectionInvariants {
     public List<String> highLevelDrift() {
         List<String> drift = new ArrayList<>();
         for (String[] view : new String[][] {
-                {"WEB", "wqPrjWebTransaction", "wqPrjWebHighLevel"}, {"CC", "wqPrjCcTransaction", "wqPrjCcHighLevel"}}) {
+                {"WEB", "wqPrjWebTransaction", WEB_TIMELINE}, {"CC", "wqPrjCcTransaction", CC_TIMELINE}}) {
             drift.addAll(sql.rows("""
                     with session_key as (
                         select i."userId", i."batchId", min(i."occurredAt") as "startedAt",
@@ -359,7 +377,7 @@ public final class ProjectionInvariants {
                                (array_agg(i."productType"
                                     order by i."occurredAt", i."sourceId", i."source"))[1] as "productType",
                                min(i."currency"::text) as currency
-                        from "wqPrjCcTransaction" i
+                        from "wqPrjTransaction" i
                         where i."batchId" is not null and %3$s
                         group by 1, 2
                     ),
@@ -397,7 +415,7 @@ public final class ProjectionInvariants {
                            e.currency as "expectedCurrency", h."currency" as "storedCurrency",
                            e.visible as "expectedVisible", h."visibleExclCancelled" as "storedVisible"
                     from expected e
-                    full outer join "%2$s" h
+                    full outer join %2$s h
                       on h."userId" = e."userId" and h."kind" = e.kind and h."refId" = e."refId"
                     where e."refId" is null or h."refId" is null
                        or e."occurredAt" <> h."occurredAt"
@@ -414,8 +432,8 @@ public final class ProjectionInvariants {
 
     /**
      * P-7 (spec 7.4), the stored half: every non-cancellation transaction whose product type is eInstant
-     * carries a non-null "batchId", in both transaction tables, and so neither view's page index holds an
-     * unsessioned eInstant row. {@code eInstantProductTypes} is {@code wqs.einstant.product-types}
+     * carries a non-null "batchId" in "wqPrjTransaction", and so "wqPrjTimeline" (either view's page
+     * index) holds no unsessioned eInstant row. {@code eInstantProductTypes} is {@code wqs.einstant.product-types}
      * (plan D3); the classification is configuration, which is why this cannot be a check
      * constraint. Cancellations are exempt, as at ingest (IngestRules): they never get a page row.
      */
@@ -425,25 +443,22 @@ public final class ProjectionInvariants {
             return drift;
         }
         String[] types = eInstantProductTypes.toArray(String[]::new);
-        for (String[] view : new String[][] {
-                {"WEB", "wqPrjWebTransaction", "wqPrjWebHighLevel"}, {"CC", "wqPrjCcTransaction", "wqPrjCcHighLevel"}}) {
-            drift.addAll(sql.rows("""
-                    select 'unsessioned eInstant transaction' as problem, '%3$s' as view,
-                           i."userId", i."source", i."sourceId", i."productType"
-                    from "%1$s" i
-                    where i."batchId" is null and i."productType" = any(?::text[]) and %4$s
-                    order by 3, 4, 5
-                    """.formatted(view[1], view[2], view[0], NOT_A_CANCELLATION), (Object) types)
-                    .stream().map(ProjectionInvariants::describe).toList());
-            drift.addAll(sql.rows("""
-                    select 'unsessioned eInstant page row' as problem, '%2$s' as view,
-                           h."userId", h."kind", h."refId", h."productType"
-                    from "%1$s" h
-                    where h."kind" <> 0 and h."productType" = any(?::text[])
-                    order by 3, 4, 5
-                    """.formatted(view[2], view[0]), (Object) types)
-                    .stream().map(ProjectionInvariants::describe).toList());
-        }
+        drift.addAll(sql.rows("""
+                select 'unsessioned eInstant transaction' as problem,
+                       i."userId", i."source", i."sourceId", i."productType"
+                from "wqPrjTransaction" i
+                where i."batchId" is null and i."productType" = any(?::text[]) and %s
+                order by 2, 3, 4
+                """.formatted(NOT_A_CANCELLATION), (Object) types)
+                .stream().map(ProjectionInvariants::describe).toList());
+        drift.addAll(sql.rows("""
+                select 'unsessioned eInstant page row' as problem,
+                       h."userId", h."kind", h."refId", h."productType", h."onWeb"
+                from "wqPrjTimeline" h
+                where h."kind" <> 0 and h."productType" = any(?::text[])
+                order by 2, 3, 4
+                """, (Object) types)
+                .stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }
 

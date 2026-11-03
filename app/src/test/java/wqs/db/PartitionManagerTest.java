@@ -22,15 +22,13 @@ class PartitionManagerTest extends PostgresTestBase {
     void creates_partitions_for_the_requested_window() {
         int created = manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 2);
 
-        // 3 months (Jan, Feb, Mar) x 7 partitioned tables
-        assertThat(created).isEqualTo(21);
+        // 3 months (Jan, Feb, Mar) x 5 partitioned tables
+        assertThat(created).isEqualTo(15);
         assertThat(testPartitionNames())
-                .contains("wqPrjWebTransaction_2031_01", "wqPrjWebTransaction_2031_02", "wqPrjWebTransaction_2031_03",
-                          "wqPrjCcTransaction_2031_01", "wqPrjCcTransaction_2031_02", "wqPrjCcTransaction_2031_03",
+                .contains("wqPrjTransaction_2031_01", "wqPrjTransaction_2031_02", "wqPrjTransaction_2031_03",
                           "wqPrjSession_2031_01", "wqPrjSession_2031_02", "wqPrjSession_2031_03",
                           "wqPrjPlay_2031_01", "wqPrjPlay_2031_02", "wqPrjPlay_2031_03",
-                          "wqPrjWebHighLevel_2031_01", "wqPrjWebHighLevel_2031_02", "wqPrjWebHighLevel_2031_03",
-                          "wqPrjCcHighLevel_2031_01", "wqPrjCcHighLevel_2031_02", "wqPrjCcHighLevel_2031_03",
+                          "wqPrjTimeline_2031_01", "wqPrjTimeline_2031_02", "wqPrjTimeline_2031_03",
                           "wqPrjCountDay_2031_01", "wqPrjCountDay_2031_02", "wqPrjCountDay_2031_03");
     }
 
@@ -48,12 +46,12 @@ class PartitionManagerTest extends PostgresTestBase {
         manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 0);
 
         db().execute("""
-                      insert into "wqPrjWebTransaction"
+                      insert into "wqPrjTransaction"
                         ("userId","transactionId","source","sourceId","occurredAt","type","amount","currency")
                       values (1, 1, 1, 'tx-1', timestamptz '2031-01-15T10:00:00Z', 'TT_BUY', 10.0000, 'EUR')
                       """);
 
-        Integer count = db().value("select count(*)::int from \"wqPrjWebTransaction_2031_01\"", Integer.class);
+        Integer count = db().value("select count(*)::int from \"wqPrjTransaction_2031_01\"", Integer.class);
         assertThat(count).isEqualTo(1);
     }
 
@@ -70,13 +68,13 @@ class PartitionManagerTest extends PostgresTestBase {
         manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 1);
 
         db().execute("""
-                      insert into "wqPrjWebTransaction"
+                      insert into "wqPrjTransaction"
                         ("userId","transactionId","source","sourceId","occurredAt","type","amount","currency")
                       values (1, 2, 1, 'tx-boundary', timestamptz '2031-02-01T00:00:00Z', 'TT_BUY', 10.0000, 'EUR')
                       """);
 
-        Integer februaryCount = db().value("select count(*)::int from \"wqPrjWebTransaction_2031_02\"", Integer.class);
-        Integer januaryCount = db().value("select count(*)::int from \"wqPrjWebTransaction_2031_01\"", Integer.class);
+        Integer februaryCount = db().value("select count(*)::int from \"wqPrjTransaction_2031_02\"", Integer.class);
+        Integer januaryCount = db().value("select count(*)::int from \"wqPrjTransaction_2031_01\"", Integer.class);
         assertThat(februaryCount).isEqualTo(1);
         assertThat(januaryCount).isZero();
     }

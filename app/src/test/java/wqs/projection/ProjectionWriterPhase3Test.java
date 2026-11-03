@@ -54,8 +54,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         assertThat(count("wqPrjSession")).isEqualTo(1);
         assertThat(count("wqPrjPlay")).isEqualTo(2);
         // One high-level row per view for the single session.
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.CC_TIMELINE)).isEqualTo(1);
     }
 
     @Test
@@ -75,7 +75,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
         writer.apply(new ProjectionBatch("s", List.of(payment), 1L));
 
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.CC_TIMELINE)).isEqualTo(1);
         assertThat(count("wqPrjSession")).isZero();
     }
 
@@ -102,7 +102,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         // It is a row in both transaction tables, so P-2 requires it to be counted at TRANSACTION level.
         assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(sentinel("wqPrjCountDay", 0)).isEqualTo(1);
-        assertThat(count("wqPrjWebHighLevel")).isZero();
+        assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isZero();
         assertThat(sentinel("wqPrjCountDay", 1)).isZero();
         assertThat(count("wqPrjSession")).isZero();
     }
@@ -124,12 +124,12 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 txAt("t1", "b1", "p1", oct31)), 1L));
 
         // The session row now sits at its earliest transaction, in October, in both views.
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(2);
+        assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.CC_TIMELINE)).isEqualTo(2);
         for (int view : List.of(1, 2)) {
             assertThat(sentinelsByDay(view, 1))
                     .as("HIGH_LEVEL sentinel vs page-index rows, view %d", view)
-                    .isEqualTo(liveByDay(view == 1 ? "wqPrjWebHighLevel" : "wqPrjCcHighLevel",
+                    .isEqualTo(liveByDay(view == 1 ? ProjectionInvariants.WEB_TIMELINE : ProjectionInvariants.CC_TIMELINE,
                             "occurredAt"));
             assertThat(sentinelsByDay(view, 0))
                     .as("TRANSACTION sentinel vs transaction rows, view %d", view)
@@ -159,8 +159,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 ccOnlyAdjustment("a1", "b2", T0, 7)), 1L));
 
         // Product-only changes: still one row per view, now at product 7.
-        assertThat(highLevelProducts("wqPrjWebHighLevel")).containsExactly(Products.id(7));
-        assertThat(highLevelProducts("wqPrjCcHighLevel")).containsExactly(Products.id(7));
+        assertThat(highLevelProducts(ProjectionInvariants.WEB_TIMELINE)).containsExactly(Products.id(7));
+        assertThat(highLevelProducts(ProjectionInvariants.CC_TIMELINE)).containsExactly(Products.id(7));
         assertThat(productDayCount(1, 1, 7, T0)).isEqualTo(1);
         assertThat(productDayCount(1, 1, 11, T0)).isZero();
         assertEveryCounterMatchesTheProjection();
@@ -169,7 +169,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 txProduct("u0", "b2", "p0", dayBefore, 5)), 2L));
 
         // Start AND product moved: the old (T0, 7) rows are empty, (T0 - 1 day, 5) holds the unit.
-        assertThat(highLevelProducts("wqPrjCcHighLevel")).containsExactly(Products.id(5));
+        assertThat(highLevelProducts(ProjectionInvariants.CC_TIMELINE)).containsExactly(Products.id(5));
         assertThat(productDayCount(2, 1, 7, T0)).isZero();
         assertThat(productDayCount(2, 1, 5, dayBefore)).isEqualTo(1);
         assertThat(productDayCount(2, 1, 0, T0)).isZero();
@@ -225,11 +225,12 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     private List<String> sessionPageRows() {
         return db().maps("""
                 select 'web' as v, "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
-                from "wqPrjWebHighLevel" where "kind" = 0
+                from %s web where "kind" = 0
                 union all
                 select 'cc', "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
-                from "wqPrjCcHighLevel" where "kind" = 0
-                order by 1""").stream().map(r -> r.values().toString()).toList();
+                from %s cc where "kind" = 0
+                order by 1""".formatted(ProjectionInvariants.WEB_TIMELINE, ProjectionInvariants.CC_TIMELINE))
+                .stream().map(r -> r.values().toString()).toList();
     }
 
     private ProjectionTransaction txCurrency(String id, Instant at, String currency) {
@@ -262,7 +263,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     private List<String> highLevelProducts(String table) {
-        return db().column("select \"productId\" from \"" + table + "\" where \"kind\" = 0", String.class);
+        return db().column("select \"productId\" from " + ProjectionInvariants.relation(table) + " where \"kind\" = 0", String.class);
     }
 
     /** The day counter at test product {@code product}'s type; 0 reads the ALL sentinel ''. */
@@ -307,7 +308,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
+        return db().value("select count(*)::int from " + ProjectionInvariants.relation(table), Integer.class);
     }
 
     private int sentinel(String table, int pageUnit) {
@@ -338,8 +339,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     private Map<String, Integer> liveByDay(String table, String column) {
         return toMap(db().rows("""
                 select ("%s" at time zone 'UTC')::date::text as d, count(*)::int as n
-                from "%s" where "userId" = 1 group by 1
-                """.formatted(column, table)));
+                from %s where "userId" = 1 group by 1
+                """.formatted(column, ProjectionInvariants.relation(table))));
     }
 
     private static Map<String, Integer> toMap(List<wqs.db.TestSql.Row> rows) {

@@ -15,8 +15,11 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Spec 9 control 3, security by schema: /web cannot reach operator data, and /cc reads only its
  * own tables. SQL is Java text, so this is checked on the source: no file under the web packages
- * mentions an operator table or type ({@code wqPrjCc...}, any case, so {@code WqPrjCc...} type names
- * too), and no file under the cc packages mentions a web one ({@code wqPrjWeb...}).
+ * mentions an operator view or type ({@code wqPrjCc...}, any case, so {@code WqPrjCc...} type names
+ * too) or the shared base table {@code "wqPrjTransaction"} (it holds every source; /web reads only
+ * the {@code "wqPrjWebTransaction"} view over it), every web file that reads {@code "wqPrjTimeline"}
+ * restricts it to {@code "onWeb"}, and no file under the cc packages mentions a web one
+ * ({@code wqPrjWeb...}).
  *
  * <p>Replaces an ArchUnit rule over generated {@code WqCc*} table types, which SQL text strings
  * bypass. The scan sees only names written literally in those directories: a table name built
@@ -27,10 +30,24 @@ class ViewSourceIsolationTest {
 
     private static final List<String> WEB = List.of("wqs/read/web", "wqs/api/web");
     private static final List<String> CC = List.of("wqs/read/cc", "wqs/api/cc");
+    /** The base table, quoted: its views and its locator ("wqPrjTransactionLocator") do not match. */
+    private static final String BASE_TABLE = "\"wqprjtransaction\"";
+    /** The /web timeline predicate as the SQL writes it, qualified. */
+    private static final String ON_WEB = "\"wqprjtimeline\".\"onweb\"";
 
     @Test
     void web_sources_never_name_an_operator_table() {
         assertThat(mentions(mainSources(WEB), "wqprjcc")).isEmpty();
+    }
+
+    @Test
+    void web_sources_never_name_the_base_transaction_table() {
+        assertThat(mentions(mainSources(WEB), BASE_TABLE)).isEmpty();
+    }
+
+    @Test
+    void web_sources_read_the_timeline_only_on_web() {
+        assertThat(timelineWithoutOnWeb(mainSources(WEB))).isEmpty();
     }
 
     @Test
@@ -44,16 +61,45 @@ class ViewSourceIsolationTest {
         Files.writeString(dir.resolve("LeakyWebQuery.java"),
                 "class LeakyWebQuery { String sql = \"select * from \\\"wqPrjCcTransaction\\\"\"; }");
         Files.writeString(dir.resolve("LeakyWebAssembly.java"),
-                "class LeakyWebAssembly { WqPrjCcHighLevelRow row; }");
+                "class LeakyWebAssembly { WqPrjCcTransactionRow row; }");
         Files.writeString(dir.resolve("CleanWebQuery.java"),
                 "class CleanWebQuery { String sql = \"select * from \\\"wqPrjWebTransaction\\\"\"; }");
 
         assertThat(mentions(List.of(dir), "wqprjcc"))
                 .hasSize(2)
                 .anyMatch(m -> m.contains("LeakyWebQuery.java:1") && m.contains("\"wqPrjCcTransaction"))
-                .anyMatch(m -> m.contains("LeakyWebAssembly.java:1") && m.contains("WqPrjCcHighLevelRow"))
+                .anyMatch(m -> m.contains("LeakyWebAssembly.java:1") && m.contains("WqPrjCcTransactionRow"))
                 .noneMatch(m -> m.contains("CleanWebQuery"));
         assertThat(mentions(List.of(dir), "wqprjweb")).singleElement().asString().contains("CleanWebQuery");
+    }
+
+    /** Proves the base-table and timeline scans can fail, and pass the view and an "onWeb" read. */
+    @Test
+    void the_base_table_and_timeline_scans_report_leaks(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve("BaseTableQuery.java"),
+                "class BaseTableQuery { String sql = \"select * from \\\"wqPrjTransaction\\\"\"; }");
+        Files.writeString(dir.resolve("AllTimelineQuery.java"),
+                "class AllTimelineQuery { String sql = \"select * from \\\"wqPrjTimeline\\\"\"; }");
+        Files.writeString(dir.resolve("WebTimelineQuery.java"),
+                "class WebTimelineQuery { String sql = \"select * from \\\"wqPrjTimeline\\\" where \\\"wqPrjTimeline\\\".\\\"onWeb\\\" "
+                        + "and exists (select 1 from \\\"wqPrjWebTransaction\\\")\"; }");
+
+        assertThat(mentions(List.of(dir), BASE_TABLE)).singleElement().asString().contains("BaseTableQuery.java:1");
+        assertThat(timelineWithoutOnWeb(List.of(dir))).singleElement().asString().contains("AllTimelineQuery.java");
+    }
+
+    /**
+     * Files that name "wqPrjTimeline" but never the qualified predicate "wqPrjTimeline"."onWeb" (a
+     * comment mentioning "onWeb" does not count).
+     */
+    private static List<String> timelineWithoutOnWeb(List<Path> dirs) {
+        return dirs.stream().flatMap(d -> javaFiles(d).stream())
+                .filter(file -> {
+                    String text = normalise(String.join("\n", read(file)));
+                    return text.contains("\"wqprjtimeline\"") && !text.contains(ON_WEB);
+                })
+                .map(Path::toString)
+                .toList();
     }
 
     /** The package directories, each required to exist and hold Java sources (no hollow pass). */
@@ -68,14 +114,19 @@ class ViewSourceIsolationTest {
         return dirs;
     }
 
-    /** {@code file:line: text} for every line containing {@code needle}, case-insensitively. */
+    /** {@code file:line: text} for every line containing {@code needle}, case-insensitively, escapes read as quotes. */
     private static List<String> mentions(List<Path> dirs, String needle) {
         return dirs.stream().flatMap(d -> javaFiles(d).stream()).flatMap(file -> {
             List<String> lines = read(file);
             return java.util.stream.IntStream.range(0, lines.size())
-                    .filter(i -> lines.get(i).toLowerCase(Locale.ROOT).contains(needle))
+                    .filter(i -> normalise(lines.get(i)).contains(needle))
                     .mapToObj(i -> file + ":" + (i + 1) + ": " + lines.get(i).strip());
         }).toList();
+    }
+
+    /** Lower case, with Java's escaped quote \\" read as the quote it is in the SQL. */
+    private static String normalise(String source) {
+        return source.toLowerCase(Locale.ROOT).replace("\\\"", "\"");
     }
 
     private static List<Path> javaFiles(Path dir) {

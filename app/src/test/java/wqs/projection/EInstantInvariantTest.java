@@ -90,10 +90,11 @@ class EInstantInvariantTest extends ReadPropertyBase {
     @Test
     void einstant_drift_reports_an_unsessioned_transaction() {
         db().execute("""
-                update "wqPrjCcTransaction" set "batchId" = null, "subBatchId" = null where "sourceId" = 'e1-a'""");
+                update "wqPrjTransaction" set "batchId" = null, "subBatchId" = null where "sourceId" = 'e1-a'""");
         db().execute("""
-                insert into "wqPrjWebHighLevel" ("userId", "occurredAt", "kind", "refId", "productType", "currency")
-                values (1, '2034-02-11T10:00:00Z', 1, 'planted', 'instants', 'EUR')""");
+                insert into "wqPrjTimeline" ("userId", "occurredAt", "kind", "refId", "productType", "currency",
+                        "onWeb", "webVisibleExclCancelled")
+                values (1, '2034-02-11T10:00:00Z', 1, 'planted', 'instants', 'EUR', true, true)""");
         assertThat(new ProjectionInvariants(jdbc()).eInstantDrift(eInstant.productTypes()))
                 .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant transaction").contains("e1-a"))
                 .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant page row").contains("planted"))

@@ -191,7 +191,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_flipped_page_row_visibility_is_high_level_drift() {
         execute("""
-                update "wqPrjWebHighLevel" set "visibleExclCancelled" = not "visibleExclCancelled"
+                update "wqPrjTimeline" set "webVisibleExclCancelled" = not "webVisibleExclCancelled"
                 where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
@@ -200,9 +200,10 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
     @Test
     void a_session_row_missing_from_one_view_is_high_level_drift() {
-        // Materialisation is per view: the session must have its row in /web as well as /cc.
+        // Materialisation is per view: the session must be on /web as well as /cc.
         execute("""
-                delete from "wqPrjWebHighLevel" where "kind" = 0""");
+                update "wqPrjTimeline" set "onWeb" = false, "webVisibleExclCancelled" = false
+                where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("missing page row").contains("view=WEB", "kind=0", "refId=b1");
@@ -211,22 +212,27 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_session_row_with_another_currency_is_high_level_drift() {
         execute("""
-                update "wqPrjCcHighLevel" set "currency" = 'USD' where "kind" = 0""");
+                update "wqPrjTimeline" set "currency" = 'USD' where "kind" = 0""");
 
-        assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("page row currency mismatch").contains("view=CC",
-                        "expectedCurrency=EUR", "storedCurrency=USD");
+        // One shared row: both endpoints' page indexes carry the wrong currency.
+        assertThat(invariants.highLevelDrift()).hasSize(2)
+                .allSatisfy(d -> assertThat(d).startsWith("page row currency mismatch")
+                        .contains("expectedCurrency=EUR", "storedCurrency=USD"))
+                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
+                .anySatisfy(d -> assertThat(d).contains("view=CC"));
     }
 
     /** The counter key is the session's product type, so the page row must carry the right one. */
     @Test
     void a_session_row_with_another_product_type_is_high_level_drift() {
         execute("""
-                update "wqPrjCcHighLevel" set "productType" = 'lottery' where "kind" = 0""");
+                update "wqPrjTimeline" set "productType" = 'lottery' where "kind" = 0""");
 
-        assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("page row key mismatch").contains("view=CC",
-                        "expectedProductType=bingo", "storedProductType=lottery");
+        assertThat(invariants.highLevelDrift()).hasSize(2)
+                .allSatisfy(d -> assertThat(d).startsWith("page row key mismatch")
+                        .contains("expectedProductType=bingo", "storedProductType=lottery"))
+                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
+                .anySatisfy(d -> assertThat(d).contains("view=CC"));
     }
 
     @Test
@@ -253,13 +259,15 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
         execute("""
                 update "wqPrjSession" set "productId" = 'P03' where "batchId" = 'b2'""");
         execute("""
-                update "wqPrjCcHighLevel" set "productId" = 'P03' where "refId" = 'b2'""");
+                update "wqPrjTimeline" set "productId" = 'P03' where "refId" = 'b2'""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("session mismatch").contains("batchId=b2");
-        assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("page row key mismatch").contains("view=CC", "refId=b2",
-                        "expectedProductId=P13", "storedProductId=P03");
+        assertThat(invariants.highLevelDrift()).hasSize(2)
+                .allSatisfy(d -> assertThat(d).startsWith("page row key mismatch")
+                        .contains("refId=b2", "expectedProductId=P13", "storedProductId=P03"))
+                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
+                .anySatisfy(d -> assertThat(d).contains("view=CC"));
     }
 
     private static ProjectionTransaction labelled(String id, Instant at, String productId, String productType) {
@@ -270,18 +278,19 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_page_row_at_a_stale_key_is_high_level_drift() {
         execute("""
-                update "wqPrjCcHighLevel" set "occurredAt" = "occurredAt" + interval '1 day'
+                update "wqPrjTimeline" set "occurredAt" = "occurredAt" + interval '1 day'
                 where "kind" = 0""");
 
-        assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("page row key mismatch").contains("view=CC");
+        assertThat(invariants.highLevelDrift()).hasSize(2)
+                .allSatisfy(d -> assertThat(d).startsWith("page row key mismatch"))
+                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
+                .anySatisfy(d -> assertThat(d).contains("view=CC"));
     }
 
     @Test
     void a_page_row_for_a_cc_only_transaction_in_web_is_high_level_drift() {
         execute("""
-                insert into "wqPrjWebHighLevel"
-                values (1, timestamptz '2034-04-01 00:00Z', 4, 'pay1', null, 'EUR', false)""");
+                update "wqPrjTimeline" set "onWeb" = true where "kind" = 4 and "refId" = 'pay1'""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("orphan page row").contains("view=WEB", "refId=pay1");
@@ -290,7 +299,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_deleted_unsessioned_page_row_is_high_level_drift() {
         execute("""
-                delete from "wqPrjCcHighLevel" where "kind" = 4""");
+                delete from "wqPrjTimeline" where "kind" = 4""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("missing page row").contains("refId=pay1");
@@ -303,27 +312,27 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void an_unapplied_cancel_is_cancellation_drift() {
         execute("""
-                update "wqPrjWebTransaction" set "cancelled" = false, "cancelledBy" = null
+                update "wqPrjTransaction" set "cancelled" = false, "cancelledBy" = null
                 where "sourceId" = 't1'""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
-                .startsWith("cancel not applied").contains("view=WEB", "sourceId=t1");
+                .startsWith("cancel not applied").contains("source=1", "sourceId=t1");
     }
 
     @Test
     void a_wrong_cancelled_by_is_cancellation_drift() {
         execute("""
-                update "wqPrjCcTransaction" set "cancelledBy" = 'zz'
+                update "wqPrjTransaction" set "cancelledBy" = 'zz'
                 where "sourceId" = 'pay1'""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
-                .startsWith("cancelledBy mismatch").contains("view=CC", "sourceId=pay1");
+                .startsWith("cancelledBy mismatch").contains("source=4", "sourceId=pay1");
     }
 
     @Test
     void a_cancelled_flag_without_any_cancel_is_cancellation_drift() {
         execute("""
-                update "wqPrjCcTransaction" set "cancelled" = true, "cancelledBy" = 'ghost'
+                update "wqPrjTransaction" set "cancelled" = true, "cancelledBy" = 'ghost'
                 where "sourceId" = 't2'""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
@@ -338,8 +347,8 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
                     "zeroAmount", "cancels")
                 values (1, 'cz', 1, timestamptz '2034-04-01 02:00:00+00', -1, true, 't2')""");
 
-        assertThat(invariants.cancellationDrift()).hasSize(2)
-                .allSatisfy(line -> assertThat(line).startsWith("cancel not applied").contains("sourceId=t2"));
+        assertThat(invariants.cancellationDrift()).singleElement().asString()
+                .startsWith("cancel not applied").contains("sourceId=t2");
     }
 
     @Test

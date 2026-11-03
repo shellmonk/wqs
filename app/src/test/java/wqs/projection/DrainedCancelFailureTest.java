@@ -104,8 +104,8 @@ class DrainedCancelFailureTest extends PostgresTestBase {
         assertThat(invariants.aggregationDrift()).isEmpty();
         assertThat(invariants.highLevelDrift()).isEmpty();
         // The dead-lettered cancel is the one known exception, awaiting replay.
-        assertThat(invariants.cancellationDrift()).hasSize(2) // t1 in both views
-                .allSatisfy(line -> assertThat(line).startsWith("cancel not applied").contains("sourceId=t1"));
+        assertThat(invariants.cancellationDrift()).singleElement().asString() // t1, stored once
+                .startsWith("cancel not applied").contains("sourceId=t1");
     }
 
     private static ProjectionTransaction tx(String id) {

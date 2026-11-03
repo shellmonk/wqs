@@ -6,12 +6,10 @@ package wqs.db;
  */
 public enum PartitionedTable {
 
-    WQ_PRJ_WEB_TRANSACTION("wqPrjWebTransaction", "occurredAt"),
-    WQ_PRJ_CC_TRANSACTION("wqPrjCcTransaction", "occurredAt"),
+    WQ_PRJ_TRANSACTION("wqPrjTransaction", "occurredAt"),
     WQ_PRJ_SESSION("wqPrjSession", "startedAt"),
     WQ_PRJ_PLAY("wqPrjPlay", "startedAt"),
-    WQ_PRJ_WEB_HIGH_LEVEL("wqPrjWebHighLevel", "occurredAt"),
-    WQ_PRJ_CC_HIGH_LEVEL("wqPrjCcHighLevel", "occurredAt"),
+    WQ_PRJ_TIMELINE("wqPrjTimeline", "occurredAt"),
     WQ_PRJ_COUNT_DAY("wqPrjCountDay", "period");
 
     private final String tableName;

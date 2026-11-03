@@ -258,7 +258,7 @@ public class ProjectionWriter {
     /**
      * Rollups, page index and counters for one newly inserted transaction.
      *
-     * A cancellation transaction is a row in the transaction tables like any other, so it is counted at the
+     * A cancellation transaction is a transaction row like any other, so it is counted at the
      * TRANSACTION page unit (P-2: counters equal live COUNTs); the rollup and page-index updaters return
      * nothing for it, so it creates no page unit. Its effect on its original is applied by
      * {@link CancellationApplier}.

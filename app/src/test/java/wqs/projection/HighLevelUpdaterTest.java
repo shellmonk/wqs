@@ -23,6 +23,9 @@ import wqs.gen.TxTypes;
 class HighLevelUpdaterTest extends PostgresTestBase {
 
     private static final Instant T0 = Instant.parse("2034-08-03T09:00:00Z");
+    /** Each view's page index: the "onWeb" timeline rows with /web's visibility, or every row. */
+    private static final String WEB = ProjectionInvariants.WEB_TIMELINE + " web";
+    private static final String CC = ProjectionInvariants.CC_TIMELINE + " cc";
 
     @BeforeEach
     void setUp() {
@@ -36,8 +39,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         HighLevelResult result = apply(tx("t1", "b1", T0), newSession(T0, 11));
 
         assertThat(result.insertedCount()).isEqualTo(2);
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(count(WEB)).isEqualTo(1);
+        assertThat(count(CC)).isEqualTo(1);
     }
 
     @Test
@@ -47,8 +50,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         HighLevelResult result = apply(tx("t2", "b1", T0.plusSeconds(10)), joined(T0, 11));
 
         assertThat(result.insertedCount()).isZero();
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(count(WEB)).isEqualTo(1);
+        assertThat(count(CC)).isEqualTo(1);
     }
 
     @Test
@@ -57,9 +60,9 @@ class HighLevelUpdaterTest extends PostgresTestBase {
 
         // Payments feed /cc only.
         assertThat(result.insertedCount()).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjWebHighLevel")).isZero();
-        TestSql.Row row = db().row("select * from \"wqPrjCcHighLevel\"");
+        assertThat(count(CC)).isEqualTo(1);
+        assertThat(count(WEB)).isZero();
+        TestSql.Row row = db().row("select * from " + CC);
         assertThat(row.get("kind", Short.class)).isEqualTo((short) 4);
         assertThat(row.get("refId", String.class)).isEqualTo("pay1");
     }
@@ -72,14 +75,14 @@ class HighLevelUpdaterTest extends PostgresTestBase {
                 TxTypes.WIN, new BigDecimal("7.0000"), "EUR", null, null, null);
         apply(prize, RollupResult.NONE);
 
-        assertThat(refIds("wqPrjWebHighLevel")).containsExactlyInAnyOrder("b1", "prize1");
+        assertThat(refIds(WEB)).containsExactlyInAnyOrder("b1", "prize1");
     }
 
     @Test
     void new_rows_are_visible_in_the_excl_cancelled_view() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
 
-        assertThat(visible("wqPrjWebHighLevel")).isTrue();
+        assertThat(visible(WEB)).isTrue();
     }
 
     @Test
@@ -87,7 +90,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         // The first transaction to reach the updater is not the earliest: the session starts at T0.
         apply(tx("t1", "b1", T0.plusSeconds(60)), newSession(T0, 11));
 
-        assertThat(occurredAts("wqPrjWebHighLevel")).containsExactly(T0);
+        assertThat(occurredAts(WEB)).containsExactly(T0);
     }
 
     @Test
@@ -101,8 +104,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
 
         assertThat(apply(sessionedCancel, RollupResult.NONE)).isEqualTo(HighLevelResult.NONE);
         assertThat(apply(unsessionedCancel, RollupResult.NONE)).isEqualTo(HighLevelResult.NONE);
-        assertThat(count("wqPrjWebHighLevel")).isZero();
-        assertThat(count("wqPrjCcHighLevel")).isZero();
+        assertThat(count(WEB)).isZero();
+        assertThat(count(CC)).isZero();
     }
 
     @Test
@@ -118,8 +121,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.movedFromProductType()).isEqualTo(Products.type(11));
         assertThat(result.movedVisible())
                 .containsExactlyInAnyOrderEntriesOf(Map.of(ViewKind.WEB, true, ViewKind.CC, true));
-        assertThat(occurredAts("wqPrjWebHighLevel")).containsExactly(earlier);
-        assertThat(occurredAts("wqPrjCcHighLevel")).containsExactly(earlier);
+        assertThat(occurredAts(WEB)).containsExactly(earlier);
+        assertThat(occurredAts(CC)).containsExactly(earlier);
     }
 
     @Test
@@ -130,15 +133,15 @@ class HighLevelUpdaterTest extends PostgresTestBase {
 
         apply(tx("t0", "b1", julyStart), moved(julyStart, 11, augStart, 11));
 
-        assertThat(occurredAts("wqPrjWebHighLevel")).containsExactly(julyStart);
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(occurredAts(WEB)).containsExactly(julyStart);
+        assertThat(count(WEB)).isEqualTo(1);
+        assertThat(count(CC)).isEqualTo(1);
     }
 
     @Test
     void a_move_preserves_visibility_and_the_move_also_updates_the_product() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        db().execute("update \"wqPrjWebHighLevel\" set \"visibleExclCancelled\" = false");
+        db().execute("update \"wqPrjTimeline\" set \"webVisibleExclCancelled\" = false");
         Instant earlier = T0.minusSeconds(60);
 
         HighLevelResult result = apply(tx("t0", "b1", earlier), moved(earlier, 7, T0, 11));
@@ -149,24 +152,24 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         // The row moved hidden, then t0 -- a live transaction feeding /web -- revived it at the new key
         // (spec 6.3); the counter move uses the moved visibility, the revival adds excl after.
         assertThat(result.revived()).containsExactly(ViewKind.WEB);
-        assertThat(visible("wqPrjWebHighLevel")).isTrue();
-        assertThat(visible("wqPrjCcHighLevel")).isTrue();
-        assertThat(db().value("select \"productId\" from \"wqPrjWebHighLevel\"", String.class)).isEqualTo(Products.id(7));
-        assertThat(db().value("select \"productType\" from \"wqPrjWebHighLevel\"", String.class)).isEqualTo(Products.type(7));
+        assertThat(visible(WEB)).isTrue();
+        assertThat(visible(CC)).isTrue();
+        assertThat(db().value("select \"productId\" from " + WEB, String.class)).isEqualTo(Products.id(7));
+        assertThat(db().value("select \"productType\" from " + WEB, String.class)).isEqualTo(Products.type(7));
     }
 
     @Test
     void a_live_transaction_revives_hidden_session_rows_only_in_the_views_its_source_feeds() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        db().execute("update \"wqPrjWebHighLevel\" set \"visibleExclCancelled\" = false");
-        db().execute("update \"wqPrjCcHighLevel\" set \"visibleExclCancelled\" = false");
+        db().execute("update \"wqPrjTimeline\" set \"webVisibleExclCancelled\" = false");
+        db().execute("update \"wqPrjTimeline\" set \"visibleExclCancelled\" = false");
 
         HighLevelResult result = apply(ccOnly("a1", "b1", T0.plusSeconds(5)), joined(T0, 11));
 
         assertThat(result.inserted()).isEmpty();
         assertThat(result.revived()).containsExactly(ViewKind.CC);
-        assertThat(visible("wqPrjCcHighLevel")).isTrue();
-        assertThat(visible("wqPrjWebHighLevel")).isFalse();
+        assertThat(visible(CC)).isTrue();
+        assertThat(visible(WEB)).isFalse();
 
         // Already visible: nothing to revive.
         assertThat(apply(tx("t2", "b1", T0.plusSeconds(6)), joined(T0, 11)).revived())
@@ -177,7 +180,7 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     @Test
     void a_product_only_change_reports_each_moved_rows_visibility() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        db().execute("update \"wqPrjCcHighLevel\" set \"visibleExclCancelled\" = false");
+        db().execute("update \"wqPrjTimeline\" set \"visibleExclCancelled\" = false");
 
         HighLevelResult result = apply(tx("t2", "b1", T0.plusSeconds(5)), moved(T0, 7, T0, 11));
 
@@ -202,17 +205,18 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.moved()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
         assertThat(result.movedFrom()).isEqualTo(T0);
         assertThat(result.movedFromProductType()).isEqualTo(Products.type(11));
-        assertThat(occurredAts("wqPrjWebHighLevel")).containsExactly(T0);
-        assertThat(db().value("select \"productId\" from \"wqPrjWebHighLevel\"", String.class)).isEqualTo(Products.id(7));
-        assertThat(db().value("select \"productType\" from \"wqPrjWebHighLevel\"", String.class)).isEqualTo(Products.type(7));
-        assertThat(db().value("select \"productId\" from \"wqPrjCcHighLevel\"", String.class)).isEqualTo(Products.id(7));
-        assertThat(db().value("select \"productType\" from \"wqPrjCcHighLevel\"", String.class)).isEqualTo(Products.type(7));
+        assertThat(occurredAts(WEB)).containsExactly(T0);
+        assertThat(db().value("select \"productId\" from " + WEB, String.class)).isEqualTo(Products.id(7));
+        assertThat(db().value("select \"productType\" from " + WEB, String.class)).isEqualTo(Products.type(7));
+        assertThat(db().value("select \"productId\" from " + CC, String.class)).isEqualTo(Products.id(7));
+        assertThat(db().value("select \"productType\" from " + CC, String.class)).isEqualTo(Products.type(7));
     }
 
     @Test
     void a_move_materialises_a_missing_row_in_the_views_the_transaction_feeds() {
         apply(tx("t1", "b1", T0), newSession(T0, 11));
-        db().execute("delete from \"wqPrjWebHighLevel\"");
+        // Take the row off /web: as if no /web-source transaction had joined yet.
+        db().execute("update \"wqPrjTimeline\" set \"onWeb\" = false, \"webVisibleExclCancelled\" = false");
         Instant earlier = T0.minusSeconds(60);
 
         HighLevelResult result = apply(tx("t0", "b1", earlier), moved(earlier, 11, T0, 11));
@@ -221,8 +225,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(result.inserted()).containsExactly(ViewKind.WEB);
         assertThat(result.moved()).containsExactly(ViewKind.CC);
         assertThat(result.movedVisible()).containsOnlyKeys(ViewKind.CC);
-        assertThat(occurredAts("wqPrjWebHighLevel")).containsExactly(earlier);
-        assertThat(occurredAts("wqPrjCcHighLevel")).containsExactly(earlier);
+        assertThat(occurredAts(WEB)).containsExactly(earlier);
+        assertThat(occurredAts(CC)).containsExactly(earlier);
     }
 
     @Test
@@ -244,8 +248,8 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         assertThat(first.get(1).movedFrom()).isEqualTo(T0.plusSeconds(30));
         assertThat(first.get(1).inserted()).containsExactly(ViewKind.WEB);
         assertThat(second.stream().flatMap(r -> r.moved().stream())).isEmpty();
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(count(WEB)).isEqualTo(1);
+        assertThat(count(CC)).isEqualTo(1);
     }
 
     @Test
@@ -262,9 +266,9 @@ class HighLevelUpdaterTest extends PostgresTestBase {
         apply(tx("t2", "b1", e1), moved(e1, 11, T0, 11));
         apply(tx("t3", "b1", e2), moved(e2, 11, e1, 11));
 
-        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
-        assertThat(occurredAts("wqPrjWebHighLevel")).containsExactly(e2);
+        assertThat(count(WEB)).isEqualTo(1);
+        assertThat(count(CC)).isEqualTo(1);
+        assertThat(occurredAts(WEB)).containsExactly(e2);
     }
 
     /** Drives the real RollupUpdater then HighLevelUpdater, one transaction per projected transaction. */
@@ -284,18 +288,17 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     private void clean() {
-        db().execute("delete from \"wqPrjWebHighLevel\"");
-        db().execute("delete from \"wqPrjCcHighLevel\"");
+        db().execute("delete from \"wqPrjTimeline\"");
         db().execute("delete from \"wqPrjGroupLocator\"");
         db().execute("delete from \"wqPrjPlay\"");
         db().execute("delete from \"wqPrjSession\"");
     }
 
     private List<String> snapshot() {
-        return java.util.stream.Stream.of("wqPrjWebHighLevel", "wqPrjCcHighLevel")
+        return java.util.stream.Stream.of(WEB, CC)
                 .flatMap(t -> db().maps("select \"userId\",\"occurredAt\",\"kind\",\"refId\","
-                        + "\"productId\",\"productType\",\"currency\",\"visibleExclCancelled\" from \"" + t
-                        + "\" order by 1,2,3,4").stream()
+                        + "\"productId\",\"productType\",\"currency\",\"visibleExclCancelled\" from " + t
+                        + " order by 1,2,3,4").stream()
                         .map(r -> t + r.values()))
                 .toList();
     }
@@ -339,19 +342,19 @@ class HighLevelUpdaterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
+        return db().value("select count(*)::int from " + table, Integer.class);
     }
 
     private List<String> refIds(String table) {
-        return db().column("select \"refId\" from \"" + table + "\"", String.class);
+        return db().column("select \"refId\" from " + table, String.class);
     }
 
     private List<Instant> occurredAts(String table) {
-        return db().column("select \"occurredAt\" from \"" + table + "\"", java.time.OffsetDateTime.class).stream()
+        return db().column("select \"occurredAt\" from " + table, java.time.OffsetDateTime.class).stream()
                 .map(o -> o.withOffsetSameInstant(ZoneOffset.UTC).toInstant()).toList();
     }
 
     private Boolean visible(String table) {
-        return db().value("select \"visibleExclCancelled\" from \"" + table + "\"", Boolean.class);
+        return db().value("select \"visibleExclCancelled\" from " + table, Boolean.class);
     }
 }

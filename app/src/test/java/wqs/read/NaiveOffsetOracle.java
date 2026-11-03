@@ -30,7 +30,7 @@ public final class NaiveOffsetOracle {
 
     public long count(ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select count(*) from \"" + v.transactionTable() + "\" where " + where(f, typeCodes, from, to, binds);
+        String sql = "select count(*) from \"" + v.transactionView() + "\" where " + where(f, typeCodes, from, to, binds);
         // A non-numeric or null result is a broken oracle, not zero: fail loudly.
         return ((Number) this.sql.value(sql, Object.class, binds.toArray())).longValue();
     }
@@ -43,7 +43,7 @@ public final class NaiveOffsetOracle {
     public List<TransactionEntry> page(
             ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to, long offset, int limit) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select i.*, i.\"detail\"::text as \"detailText\", i.\"type\" as \"typeCode\" from \"" + v.transactionTable()
+        String sql = "select i.*, i.\"detail\"::text as \"detailText\", i.\"type\" as \"typeCode\" from \"" + v.transactionView()
                 + "\" i where "
                 + where(f, typeCodes, from, to, binds)
                 + " order by i.\"occurredAt\" desc, i.\"transactionId\" desc offset ? limit ?";
@@ -82,7 +82,7 @@ public final class NaiveOffsetOracle {
     /** Live count of the view's page-index rows; no counters, no decomposition. */
     public long highLevelCount(ViewKind v, HighLevelFilter f, Instant from, Instant to) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select count(*) from \"" + highLevelTable(v) + "\" where " + highLevelWhere(f, from, to, binds);
+        String sql = "select count(*) from " + highLevelTable(v) + " where " + highLevelWhere(f, from, to, binds);
         return ((Number) this.sql.value(sql, Object.class, binds.toArray())).longValue();
     }
 
@@ -90,7 +90,7 @@ public final class NaiveOffsetOracle {
     public List<HighLevelKey> highLevelPage(
             ViewKind v, HighLevelFilter f, Instant from, Instant to, long offset, int limit) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select \"occurredAt\", \"kind\", \"refId\" from \"" + highLevelTable(v) + "\" where "
+        String sql = "select \"occurredAt\", \"kind\", \"refId\" from " + highLevelTable(v) + " where "
                 + highLevelWhere(f, from, to, binds)
                 + " order by \"occurredAt\" desc, \"kind\" desc, \"refId\" desc offset ? limit ?";
         binds.add(offset);
@@ -103,8 +103,8 @@ public final class NaiveOffsetOracle {
 
     private static String highLevelTable(ViewKind v) {
         return switch (v) {
-            case WEB -> "wqPrjWebHighLevel";
-            case CC -> "wqPrjCcHighLevel";
+            case WEB -> wqs.projection.ProjectionInvariants.WEB_TIMELINE + " web";
+            case CC -> wqs.projection.ProjectionInvariants.CC_TIMELINE + " cc";
         };
     }
 

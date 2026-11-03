@@ -14,8 +14,7 @@ import org.junit.jupiter.api.Test;
 /** Spec 7.7: the level-0 read path scans covering indexes; they must exist on every partition. */
 class CoveringIndexTest extends PostgresTestBase {
 
-    private static final List<String> PARENTS =
-            List.of("wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjWebHighLevel", "wqPrjCcHighLevel");
+    private static final List<String> PARENTS = List.of("wqPrjTransaction", "wqPrjTimeline");
 
     @BeforeAll
     static void createPartition() {
@@ -47,12 +46,13 @@ class CoveringIndexTest extends PostgresTestBase {
 
     /**
      * Spec 5.6 / 7.7: key columns give each page index a total order (the tie-break on equal
-     * "occurredAt"); INCLUDE carries only what filtering reads.
+     * "occurredAt"); INCLUDE carries only what filtering reads -- including each endpoint's
+     * own predicate ("source" for the /web view, "onWeb" and /web's visibility on the timeline).
      */
     @Test
     void cover_index_key_and_include_columns() {
-        String transactions = "(userId, occurredAt DESC, transactionId DESC) INCLUDE (cancelled, productType, type)";
-        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled)";
+        String transactions = "(userId, occurredAt DESC, transactionId DESC) INCLUDE (cancelled, productType, type, source)";
+        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled, onWeb, webVisibleExclCancelled)";
         for (String parent : PARENTS) {
             String def = db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class,
                     "\"" + parent + "_cover\"").replace("\"", "");
@@ -60,6 +60,7 @@ class CoveringIndexTest extends PostgresTestBase {
         }
     }
 
+    /** Through the /web view: its "source" predicate is answered from the index too. */
     @Test
     void level0_key_query_is_an_index_only_scan() throws Exception {
         List<String> plan = new ArrayList<>();
@@ -79,6 +80,8 @@ class CoveringIndexTest extends PostgresTestBase {
         }
         String text = String.join("\n", plan);
         assertThat(text).contains("Index Only Scan");
+        assertThat(text).as("the view's source predicate, inside the scan").contains("source");
+        assertThat(text).as("pruned to July 2036").contains("wqPrjTransaction_2036_07").doesNotContain("_2036_08");
         String indexName = plan.stream()
                 .filter(l -> l.contains("Index Only Scan"))
                 .map(l -> l.replaceAll(".*Index Only Scan (?:Backward )?using (\\S+) on .*", "$1"))
@@ -88,7 +91,7 @@ class CoveringIndexTest extends PostgresTestBase {
                 select exists (
                   select 1 from pg_inherits i
                   where i.inhrelid = to_regclass(?)::oid
-                    and i.inhparent = to_regclass('"wqPrjWebTransaction_cover"')::oid)
+                    and i.inhparent = to_regclass('"wqPrjTransaction_cover"')::oid)
                 """, Boolean.class, "\"" + indexName + "\"");
         assertThat(isCoverChild).as("scanned index %s in plan:%n%s", indexName, text).isTrue();
     }

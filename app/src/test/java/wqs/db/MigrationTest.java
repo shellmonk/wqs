@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import wqs.domain.SourceKind;
+import wqs.domain.ViewKind;
 
 class MigrationTest extends PostgresTestBase {
 
@@ -19,7 +21,51 @@ class MigrationTest extends PostgresTestBase {
                        order by c.relname
                        """, String.class);
 
-        assertThat(partitioned).contains("wqPrjWebTransaction", "wqPrjCcTransaction");
+        assertThat(partitioned).contains("wqPrjTransaction", "wqPrjTimeline")
+                .doesNotContain("wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjWebHighLevel", "wqPrjCcHighLevel");
+    }
+
+    /**
+     * Each endpoint reads a view over the one "wqPrjTransaction" table. /web's holds exactly the
+     * sources whose {@link SourceKind#views()} include WEB -- the routing and the schema cannot
+     * drift apart -- and /cc's holds every row.
+     */
+    @Test
+    void each_endpoint_has_a_transaction_view_with_its_own_sources() {
+        String webCodes = java.util.Arrays.stream(SourceKind.values())
+                .filter(k -> k.views().contains(ViewKind.WEB))
+                .map(k -> String.valueOf(k.code()))
+                .collect(java.util.stream.Collectors.joining(", "));
+        assertThat(relkind("wqPrjWebTransaction")).isEqualTo("v");
+        assertThat(relkind("wqPrjCcTransaction")).isEqualTo("v");
+        assertThat(viewDef("wqPrjWebTransaction")).contains("FROM \"wqPrjTransaction\"")
+                .endsWith("WHERE (source = ANY (ARRAY[" + webCodes + "]));");
+        assertThat(viewDef("wqPrjCcTransaction")).contains("FROM \"wqPrjTransaction\"").doesNotContain("WHERE");
+        assertThat(relkind("wqPrjWebHighLevel")).as("no per-view page index").isNull();
+        assertThat(relkind("wqPrjCcHighLevel")).as("no per-view page index").isNull();
+    }
+
+    /** One page index for both endpoints: "onWeb" marks /web's rows, each endpoint has its own visibility. */
+    @Test
+    void the_timeline_carries_on_web_and_per_endpoint_visibility() {
+        for (String column : List.of("onWeb", "visibleExclCancelled", "webVisibleExclCancelled")) {
+            assertThat(columnType("wqPrjTimeline", column)).as(column).isEqualTo("boolean");
+            assertThat(nullable("wqPrjTimeline", column)).as(column).isFalse();
+        }
+        assertThat(db().value("""
+                select pg_get_constraintdef(oid) from pg_constraint
+                where conname = 'wqPrjTimeline_webVisible_onWeb'
+                  and conrelid = to_regclass('"wqPrjTimeline"')::oid
+                """, String.class)).contains("webVisibleExclCancelled").contains("onWeb");
+    }
+
+    private static String relkind(String name) {
+        return db().column("select relkind::text from pg_class where relname = ?", String.class, name)
+                .stream().findFirst().orElse(null);
+    }
+
+    private static String viewDef(String name) {
+        return db().value("select pg_get_viewdef(to_regclass(?)::oid)", String.class, "\"" + name + "\"").strip();
     }
 
     @Test
@@ -57,8 +103,8 @@ class MigrationTest extends PostgresTestBase {
     // --- Final schema (baseline migration) ---------------------------------------------------
 
     private static final List<String> PRODUCT_TABLES = List.of(
-            "wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjSession", "wqPrjPlay", "wqPrjWebHighLevel", "wqPrjCcHighLevel",
-            "wqPrjPendingCancel");
+            "wqPrjTransaction", "wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjSession", "wqPrjPlay",
+            "wqPrjTimeline", "wqPrjPendingCancel");
 
     @Test
     void products_are_text_and_there_is_no_product_table() {
@@ -105,7 +151,7 @@ class MigrationTest extends PostgresTestBase {
     /** Plan D1: transaction types are a Java enum; every "type" column holds the code as text. */
     @Test
     void type_columns_are_text_and_there_is_no_type_table() {
-        for (String table : List.of("wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjPendingCancel",
+        for (String table : List.of("wqPrjTransaction", "wqPrjPendingCancel",
                 "wqPrjCountMonth", "wqPrjCountDay")) {
             assertThat(columnType(table, "type")).as(table + ".type").isEqualTo("text");
             assertThat(nullable(table, "type")).as(table + ".type").isFalse();
@@ -133,17 +179,11 @@ class MigrationTest extends PostgresTestBase {
     /** Covering indexes INCLUDE the filter columns; the session-member indexes are on the batch id. */
     @Test
     void read_path_indexes_have_their_final_shape() {
-        assertThat(indexDef("wqPrjWebTransaction_cover")).endsWith(
-                "(\"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (cancelled, \"productType\", type)");
-        assertThat(indexDef("wqPrjCcTransaction_cover")).endsWith(
-                "(\"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (cancelled, \"productType\", type)");
-        assertThat(indexDef("wqPrjWebHighLevel_cover")).endsWith(
-                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\")");
-        assertThat(indexDef("wqPrjCcHighLevel_cover")).endsWith(
-                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\")");
-        assertThat(indexDef("wqPrjWebTransaction_batch")).endsWith(
-                "(\"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
-        assertThat(indexDef("wqPrjCcTransaction_batch")).endsWith(
+        assertThat(indexDef("wqPrjTransaction_cover")).endsWith(
+                "(\"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (cancelled, \"productType\", type, source)");
+        assertThat(indexDef("wqPrjTimeline_cover")).endsWith(
+                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\", \"onWeb\", \"webVisibleExclCancelled\")");
+        assertThat(indexDef("wqPrjTransaction_batch")).endsWith(
                 "(\"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
         assertThat(indexDef("wqPrjPlay_batch")).endsWith("(\"userId\", \"batchId\", \"startedAt\")");
     }

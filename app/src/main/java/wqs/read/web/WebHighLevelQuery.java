@@ -12,24 +12,25 @@ import wqs.read.HighLevelKey;
 import wqs.read.HighLevelQuery;
 
 /**
- * Level-1/2 reads of the web view's page index (spec 5.6); touches only "wqPrjWebHighLevel". Every
- * predicate and sort column is in "wqPrjWebHighLevel_cover" -- key ("userId", "occurredAt" desc,
- * "kind" desc, "refId" desc), INCLUDE ("productType", "visibleExclCancelled") -- so both queries
- * are covering index scans.
+ * Level-1/2 reads of the web view's page index (spec 5.6): the "wqPrjTimeline" rows with "onWeb",
+ * never any other. Every predicate and sort column is in "wqPrjTimeline_cover" -- key ("userId",
+ * "occurredAt" desc, "kind" desc, "refId" desc), INCLUDE ("productType", "visibleExclCancelled",
+ * "onWeb", "webVisibleExclCancelled") -- so both queries are covering index scans. /web's
+ * visibility with cancelled excluded is "webVisibleExclCancelled".
  */
 @Component
 public class WebHighLevelQuery implements HighLevelQuery {
 
     private static final String COUNT = """
-            select count(*) from "wqPrjWebHighLevel"
+            select count(*) from "wqPrjTimeline"
             where %s
             """;
 
     private static final String KEYS = """
-            select "wqPrjWebHighLevel"."occurredAt", "wqPrjWebHighLevel"."kind", "wqPrjWebHighLevel"."refId"
-            from "wqPrjWebHighLevel"
+            select "wqPrjTimeline"."occurredAt", "wqPrjTimeline"."kind", "wqPrjTimeline"."refId"
+            from "wqPrjTimeline"
             where %s
-            order by "wqPrjWebHighLevel"."occurredAt" desc, "wqPrjWebHighLevel"."kind" desc, "wqPrjWebHighLevel"."refId" desc
+            order by "wqPrjTimeline"."occurredAt" desc, "wqPrjTimeline"."kind" desc, "wqPrjTimeline"."refId" desc
             offset :offset rows fetch next :limit rows only
             """;
 
@@ -57,13 +58,14 @@ public class WebHighLevelQuery implements HighLevelQuery {
     /** The key-range predicate, value-free: the filter only decides which fixed fragments appear. */
     private static String range(HighLevelFilter f) {
         StringBuilder c = new StringBuilder("""
-                ("wqPrjWebHighLevel"."userId" = :userId and "wqPrjWebHighLevel"."occurredAt" >= cast(:lo as timestamptz) \
-                and "wqPrjWebHighLevel"."occurredAt" < cast(:hi as timestamptz)""");
+                ("wqPrjTimeline"."userId" = :userId and "wqPrjTimeline"."onWeb" \
+                and "wqPrjTimeline"."occurredAt" >= cast(:lo as timestamptz) \
+                and "wqPrjTimeline"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c.append(" and \"wqPrjWebHighLevel\".\"visibleExclCancelled\" = true");
+            c.append(" and \"wqPrjTimeline\".\"webVisibleExclCancelled\" = true");
         }
         if (!f.productTypes().isEmpty()) {
-            c.append(" and \"wqPrjWebHighLevel\".\"productType\" in (:productTypes)");
+            c.append(" and \"wqPrjTimeline\".\"productType\" in (:productTypes)");
         }
         return c.append(')').toString();
     }

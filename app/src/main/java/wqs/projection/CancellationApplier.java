@@ -30,15 +30,15 @@ import wqs.domain.ViewKind;
  *
  * <p><b>Effects</b>, each the exact inverse of what the original contributed when it arrived:
  * <ul>
- *   <li>Transaction rows: "cancelled" = true in every view the original's source feeds; the TRANSACTION
- *       excl-cancelled counter loses one in each, at the original's own (occurredAt, productType).
+ *   <li>Transaction row: "cancelled" = true on the original's one row; the TRANSACTION
+ *       excl-cancelled counter loses one in each view its source feeds, at the original's own (occurredAt, productType).
  *       cntAll is untouched -- a cancelled transaction is still returned when the filter is off.</li>
  *   <li>Rollups (sessioned original): txCountExclCancelled -1 and the original's own money
  *       (computed exactly as {@link RollupUpdater} added it) on its play and its session; the
  *       session's playCountExclCancelled -1 when the play's txCountExclCancelled reaches 0.</li>
  *   <li>Page index, PER VIEW: a session row in view V is visible while the session has at least
  *       one surviving (non-cancelled, non-cancellation) transaction whose source feeds V. For each view
- *       the original's source feeds, that is re-evaluated against the transaction table; if nothing
+ *       the original's source feeds, that is re-evaluated against V's transaction view; if nothing
  *       survives, the row flips to hidden and the HIGH_LEVEL excl-cancelled counter loses one at
  *       the SESSION's key (start and productType from the session row, never the original's). An
  *       unsessioned original's own row flips at the transaction's key. A live transaction joining later
@@ -71,7 +71,7 @@ public class CancellationApplier {
     private static final String FETCH_ORIGINAL = """
             select "userId", "occurredAt", "source", "sourceId", "productType", "batchId",
                    "subBatchId", "type", "amount", "cancelled", "cancels"
-            from "wqPrjCcTransaction"
+            from "wqPrjTransaction"
             where "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?
             """;
     private static final String SUBTRACT_FROM_PLAY = """
@@ -149,10 +149,10 @@ public class CancellationApplier {
 
         SourceKind source = SourceKind.ofCode(original.source());
         if (original.cancelled()) {
-            lowerCancelledBy(cancel, original, source);
+            lowerCancelledBy(cancel, original);
             return true;
         }
-        markCancelled(cancel, original, source);
+        markCancelled(cancel, original);
 
         long userId = original.userId();
         Instant occurredAt = original.occurredAt().toInstant();
@@ -203,7 +203,7 @@ public class CancellationApplier {
                 .orElse(null);
     }
 
-    /** The located original, read from "wqPrjCcTransaction" -- every source feeds /cc. */
+    /** The located original's transaction row. */
     private Original fetchOriginal(ProjectionTransaction cancel, Located located) {
         return jdbc.sql(FETCH_ORIGINAL)
                 .params(located.userId(), timestamptz(located.occurredAt()),
@@ -212,26 +212,20 @@ public class CancellationApplier {
                 .single();
     }
 
-    private void markCancelled(ProjectionTransaction cancel, Original original, SourceKind source) {
-        for (ViewKind view : source.views()) {
-            TransactionTable t = TransactionTable.of(view);
-            int rows = jdbc.sql(t.markCancelled())
-                    .param(cancel.sourceId())
-                    .params(identifies(original))
-                    .update();
-            requireOne(rows, "transaction row in " + view, original);
-        }
+    private void markCancelled(ProjectionTransaction cancel, Original original) {
+        int rows = jdbc.sql(MARK_CANCELLED)
+                .param(cancel.sourceId())
+                .params(identifies(original))
+                .update();
+        requireOne(rows, "transaction row", original);
     }
 
-    private void lowerCancelledBy(ProjectionTransaction cancel, Original original, SourceKind source) {
-        for (ViewKind view : source.views()) {
-            TransactionTable t = TransactionTable.of(view);
-            int rows = jdbc.sql(t.lowerCancelledBy())
-                    .param(cancel.sourceId())
-                    .params(identifies(original))
-                    .update();
-            requireOne(rows, "transaction row in " + view, original);
-        }
+    private void lowerCancelledBy(ProjectionTransaction cancel, Original original) {
+        int rows = jdbc.sql(LOWER_CANCELLED_BY)
+                .param(cancel.sourceId())
+                .params(identifies(original))
+                .update();
+        requireOne(rows, "transaction row", original);
     }
 
     /**
@@ -286,7 +280,7 @@ public class CancellationApplier {
      * the partitioned transaction table prune.
      */
     private boolean sessionSurvivesIn(ViewKind view, Session session) {
-        return Boolean.TRUE.equals(jdbc.sql(TransactionTable.of(view).survivor())
+        return Boolean.TRUE.equals(jdbc.sql(view == ViewKind.WEB ? SURVIVOR_WEB : SURVIVOR_CC)
                 .params(session.userId(), timestamptz(session.startedAt()),
                         timestamptz(session.endedAt()), session.batchId(), "")
                 .query(Boolean.class)
@@ -300,7 +294,7 @@ public class CancellationApplier {
      */
     private void hide(ViewKind view, long userId, Instant at, short kind, String refId,
                       String productType) {
-        int rows = jdbc.sql(view == ViewKind.WEB ? HIDE_WEB : HIDE_CC)
+        int rows = jdbc.sql(view == ViewKind.WEB ? HIDE_ON_WEB : HIDE_ON_CC)
                 .params(userId, timestamptz(at), kind, refId)
                 .update();
         if (rows != 1) {
@@ -345,7 +339,7 @@ public class CancellationApplier {
     private record Located(long userId, OffsetDateTime occurredAt, boolean zeroAmount) {
     }
 
-    /** The columns of the original's "wqPrjCcTransaction" row that a cancel reads. */
+    /** The columns of the original's "wqPrjTransaction" row that a cancel reads. */
     private record Original(
             long userId, OffsetDateTime occurredAt, short source, String sourceId,
             String productType, String batchId, String subBatchId, String type, BigDecimal amount,
@@ -358,43 +352,37 @@ public class CancellationApplier {
             String productType, int txCountExclCancelled, int playCountExclCancelled) {
     }
 
-    private static final String HIDE = """
-            update "%s" set "visibleExclCancelled" = false
+    // Per endpoint: /cc's visibility is "visibleExclCancelled", /web's "webVisibleExclCancelled".
+    private static final String HIDE_ON_CC = """
+            update "wqPrjTimeline" set "visibleExclCancelled" = false
             where "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?
               and "visibleExclCancelled" = true
             """;
-    private static final String HIDE_WEB = HIDE.formatted("wqPrjWebHighLevel");
-    private static final String HIDE_CC = HIDE.formatted("wqPrjCcHighLevel");
+    private static final String HIDE_ON_WEB = """
+            update "wqPrjTimeline" set "webVisibleExclCancelled" = false
+            where "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?
+              and "webVisibleExclCancelled" = true
+            """;
 
-    /** The two transaction tables share a column shape; this carries one table's statements. */
-    private record TransactionTable(String markCancelled, String lowerCancelledBy, String survivor) {
+    private static final String IDENTIFIES = """
+            "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?""";
+    private static final String MARK_CANCELLED = """
+            update "wqPrjTransaction" set "cancelled" = true, "cancelledBy" = ?
+            where %s
+            """.formatted(IDENTIFIES);
+    private static final String LOWER_CANCELLED_BY = """
+            update "wqPrjTransaction" set "cancelledBy" = least("wqPrjTransaction"."cancelledBy", ?)
+            where %s
+            """.formatted(IDENTIFIES);
 
-        private static final String IDENTIFIES = """
-                "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?""";
-
-        static final TransactionTable WEB = of("wqPrjWebTransaction");
-        static final TransactionTable CC = of("wqPrjCcTransaction");
-
-        static TransactionTable of(ViewKind view) {
-            return view == ViewKind.WEB ? WEB : CC;
-        }
-
-        private static TransactionTable of(String table) {
-            return new TransactionTable(
-                    """
-                    update "%s" set "cancelled" = true, "cancelledBy" = ?
-                    where %s
-                    """.formatted(table, IDENTIFIES),
-                    """
-                    update "%1$s" set "cancelledBy" = least("%1$s"."cancelledBy", ?)
-                    where %2$s
-                    """.formatted(table, IDENTIFIES),
-                    """
-                    select exists (
-                        select 1 from "%s"
-                        where "userId" = ? and "occurredAt" between ? and ? and "batchId" = ?
-                          and "cancelled" = false and ("cancels" is null or trim("cancels") = ?))
-                    """.formatted(table));
-        }
-    }
+    // A session survives in a view while that view's SQL view still holds a surviving transaction
+    // of it: the source predicate is the view's own, so the rule cannot drift from the read side.
+    private static final String SURVIVOR = """
+            select exists (
+                select 1 from "%s"
+                where "userId" = ? and "occurredAt" between ? and ? and "batchId" = ?
+                  and "cancelled" = false and ("cancels" is null or trim("cancels") = ?))
+            """;
+    private static final String SURVIVOR_WEB = SURVIVOR.formatted(ViewKind.WEB.transactionView());
+    private static final String SURVIVOR_CC = SURVIVOR.formatted(ViewKind.CC.transactionView());
 }

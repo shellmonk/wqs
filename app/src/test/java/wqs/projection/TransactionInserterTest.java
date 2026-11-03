@@ -23,20 +23,20 @@ class TransactionInserterTest extends PostgresTestBase {
         new PartitionManager(jdbc()).ensurePartitionsAhead(java.time.YearMonth.of(2033, 4), 0);
         inserter = new TransactionInserter(jdbc());
         db().execute("delete from \"wqPrjTransactionLocator\"");
-        db().execute("delete from \"wqPrjWebTransaction\"");
-        db().execute("delete from \"wqPrjCcTransaction\"");
+        db().execute("delete from \"wqPrjTransaction\"");
     }
 
     @Test
-    void a_transaction_lands_in_both_view_tables() {
+    void a_transaction_is_stored_once_and_seen_through_both_views() {
         assertThat(inserter.insertIfAbsent(transaction("tx-1"))).isTrue();
 
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
         assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
     }
 
     @Test
-    void a_payment_lands_only_in_the_operator_table() {
+    void a_payment_is_seen_only_through_the_operator_view() {
         ProjectionTransaction payment = new ProjectionTransaction(
                 7L, SourceKind.PAYMENT, "pay-1", WHEN, null, null, null, null,
                 TxTypes.NEUTRAL, new BigDecimal("100.0000"), "EUR", null, null, null);
@@ -54,6 +54,7 @@ class TransactionInserterTest extends PostgresTestBase {
         boolean secondInsert = inserter.insertIfAbsent(transaction("tx-1"));
 
         assertThat(secondInsert).isFalse();
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
         assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
     }

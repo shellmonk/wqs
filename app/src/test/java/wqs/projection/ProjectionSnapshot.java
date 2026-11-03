@@ -9,21 +9,19 @@ import wqs.db.TestSql;
  * group locator, rollups, the page index, both counter tiers and parked cancels. Every table is
  * ordered by its full primary key, so two snapshots are equal exactly when the stored state is.
  *
- * CRITICAL: "transactionId" and "ingestedAt" (transaction tables only) and "parkedAt" (parked cancels) are
+ * CRITICAL: "transactionId" and "ingestedAt" (transaction table only) and "parkedAt" (parked cancels) are
  * excluded. transactionId comes from a sequence and ingestedAt / parkedAt from now(), so they differ
  * between runs; including any would make every convergence comparison fail for reasons that have
  * nothing to do with correctness. No other projection table has a sequence- or clock-derived
  * column, so every other column is compared.
  */
 public record ProjectionSnapshot(
-        List<String> webTransactions,
-        List<String> ccTransactions,
+        List<String> transactions,
         List<String> locator,
         List<String> groupLocator,
         List<String> sessions,
         List<String> plays,
-        List<String> webHighLevel,
-        List<String> ccHighLevel,
+        List<String> timeline,
         List<String> countDay,
         List<String> countMonth,
         List<String> pendingCancels) {
@@ -31,12 +29,11 @@ public record ProjectionSnapshot(
     public static ProjectionSnapshot of(JdbcClient jdbc) {
         TestSql sql = new TestSql(jdbc);
         return new ProjectionSnapshot(
-                rows(sql, "wqPrjWebTransaction"), rows(sql, "wqPrjCcTransaction"), locatorRows(sql),
+                rows(sql, "wqPrjTransaction"), locatorRows(sql),
                 all(sql, "wqPrjGroupLocator", "\"userId\", \"batchId\", \"subBatchId\""),
                 all(sql, "wqPrjSession", "\"userId\", \"startedAt\", \"batchId\""),
                 all(sql, "wqPrjPlay", "\"userId\", \"startedAt\", \"batchId\", \"subBatchId\""),
-                all(sql, "wqPrjWebHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
-                all(sql, "wqPrjCcHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
+                all(sql, "wqPrjTimeline", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
                 all(sql, "wqPrjCountDay", COUNTER_KEY),
                 all(sql, "wqPrjCountMonth", COUNTER_KEY),
                 pendingCancelRows(sql));

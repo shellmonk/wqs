@@ -15,7 +15,7 @@ import wqs.read.HighLevelTransactionQuery;
 import wqs.read.HighLevelKey;
 import wqs.read.TransactionEntry;
 
-/** Level-1/2 assembly reads of the operator (cc) view's transactions; of the transaction tables, touches only "wqPrjCcTransaction". */
+/** Level-1/2 assembly reads of the operator (cc) view's transactions; of the transaction relations, reads only the "wqPrjCcTransaction" view. */
 @Component
 public class CcHighLevelAssembly implements HighLevelTransactionQuery {
 
@@ -27,7 +27,7 @@ public class CcHighLevelAssembly implements HighLevelTransactionQuery {
             "wqPrjCcTransaction"."ingestedAt", "wqPrjCcTransaction"."productType"
             """;
 
-    // Per session: ("userId", "batchId", "occurredAt") probes of "wqPrjCcTransaction_batch", each from the
+    // Per session: ("userId", "batchId", "occurredAt") probes of "wqPrjTransaction_batch", each from the
     // session's own start; the OR keeps its whole window (even past the range end, as its totals
     // count it) plus its late cancellations before the range end. %1$s: the excl predicate, %2$s:
     // the type-code predicate -- fixed fragments, never values.

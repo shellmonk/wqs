@@ -231,8 +231,7 @@ class CancellationTest extends PostgresTestBase {
         // User 1's projection is untouched: rollups and page index are identical.
         assertThat(after.sessions()).isEqualTo(before.sessions());
         assertThat(after.plays()).isEqualTo(before.plays());
-        assertThat(after.webHighLevel()).isEqualTo(before.webHighLevel());
-        assertThat(after.ccHighLevel()).isEqualTo(before.ccHighLevel());
+        assertThat(after.timeline()).isEqualTo(before.timeline());
         assertThat(cancelledBy("t1")).isNull();
         assertNoDrift();
     }
@@ -540,7 +539,7 @@ class CancellationTest extends PostgresTestBase {
     }
 
     private static String pageTable(int view) {
-        return view == WEB ? "wqPrjWebHighLevel" : "wqPrjCcHighLevel";
+        return ProjectionInvariants.relation(view == WEB ? ProjectionInvariants.WEB_TIMELINE : ProjectionInvariants.CC_TIMELINE);
     }
 
     private boolean cancelled(int view, String sourceId) {
@@ -588,18 +587,18 @@ class CancellationTest extends PostgresTestBase {
     }
 
     private boolean sessionVisible(int view) {
-        return db().value("select \"visibleExclCancelled\" from \"" + pageTable(view)
-                + "\" where \"kind\" = 0", Boolean.class);
+        return db().value("select \"visibleExclCancelled\" from " + pageTable(view)
+                + " where \"kind\" = 0", Boolean.class);
     }
 
     private String highLevelProduct(int view) {
-        return db().value("select \"productId\" from \"" + pageTable(view)
-                + "\" where \"kind\" = 0", String.class);
+        return db().value("select \"productId\" from " + pageTable(view)
+                + " where \"kind\" = 0", String.class);
     }
 
     private boolean rowVisible(int view, int kind, String refId) {
-        return db().value("select \"visibleExclCancelled\" from \"" + pageTable(view)
-                + "\" where \"kind\" = ? and \"refId\" = ?", Boolean.class, (short) kind, refId);
+        return db().value("select \"visibleExclCancelled\" from " + pageTable(view)
+                + " where \"kind\" = ? and \"refId\" = ?", Boolean.class, (short) kind, refId);
     }
 
     private int highLevelSentinel(int view, String column) {

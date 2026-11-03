@@ -54,10 +54,10 @@ create table "wqPrjGroupLocator" (
 -- Level-0 transactions
 -- ---------------------------------------------------------------------------------------------
 
--- Level-0 rows for the user-facing views: transactions and claimable prizes (spec 4).
--- "type" holds the transaction-type code as it arrived (wqs.domain.TransactionType, plan D1); a
--- code the enum does not list is stored as-is and rolls up as NEUTRAL.
-create table "wqPrjWebTransaction" (
+-- Level-0 rows, every source stored once (spec 4). "type" holds the transaction-type code as it
+-- arrived (wqs.domain.TransactionType, plan D1); a code the enum does not list is stored as-is and
+-- rolls up as NEUTRAL. Each endpoint reads its own view below, never this table.
+create table "wqPrjTransaction" (
     "userId"       bigint        not null,
     "transactionId"       bigint        not null,
     "source"       smallint      not null,
@@ -79,28 +79,14 @@ create table "wqPrjWebTransaction" (
     primary key ("userId", "occurredAt", "transactionId")
 ) partition by range ("occurredAt");
 
--- Level-0 rows for the operator unified view: all five sources (spec 4).
-create table "wqPrjCcTransaction" (
-    "userId"       bigint        not null,
-    "transactionId"       bigint        not null,
-    "source"       smallint      not null,
-    "sourceId"     text          not null,
-    "occurredAt"   timestamptz   not null,
-    "productId"    text,
-    "batchId"      text,
-    "subBatchId"   text,
-    "type"         text          not null,
-    "amount"       numeric(20,4) not null,
-    "currency"     char(3)       not null,
-    "balanceAfter" numeric(20,4),
-    "cancelled"    boolean       not null default false,
-    "cancelledBy"  text,
-    "cancels"      text,
-    "detail"       jsonb,
-    "ingestedAt"   timestamptz   not null default now(),
-    "productType"  text,
-    primary key ("userId", "occurredAt", "transactionId")
-) partition by range ("occurredAt");
+-- The user-facing view: transactions (1) and claimable prizes (3) only -- the sources whose
+-- wqs.domain.SourceKind.views() include WEB. /web code reads only this view.
+create view "wqPrjWebTransaction" as
+    select * from "wqPrjTransaction" where "source" in (1, 3);
+
+-- The operator unified view: all five sources.
+create view "wqPrjCcTransaction" as
+    select * from "wqPrjTransaction";
 
 create sequence "wqTransactionIdSeq" as bigint;
 
@@ -198,28 +184,25 @@ create table "wqPrjPlay" (
 -- One narrow row per session and per unsessioned transaction, merged at WRITE time so paging stays a
 -- single covering index scan (spec 5.6). A page index, not a payload store: it carries only what
 -- ordering, filtering and counting need. Payload is fetched by "refId" during assembly.
-create table "wqPrjWebHighLevel" (
-    "userId"               bigint      not null,
-    "occurredAt"           timestamptz not null,  -- session "startedAt", or the transaction's "occurredAt"
-    "kind"                 smallint    not null,  -- 0 = SESSION, otherwise the source code
-    "refId"                text        not null,  -- "batchId" for a session, "sourceId" for a transaction
-    "productId"            text,
-    "currency"             char(3)     not null,
-    "visibleExclCancelled" boolean     not null default true,
-    "productType"          text,
-    primary key ("userId", "occurredAt", "kind", "refId")
-) partition by range ("occurredAt");
-
-create table "wqPrjCcHighLevel" (
-    "userId"               bigint      not null,
-    "occurredAt"           timestamptz not null,
-    "kind"                 smallint    not null,
-    "refId"                text        not null,
-    "productId"            text,
-    "currency"             char(3)     not null,
-    "visibleExclCancelled" boolean     not null default true,
-    "productType"          text,
-    primary key ("userId", "occurredAt", "kind", "refId")
+--
+-- Both endpoints share the rows. "onWeb": the row is on /web's timeline -- an unsessioned
+-- transaction whose source feeds WEB, or a session holding at least one such transaction. /cc reads
+-- every row. Visibility with cancelled transactions excluded is per endpoint, because a session can
+-- mix sources: "visibleExclCancelled" is /cc's (a surviving transaction of any source),
+-- "webVisibleExclCancelled" /web's (a surviving WEB-source transaction; false when not "onWeb").
+create table "wqPrjTimeline" (
+    "userId"                  bigint      not null,
+    "occurredAt"              timestamptz not null,  -- session "startedAt", or the transaction's "occurredAt"
+    "kind"                    smallint    not null,  -- 0 = SESSION, otherwise the source code
+    "refId"                   text        not null,  -- "batchId" for a session, "sourceId" for a transaction
+    "productId"               text,
+    "currency"                char(3)     not null,
+    "onWeb"                   boolean     not null,
+    "visibleExclCancelled"    boolean     not null default true,
+    "webVisibleExclCancelled" boolean     not null,
+    "productType"             text,
+    primary key ("userId", "occurredAt", "kind", "refId"),
+    constraint "wqPrjTimeline_webVisible_onWeb" check (not "webVisibleExclCancelled" or "onWeb")
 ) partition by range ("occurredAt");
 
 -- ---------------------------------------------------------------------------------------------
@@ -304,17 +287,22 @@ create index "wqPrjPendingCancel_target_idx" on "wqPrjPendingCancel" ("source", 
 -- index; spec 4.1). On the page index "kind" and "refId" are key columns, not INCLUDE, so it has a
 -- total order ("occurredAt" desc, "kind" desc, "refId" desc) for level 1/2 paging, like "transactionId"
 -- on the transactions.
-create index "wqPrjWebTransaction_cover" on "wqPrjWebTransaction" ("userId", "occurredAt" desc, "transactionId" desc) include ("cancelled", "productType", "type");
-create index "wqPrjCcTransaction_cover"  on "wqPrjCcTransaction"  ("userId", "occurredAt" desc, "transactionId" desc) include ("cancelled", "productType", "type");
-create index "wqPrjWebHighLevel_cover" on "wqPrjWebHighLevel" ("userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled");
-create index "wqPrjCcHighLevel_cover"  on "wqPrjCcHighLevel"  ("userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled");
+--
+-- One index per table serves both endpoints. "source" is INCLUDEd so the /web view's
+-- "source" in (1, 3) is checked inside an index-only scan; "onWeb" and "webVisibleExclCancelled"
+-- likewise for the /web timeline. They are INCLUDE, not leading key columns: a key
+-- ("userId", "onWeb", ...) would give /web an exact range but leave /cc (every row, ordered by
+-- time) with no ordered scan short of a second index, and PG16 has no skip scan. /web pays a
+-- filter on rows of other sources inside the same user's time range -- payments and adjustments,
+-- a minority -- and keeps index order, so a LIMIT still stops early.
+create index "wqPrjTransaction_cover" on "wqPrjTransaction" ("userId", "occurredAt" desc, "transactionId" desc) include ("cancelled", "productType", "type", "source");
+create index "wqPrjTimeline_cover" on "wqPrjTimeline" ("userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled", "onWeb", "webVisibleExclCancelled");
 
 -- Level-1/2 assembly (spec 7.3 "each bounded by the page size"): a page's sessions' transactions and
 -- plays are fetched per session by batch id. Without these the only usable index is
 -- ("userId", "occurredAt"/"startedAt"), so a long-lived session made the fetch read every row of
 -- the user inside its window. Partial on sessioned transactions: unsessioned rows never probe it.
-create index "wqPrjWebTransaction_batch" on "wqPrjWebTransaction" ("userId", "batchId", "occurredAt") where "batchId" is not null;
-create index "wqPrjCcTransaction_batch"  on "wqPrjCcTransaction"  ("userId", "batchId", "occurredAt") where "batchId" is not null;
+create index "wqPrjTransaction_batch" on "wqPrjTransaction" ("userId", "batchId", "occurredAt") where "batchId" is not null;
 create index "wqPrjPlay_batch"    on "wqPrjPlay"    ("userId", "batchId", "startedAt");
 
 -- ---------------------------------------------------------------------------------------------

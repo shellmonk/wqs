@@ -16,7 +16,7 @@ import wqs.read.TransactionKey;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
 
-/** Level-0 reads of the web view; touches only "wqPrjWebTransaction". */
+/** Level-0 reads of the web view; reads only the "wqPrjWebTransaction" view (transactions and claimable prizes). */
 @Component
 public class WebLevel0Query implements Level0Query {
 
