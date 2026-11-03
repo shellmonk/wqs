@@ -304,11 +304,18 @@ retract-and-reapply.
 in one transaction with the watermark, which only moves forward (`greatest`). A saturated page
 that does not pass the stored watermark is walked inside the run — the next page starts at the
 previous page's max version — so a burst inside the overlap window neither stalls the cursor nor
-skips late commits. The timestamp cliff is raised only for a saturated page whose rows all share
-one version at or after the watermark. A run fetches at most `max-pages-per-run` pages. A poison
-row (undecodable, or a data-integrity violation) is dead-lettered once and the watermark still
-advances past it; any other failure (HTTP, timeout, pool, deadlock) fails the run with no
-watermark movement, and the next fire retries. **Assumed of the endpoint (confirm with the wallet
+skips late commits. A full page whose rows all share one version V below the watermark steps the
+cursor to V + 1 µs (`wqs.delta.version.overflow`) — rows beyond the page at exactly V are the only
+ones that can be missed until a tiebreaker exists (O-1). The timestamp cliff is raised only for a
+saturated page whose rows all share one version at or after the watermark. A run fetches at most `max-pages-per-run` pages. A row whose
+failure is not transient is dead-lettered once (deduplicated across overlap re-reads) and the
+watermark still advances past it; a transient failure, or any HTTP failure, fails the run with no
+watermark movement, and the next fire retries. **Transient** is one explicit allowlist shared by
+the stream and the poller (`wqs.ingest.TransientFailures`): Spring's transient, recoverable,
+resource-failure (connection), pessimistic-locking and query-timeout exceptions, and SQLState
+`40P01`, `40001`, `55P03` and class `08`, found anywhere in the cause chain. Everything else —
+bad data, data-integrity violations, and bugs such as an NPE — is dead-lettered, so no single
+message can stall ingestion. **Assumed of the endpoint (confirm with the wallet
 team):** rows are ordered by version ascending, and the cursor parameter is inclusive.
 
 Two hazards follow from a timestamp-only cursor:
@@ -1493,6 +1500,7 @@ none can freeze when the code that would have "set" it stops running.
 | `wqs.delta.overlap.saturated` | counter | — | a saturated page that did not pass the watermark — the in-run window walk took over |
 | `wqs.delta.watermark.age.seconds` | gauge | — | now − watermark; data age (a quiet feed also raises it) |
 | `wqs.delta.timestampcliff` | counter | — | the unhandleable condition in §4 |
+| `wqs.delta.version.overflow` | counter | — | a full single-version page below the watermark; cursor stepped 1 µs |
 | `wqs.delta.rows` | counter | `outcome` = inserted, updated, duplicate, stale, skipped, dead-lettered | per-row result |
 | `wqs.delta.stale` | counter | — | older versions ignored |
 | `wqs.delta.poll.failures` | counter | — | failed runs (HTTP, decode-of-page, transient DB); retried next fire |
