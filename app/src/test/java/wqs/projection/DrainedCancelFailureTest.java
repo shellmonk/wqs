@@ -19,8 +19,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.db.TxTypeRegistry;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 import wqs.ingest.stream.StreamOffsetStore;
@@ -55,11 +54,10 @@ class DrainedCancelFailureTest extends PostgresTestBase {
         @Bean
         @Primary
         CancellationApplier trappedCancellationApplier(
-                JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
-                TxTypeRegistry txTypes) {
-            return new CancellationApplier(jdbc, counterUpdater, pendingCancelStore, txTypes) {
+                JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore) {
+            return new CancellationApplier(jdbc, counterUpdater, pendingCancelStore) {
                 @Override
-                public boolean apply(ProjectionItem cancel) {
+                public boolean apply(ProjectionTransaction cancel) {
                     boolean result = super.apply(cancel);
                     if (cancel.sourceId().equals("c-boom") && boomCalls.incrementAndGet() == 2) {
                         throw new IllegalStateException("simulated failure applying drained cancel");
@@ -85,7 +83,7 @@ class DrainedCancelFailureTest extends PostgresTestBase {
     @Test
     void a_failing_drained_cancel_is_dead_lettered_and_its_original_stays_projected() {
         writer.apply(new ProjectionBatch(STREAM, List.of(cancel("c-boom", "t1"), cancel("c-ok", "t2")), 1L));
-        assertThat(count("\"wqPendingCancel\"")).isEqualTo(2);
+        assertThat(count("\"wqPrjPendingCancel\"")).isEqualTo(2);
 
         WriteResult result = writer.apply(new ProjectionBatch(STREAM, List.of(tx("t1"), tx("t2")), 2L));
 
@@ -95,7 +93,7 @@ class DrainedCancelFailureTest extends PostgresTestBase {
         assertThat(cancelled("t1")).isFalse();
         // The other drained cancel in the same batch still applied.
         assertThat(cancelled("t2")).isTrue();
-        assertThat(count("\"wqPendingCancel\"")).isZero();
+        assertThat(count("\"wqPrjPendingCancel\"")).isZero();
         assertThat(db().row("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").asMap())
                 .containsEntry("sourceId", "c-boom")
                 .containsEntry("streamOffset", null);
@@ -110,18 +108,18 @@ class DrainedCancelFailureTest extends PostgresTestBase {
                 .allSatisfy(line -> assertThat(line).startsWith("cancel not applied").contains("sourceId=t1"));
     }
 
-    private static ProjectionItem tx(String id) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0, "P11", "instants", "b1", "p-" + id,
+    private static ProjectionTransaction tx(String id) {
+        return new ProjectionTransaction(1L, SourceKind.TRANSACTION, id, T0, "P11", "instants", "b1", "p-" + id,
                 TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
-    private static ProjectionItem cancel(String id, String cancels) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, T0.plusSeconds(60), "P13", "arcade", null, null,
+    private static ProjectionTransaction cancel(String id, String cancels) {
+        return new ProjectionTransaction(1L, SourceKind.TRANSACTION, id, T0.plusSeconds(60), "P13", "arcade", null, null,
                 TxTypes.CANCEL, new BigDecimal("5.0000"), "EUR", null, cancels, null);
     }
 
     private static boolean cancelled(String sourceId) {
-        return db().value("select \"cancelled\" from \"wqCcItem\" where \"sourceId\" = ?", Boolean.class, sourceId);
+        return db().value("select \"cancelled\" from \"wqPrjCcTransaction\" where \"sourceId\" = ?", Boolean.class, sourceId);
     }
 
     private static int count(String table) {

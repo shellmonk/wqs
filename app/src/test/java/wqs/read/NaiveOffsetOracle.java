@@ -12,7 +12,7 @@ import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 
 /**
- * The permanent naive-OFFSET oracle (spec 8.1): straight SQL against the view's item table (level
+ * The permanent naive-OFFSET oracle (spec 8.1): straight SQL against the view's transaction table (level
  * 0) or high-level page index (levels 1-2), no counters, no decomposition. Deliberately obvious and never optimised -- it is what the
  * production reader is compared to.
  */
@@ -30,23 +30,23 @@ public final class NaiveOffsetOracle {
 
     public long count(ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select count(*) from \"" + v.itemTable() + "\" where " + where(f, typeCodes, from, to, binds);
+        String sql = "select count(*) from \"" + v.transactionTable() + "\" where " + where(f, typeCodes, from, to, binds);
         // A non-numeric or null result is a broken oracle, not zero: fail loudly.
         return ((Number) this.sql.value(sql, Object.class, binds.toArray())).longValue();
     }
 
-    public List<ItemEntry> page(ViewKind v, Level0Filter f, Instant from, Instant to, long offset, int limit) {
+    public List<TransactionEntry> page(ViewKind v, Level0Filter f, Instant from, Instant to, long offset, int limit) {
         return page(v, f, Set.of(), from, to, offset, limit);
     }
 
-    /** {@code typeCodes}: the transaction-type filter as codes, matched through "wqTxType" itself. */
-    public List<ItemEntry> page(
+    /** {@code typeCodes}: the transaction-type filter as codes, matched as the stored text. */
+    public List<TransactionEntry> page(
             ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to, long offset, int limit) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select i.*, i.\"detail\"::text as \"detailText\", t.\"code\" as \"typeCode\" from \"" + v.itemTable()
-                + "\" i join \"wqTxType\" t on t.\"typeId\" = i.\"type\" where "
+        String sql = "select i.*, i.\"detail\"::text as \"detailText\", i.\"type\" as \"typeCode\" from \"" + v.transactionTable()
+                + "\" i where "
                 + where(f, typeCodes, from, to, binds)
-                + " order by i.\"occurredAt\" desc, i.\"itemId\" desc offset ? limit ?";
+                + " order by i.\"occurredAt\" desc, i.\"transactionId\" desc offset ? limit ?";
         binds.add(offset);
         binds.add(limit);
         return this.sql.rows(sql, binds.toArray()).stream().map(NaiveOffsetOracle::entry).toList();
@@ -66,12 +66,12 @@ public final class NaiveOffsetOracle {
             w.append(" and \"productType\" = any(?)");
             binds.add(f.productTypes().toArray(String[]::new));
         }
-        if (!f.typeIds().isEmpty()) {
+        if (!f.typeCodes().isEmpty()) {
             w.append(" and \"type\" = any(?)");
-            binds.add(f.typeIds().toArray(Short[]::new));
+            binds.add(f.typeCodes().toArray(String[]::new));
         }
         if (!typeCodes.isEmpty()) {
-            w.append(" and \"type\" in (select \"typeId\" from \"wqTxType\" where \"code\" = any(?))");
+            w.append(" and \"type\" = any(?)");
             binds.add(typeCodes.toArray(String[]::new));
         }
         return w.toString();
@@ -103,8 +103,8 @@ public final class NaiveOffsetOracle {
 
     private static String highLevelTable(ViewKind v) {
         return switch (v) {
-            case WEB -> "wqWebHighLevel";
-            case CC -> "wqCcHighLevel";
+            case WEB -> "wqPrjWebHighLevel";
+            case CC -> "wqPrjCcHighLevel";
         };
     }
 
@@ -124,8 +124,8 @@ public final class NaiveOffsetOracle {
     }
 
     /** Same field rules as the view mappers: kind is the source's name, detail the raw JSON. */
-    private static ItemEntry entry(TestSql.Row r) {
-        return new ItemEntry(
+    private static TransactionEntry entry(TestSql.Row r) {
+        return new TransactionEntry(
                 SourceKind.ofCode(r.get("source", Integer.class)).name(),
                 r.get("sourceId", String.class),
                 r.get("occurredAt", OffsetDateTime.class).toInstant(),

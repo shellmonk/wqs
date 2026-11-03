@@ -4,8 +4,8 @@ import com.fasterxml.jackson.annotation.JsonRawValue;
 import java.math.BigDecimal;
 import java.time.Instant;
 
-/** One level-0 item as returned to clients. "itemId" and "ingestedAt" are deliberately internal. */
-public record ItemEntry(
+/** One level-0 transaction as returned to clients. "transactionId" and "ingestedAt" are deliberately internal. */
+public record TransactionEntry(
         String kind,
         String sourceId,
         Instant occurredAt,

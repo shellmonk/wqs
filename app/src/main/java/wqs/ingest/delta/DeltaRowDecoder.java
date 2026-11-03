@@ -23,8 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Component;
-import wqs.db.TxTypeRegistry;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.projection.source.DeltaRow;
 
@@ -101,10 +100,11 @@ public class DeltaRowDecoder {
     }
 
     /**
-     * @param registry resolves the type code to its stored id, registering an unseen code as NEUTRAL
+     * The type code is kept as-is (plan D1): an unknown code is projected, NEUTRAL.
+     *
      * @throws IllegalArgumentException if the row is poison
      */
-    public DeltaRow decode(JsonNode row, TxTypeRegistry registry) {
+    public DeltaRow decode(JsonNode row) {
         if (row == null || !row.isObject()) {
             throw new IllegalArgumentException("delta row is not a JSON object");
         }
@@ -112,10 +112,10 @@ public class DeltaRowDecoder {
         SourceKind source = properties.sourceOf(sourceValue)
                 .orElseThrow(() -> new IllegalArgumentException("unknown delta source: " + sourceValue));
         return switch (source) {
-            case PAYMENT -> payment(row, registry);
-            case CLAIMABLE_PRIZE -> prize(row, registry);
-            case MANUAL_ADJUSTMENT -> adjustment(row, registry);
-            case LIMIT -> limit(row, registry);
+            case PAYMENT -> payment(row);
+            case CLAIMABLE_PRIZE -> prize(row);
+            case MANUAL_ADJUSTMENT -> adjustment(row);
+            case LIMIT -> limit(row);
             case TRANSACTION -> throw new IllegalArgumentException("transactions are never polled");
         };
     }
@@ -153,7 +153,7 @@ public class DeltaRowDecoder {
         }
     }
 
-    private static DeltaRow payment(JsonNode row, TxTypeRegistry registry) {
+    private static DeltaRow payment(JsonNode row) {
         int ownerType = ownerType(row, "ownerType");
         long userId = id(row, "ownerId");
         long direction = integral(required(row, "paymentInOut"), "paymentInOut", Integer.MAX_VALUE);
@@ -165,18 +165,18 @@ public class DeltaRowDecoder {
         }
         return row(SourceKind.PAYMENT, ownerType, userId, row, "paymentId", "created", "updated",
                 amount, paymentType(row),
-                null, null, null, null, PAYMENT_DETAIL, registry);
+                null, null, null, null, PAYMENT_DETAIL);
     }
 
-    private static DeltaRow prize(JsonNode row, TxTypeRegistry registry) {
+    private static DeltaRow prize(JsonNode row) {
         return row(SourceKind.CLAIMABLE_PRIZE, PLAYER, id(row, "playerId"), row, "id", "created", "updated",
                 money(required(row, "prizeAmount"), "prizeAmount"), CLAIMABLE_PRIZE_TYPE,
                 text(row, "productId"), text(row, "productType"), text(row, "batchId"), text(row, "subBatchId"),
-                PRIZE_DETAIL, registry);
+                PRIZE_DETAIL);
     }
 
     /** No {@code created} column: the request's {@code issued} is when it came to exist; no {@code updated}: {@code statusDate}. */
-    private static DeltaRow adjustment(JsonNode row, TxTypeRegistry registry) {
+    private static DeltaRow adjustment(JsonNode row) {
         int ownerType = ownerType(row, "userType");
         long userId = id(row, "userId");
         String operation = textual(required(row, "operation"), "operation");
@@ -188,17 +188,17 @@ public class DeltaRowDecoder {
         }
         return row(SourceKind.MANUAL_ADJUSTMENT, ownerType, userId, row, "id", "issued", "statusDate",
                 amount, typeCode(textual(required(row, "transactionType"), "transactionType"), "transactionType"),
-                null, null, null, null, ADJUSTMENT_DETAIL, registry);
+                null, null, null, null, ADJUSTMENT_DETAIL);
     }
 
-    private static DeltaRow limit(JsonNode row, TxTypeRegistry registry) {
+    private static DeltaRow limit(JsonNode row) {
         int ownerType = ownerType(row, "userType");
         long userId = id(row, "userId");
         JsonNode amount = optional(row, "amount");
         return row(SourceKind.LIMIT, ownerType, userId, row, "id", "created", "updated",
                 amount == null ? BigDecimal.ZERO : money(amount, "amount"),
                 typeCode(textual(required(row, "limitType"), "limitType"), "limitType"),
-                null, null, null, null, LIMIT_DETAIL, registry);
+                null, null, null, null, LIMIT_DETAIL);
     }
 
     private static DeltaRow row(
@@ -206,17 +206,17 @@ public class DeltaRowDecoder {
             String idField, String occurredAtField, String versionField,
             BigDecimal amount, String typeCode,
             String productId, String productType, String batchId, String subBatchId,
-            List<String> detailFields, TxTypeRegistry registry) {
+            List<String> detailFields) {
         String sourceId = Long.toString(id(row, idField));
         Instant occurredAt = timestamp(row, occurredAtField);
         Instant version = timestamp(row, versionField);
         String currency = text(row, "currency");
         String detail = detail(row, detailFields);
-        ProjectionItem item = new ProjectionItem(
+        ProjectionTransaction transaction = new ProjectionTransaction(
                 userId, source, sourceId, occurredAt, productId, productType, batchId, subBatchId,
-                registry.idOf(typeCode), amount, currency == null ? NO_CURRENCY : currency,
+                typeCode, amount, currency == null ? NO_CURRENCY : currency,
                 null, null, detail);
-        return new DeltaRow(source, ownerType, userId, version, item);
+        return new DeltaRow(source, ownerType, userId, version, transaction);
     }
 
     private static String paymentType(JsonNode row) {

@@ -35,7 +35,7 @@ class ReadMetricsTest {
         assertThat(t.count()).isEqualTo(1);
     }
 
-    /** Item 3 of the review: recording after a successful read must never hit a registration. */
+    /** Transaction 3 of the review: recording after a successful read must never hit a registration. */
     @Test
     void every_meter_is_registered_up_front() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();

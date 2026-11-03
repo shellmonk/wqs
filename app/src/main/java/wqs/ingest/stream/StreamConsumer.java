@@ -14,8 +14,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import wqs.db.TxTypeRegistry;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.ingest.DeadLetterStore;
 import wqs.ingest.TransientFailures;
 import wqs.metrics.CachedGaugeValue;
@@ -52,7 +51,6 @@ public class StreamConsumer {
     private final StreamSource source;
     private final StreamProperties properties;
     private final StreamPayloadMapper payloadMapper;
-    private final TxTypeRegistry txTypes;
     private final ProjectionWriter writer;
     private final StreamOffsetStore offsetStore;
     private final MeterRegistry registry;
@@ -82,7 +80,6 @@ public class StreamConsumer {
             StreamSource source,
             StreamProperties properties,
             StreamPayloadMapper payloadMapper,
-            TxTypeRegistry txTypes,
             ProjectionWriter writer,
             StreamOffsetStore offsetStore,
             MeterRegistry registry,
@@ -91,7 +88,6 @@ public class StreamConsumer {
         this.source = source;
         this.properties = properties;
         this.payloadMapper = payloadMapper;
-        this.txTypes = txTypes;
         this.writer = writer;
         this.offsetStore = offsetStore;
         this.registry = registry;
@@ -113,7 +109,7 @@ public class StreamConsumer {
                 .description("Events per applied stream batch")
                 .register(registry);
         this.batchDuration = Timer.builder("wqs.ingest.batch.duration")
-                .description("Time to apply one stream batch, including any per-item fallback")
+                .description("Time to apply one stream batch, including any per-transaction fallback")
                 .register(registry);
 
         // Head minus committed. Cached: each scrape costs a broker round trip and a DB read. NaN
@@ -207,23 +203,22 @@ public class StreamConsumer {
                 skipNonPlayer(payload, offset);
                 return;
             }
-            ProjectionItem item;
+            ProjectionTransaction transaction;
             try {
-                item = payloadMapper.toItem(payload, txTypes);
+                transaction = payloadMapper.toTransaction(payload);
             } catch (RuntimeException e) {
                 if (TransientFailures.isTransient(e)) {
                     // Infrastructure (a pool timeout, a lost connection, a lock conflict): falls to the
                     // outer catch and retries via recovery, never dead-lettering.
                     throw e;
                 }
-                // Poison: bad input (the mapper and the domain reject it with IAE), a DataIntegrity-
-                // ViolationException from the type registry's first-sighting insert, or a bug -- each
+                // Poison: bad input (the mapper and the domain reject it with IAE) or a bug -- each
                 // would fail the same way on every retry and stall the stream for good. One rule for
                 // every path: TransientFailures.
                 deadLetterUnmappable(payload, offset, e);
                 return;
             }
-            accumulator.add(item, offset);
+            accumulator.add(transaction, offset);
             accumulator.drainIfReady().ifPresent(this::applyBatch);
         } catch (Throwable e) {
             enterRecovery(e);
@@ -364,14 +359,14 @@ public class StreamConsumer {
     }
 
     /**
-     * Applies the batch whole; failing that, item by item so one poison event cannot discard its
-     * neighbours; an item that still fails is dead-lettered. The batch offset is written only
-     * once every item is projected or dead-lettered. Any exception escaping this method (retries
+     * Applies the batch whole; failing that, transaction by transaction so one poison event cannot discard its
+     * neighbours; a transaction that still fails is dead-lettered. The batch offset is written only
+     * once every transaction is projected or dead-lettered. Any exception escaping this method (retries
      * AND the dead-letter write failed, or the offset write failed) leaves the stored offset
      * untouched, and the caller enters recovery.
      */
     private void applyBatch(ProjectionBatch batch) {
-        batchSize.record(batch.items().size());
+        batchSize.record(batch.transactions().size());
         Timer.Sample sample = Timer.start(registry);
         try {
             applyBatchTimed(batch);
@@ -386,7 +381,7 @@ public class StreamConsumer {
             try {
                 WriteResult result = writer.apply(batch);
                 count(result);
-                recordLag(batch.items());
+                recordLag(batch.transactions());
                 return;
             } catch (RuntimeException e) {
                 batchError = e;
@@ -394,17 +389,17 @@ public class StreamConsumer {
                         attempt, properties.maxAttempts(), batch.stream(), batch.committedOffset(), e);
             }
         }
-        log.warn("Batch of {} failed {} times on stream {}; applying item by item",
-                batch.items().size(), properties.maxAttempts(), batch.stream(), batchError);
+        log.warn("Batch of {} failed {} times on stream {}; applying transaction by transaction",
+                batch.transactions().size(), properties.maxAttempts(), batch.stream(), batchError);
 
-        List<ProjectionItem> projectedItems = new java.util.ArrayList<>();
-        for (int i = 0; i < batch.items().size(); i++) {
-            ProjectionItem item = batch.items().get(i);
-            if (applyAlone(batch, item, batch.offsetOf(i))) {
-                projectedItems.add(item);
+        List<ProjectionTransaction> projectedTransactions = new java.util.ArrayList<>();
+        for (int i = 0; i < batch.transactions().size(); i++) {
+            ProjectionTransaction transaction = batch.transactions().get(i);
+            if (applyAlone(batch, transaction, batch.offsetOf(i))) {
+                projectedTransactions.add(transaction);
             }
         }
-        recordLag(projectedItems);
+        recordLag(projectedTransactions);
 
         if (batch.committedOffset() != null) {
             offsetStore.write(batch.stream(), batch.committedOffset());
@@ -412,16 +407,16 @@ public class StreamConsumer {
     }
 
     /**
-     * The dead-letter row records the item's OWN offset (the batch's highest only if unknown) and
+     * The dead-letter row records the transaction's OWN offset (the batch's highest only if unknown) and
      * its TRUE attempt count: maxAttempts as part of the batch plus maxAttempts alone.
      */
-    private boolean applyAlone(ProjectionBatch batch, ProjectionItem item, Long itemOffset) {
+    private boolean applyAlone(ProjectionBatch batch, ProjectionTransaction transaction, Long transactionOffset) {
         RuntimeException lastError = null;
         for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
             try {
-                // The item's own offset, so a rule rejection inside the writer records where it was.
+                // The transaction's own offset, so a rule rejection inside the writer records where it was.
                 WriteResult result = writer.apply(new ProjectionBatch(
-                        batch.stream(), List.of(item), null, itemOffset == null ? null : List.of(itemOffset)));
+                        batch.stream(), List.of(transaction), null, transactionOffset == null ? null : List.of(transactionOffset)));
                 count(result);
                 return true;
             } catch (RuntimeException e) {
@@ -433,14 +428,14 @@ public class StreamConsumer {
                     throw e;
                 }
                 lastError = e;
-                log.warn("Item {} attempt {}/{} failed", item.sourceId(), attempt, properties.maxAttempts(), e);
+                log.warn("Transaction {} attempt {}/{} failed", transaction.sourceId(), attempt, properties.maxAttempts(), e);
             }
         }
         // If this write also fails the exception escapes: the offset must not move.
-        Long offset = itemOffset != null ? itemOffset : batch.committedOffset();
-        deadLetterStore.record(batch.stream(), offset, item, lastError, 2 * properties.maxAttempts());
+        Long offset = transactionOffset != null ? transactionOffset : batch.committedOffset();
+        deadLetterStore.record(batch.stream(), offset, transaction, lastError, 2 * properties.maxAttempts());
         deadLetteredCounter.increment();
-        log.error("Dead-lettered item {} (offset {}) on stream {}", item.sourceId(), offset, batch.stream());
+        log.error("Dead-lettered transaction {} (offset {}) on stream {}", transaction.sourceId(), offset, batch.stream());
         return false;
     }
 
@@ -474,7 +469,7 @@ public class StreamConsumer {
         skipMetrics.zeroAmount(result.skipped());
     }
 
-    private void recordLag(List<ProjectionItem> items) {
-        items.stream().map(ProjectionItem::occurredAt).max(Instant::compareTo).ifPresent(lastProjectedAt::set);
+    private void recordLag(List<ProjectionTransaction> transactions) {
+        transactions.stream().map(ProjectionTransaction::occurredAt).max(Instant::compareTo).ifPresent(lastProjectedAt::set);
     }
 }

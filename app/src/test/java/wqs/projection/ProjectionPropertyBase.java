@@ -8,7 +8,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.gen.EventGenerators;
 
 /** Shared setup for the projection properties (spec 8.1). */
@@ -34,11 +34,11 @@ public abstract class ProjectionPropertyBase extends PostgresTestBase {
     }
 
     /** Small batches, since batch boundaries are themselves a source of reordering. */
-    protected void applyBatches(List<ProjectionItem> items) {
+    protected void applyBatches(List<ProjectionTransaction> transactions) {
         int batchSize = 3;
-        for (int from = 0; from < items.size(); from += batchSize) {
-            List<ProjectionItem> slice =
-                    items.subList(from, Math.min(from + batchSize, items.size()));
+        for (int from = 0; from < transactions.size(); from += batchSize) {
+            List<ProjectionTransaction> slice =
+                    transactions.subList(from, Math.min(from + batchSize, transactions.size()));
             writer.apply(new ProjectionBatch("wallet-transactions", slice, (long) from));
         }
     }

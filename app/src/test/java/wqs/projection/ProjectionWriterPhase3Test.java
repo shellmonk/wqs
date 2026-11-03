@@ -16,12 +16,12 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.Products;
 import wqs.gen.TxTypes;
 
-/** The full projection transaction: items, rollups, page index and counters together. */
+/** The full projection transaction: projected transactions, rollups, page index and counters together. */
 @SpringBootTest
 class ProjectionWriterPhase3Test extends PostgresTestBase {
 
@@ -46,65 +46,65 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     @Test
-    void one_batch_populates_items_rollups_page_index_and_counters() {
+    void one_batch_populates_transactions_rollups_page_index_and_counters() {
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "b1", "p1"), tx("t2", "b1", "p1"), tx("t3", "b1", "p2")), 1L));
 
-        assertThat(count("wqWebItem")).isEqualTo(3);
-        assertThat(count("wqSession")).isEqualTo(1);
-        assertThat(count("wqPlay")).isEqualTo(2);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(3);
+        assertThat(count("wqPrjSession")).isEqualTo(1);
+        assertThat(count("wqPrjPlay")).isEqualTo(2);
         // One high-level row per view for the single session.
-        assertThat(count("wqWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqCcHighLevel")).isEqualTo(1);
+        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
+        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
     }
 
     @Test
-    void item_counters_match_item_rows_and_high_level_counters_match_page_rows() {
+    void transaction_counters_match_transaction_rows_and_high_level_counters_match_page_rows() {
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "b1", "p1"), tx("t2", "b1", "p1")), 1L));
 
-        assertThat(sentinel("wqCountDay", 0)).isEqualTo(2);   // ITEM
-        assertThat(sentinel("wqCountDay", 1)).isEqualTo(1);   // HIGH_LEVEL -- one session
+        assertThat(sentinel("wqPrjCountDay", 0)).isEqualTo(2);   // TRANSACTION
+        assertThat(sentinel("wqPrjCountDay", 1)).isEqualTo(1);   // HIGH_LEVEL -- one session
     }
 
     @Test
-    void an_unsessioned_item_is_its_own_page_unit() {
-        ProjectionItem payment = new ProjectionItem(
+    void an_unsessioned_transaction_is_its_own_page_unit() {
+        ProjectionTransaction payment = new ProjectionTransaction(
                 1L, SourceKind.PAYMENT, "pay1", T0, null, null, null, null,
                 TxTypes.NEUTRAL, new BigDecimal("20.0000"), "EUR", null, null, null);
 
         writer.apply(new ProjectionBatch("s", List.of(payment), 1L));
 
-        assertThat(count("wqCcHighLevel")).isEqualTo(1);
-        assertThat(count("wqSession")).isZero();
+        assertThat(count("wqPrjCcHighLevel")).isEqualTo(1);
+        assertThat(count("wqPrjSession")).isZero();
     }
 
     @Test
-    void replayed_items_do_not_double_count_anything() {
+    void replayed_transactions_do_not_double_count_anything() {
         ProjectionBatch batch = new ProjectionBatch("s", List.of(tx("t1", "b1", "p1")), 1L);
         writer.apply(batch);
 
         writer.apply(batch);
 
-        assertThat(count("wqWebItem")).isEqualTo(1);
-        assertThat(sentinel("wqCountDay", 0)).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(sentinel("wqPrjCountDay", 0)).isEqualTo(1);
         assertThat(sessionTxCount()).isEqualTo(1);
     }
 
     @Test
-    void a_cancellation_item_is_counted_as_an_item_row_but_creates_no_page_unit() {
-        ProjectionItem cancel = new ProjectionItem(
+    void a_cancellation_transaction_is_counted_as_an_transaction_row_but_creates_no_page_unit() {
+        ProjectionTransaction cancel = new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, "c1", T0, "P11", "instants", "b1", "p1",
                 TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, "t1", null);
 
         writer.apply(new ProjectionBatch("s", List.of(cancel), 1L));
 
-        // It is a row in both item tables, so P-2 requires it to be counted at ITEM level.
-        assertThat(count("wqWebItem")).isEqualTo(1);
-        assertThat(sentinel("wqCountDay", 0)).isEqualTo(1);
-        assertThat(count("wqWebHighLevel")).isZero();
-        assertThat(sentinel("wqCountDay", 1)).isZero();
-        assertThat(count("wqSession")).isZero();
+        // It is a row in both transaction tables, so P-2 requires it to be counted at TRANSACTION level.
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(sentinel("wqPrjCountDay", 0)).isEqualTo(1);
+        assertThat(count("wqPrjWebHighLevel")).isZero();
+        assertThat(sentinel("wqPrjCountDay", 1)).isZero();
+        assertThat(count("wqPrjSession")).isZero();
     }
 
     /**
@@ -123,17 +123,17 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 ccOnlyPayment("pay1", T0.plusSeconds(60)),
                 txAt("t1", "b1", "p1", oct31)), 1L));
 
-        // The session row now sits at its earliest item, in October, in both views.
-        assertThat(count("wqWebHighLevel")).isEqualTo(1);
-        assertThat(count("wqCcHighLevel")).isEqualTo(2);
+        // The session row now sits at its earliest transaction, in October, in both views.
+        assertThat(count("wqPrjWebHighLevel")).isEqualTo(1);
+        assertThat(count("wqPrjCcHighLevel")).isEqualTo(2);
         for (int view : List.of(1, 2)) {
             assertThat(sentinelsByDay(view, 1))
                     .as("HIGH_LEVEL sentinel vs page-index rows, view %d", view)
-                    .isEqualTo(liveByDay(view == 1 ? "wqWebHighLevel" : "wqCcHighLevel",
+                    .isEqualTo(liveByDay(view == 1 ? "wqPrjWebHighLevel" : "wqPrjCcHighLevel",
                             "occurredAt"));
             assertThat(sentinelsByDay(view, 0))
-                    .as("ITEM sentinel vs item rows, view %d", view)
-                    .isEqualTo(liveByDay(view == 1 ? "wqWebItem" : "wqCcItem", "occurredAt"));
+                    .as("TRANSACTION sentinel vs transaction rows, view %d", view)
+                    .isEqualTo(liveByDay(view == 1 ? "wqPrjWebTransaction" : "wqPrjCcTransaction", "occurredAt"));
         }
         // The month tier agrees too: October holds the session, November only the payment.
         assertThat(monthSentinel(2, 1, "2034-10-01")).isEqualTo(1);
@@ -145,7 +145,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     /**
      * Oracle check for product changes: session b2's key (start, LEAST(productType)) depends on
      * arrival order. It opens with no product, is raised to 11 in place, lowered to 7 in place by
-     * a /cc-only item (which also materialises nothing new: /cc already holds the row), then
+     * a /cc-only projected transaction (which also materialises nothing new: /cc already holds the row), then
      * re-anchored a day earlier by a TRANSACTION at product 5. Per-product HIGH_LEVEL rows must
      * follow every step, not only the all-products sentinel.
      */
@@ -155,12 +155,12 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 txProduct("u1", "b2", "p1", T0, null),
                 txProduct("u2", "b2", "p2", T0.plusSeconds(10), 11),
-                // Ties u1 at the session's start with a lower sourceId: the first item (D6).
+                // Ties u1 at the session's start with a lower sourceId: the first transaction (D6).
                 ccOnlyAdjustment("a1", "b2", T0, 7)), 1L));
 
         // Product-only changes: still one row per view, now at product 7.
-        assertThat(highLevelProducts("wqWebHighLevel")).containsExactly(Products.id(7));
-        assertThat(highLevelProducts("wqCcHighLevel")).containsExactly(Products.id(7));
+        assertThat(highLevelProducts("wqPrjWebHighLevel")).containsExactly(Products.id(7));
+        assertThat(highLevelProducts("wqPrjCcHighLevel")).containsExactly(Products.id(7));
         assertThat(productDayCount(1, 1, 7, T0)).isEqualTo(1);
         assertThat(productDayCount(1, 1, 11, T0)).isZero();
         assertEveryCounterMatchesTheProjection();
@@ -169,7 +169,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
                 txProduct("u0", "b2", "p0", dayBefore, 5)), 2L));
 
         // Start AND product moved: the old (T0, 7) rows are empty, (T0 - 1 day, 5) holds the unit.
-        assertThat(highLevelProducts("wqCcHighLevel")).containsExactly(Products.id(5));
+        assertThat(highLevelProducts("wqPrjCcHighLevel")).containsExactly(Products.id(5));
         assertThat(productDayCount(2, 1, 7, T0)).isZero();
         assertThat(productDayCount(2, 1, 5, dayBefore)).isEqualTo(1);
         assertThat(productDayCount(2, 1, 0, T0)).isZero();
@@ -179,31 +179,31 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
     /**
      * R98 / D6: a session's page rows carry the SESSION's currency in every view, whatever order
-     * its items arrive in. t1 (both views) and a1 (/cc only) each open the session's row in a view
+     * its transactions arrive in. t1 (both views) and a1 (/cc only) each open the session's row in a view
      * first depending on order; t0 (a day earlier) re-anchors it, so the row is also moved. Every
      * order leaves both views' rows at USD, identical, and agreeing with the session. A later
-     * item in another currency is dead-lettered and changes nothing (single-currency session).
+     * transaction in another currency is dead-lettered and changes nothing (single-currency session).
      */
     @Test
     void session_page_rows_carry_the_session_currency_in_every_view_in_any_arrival_order() {
         Instant dayBefore = T0.minus(1, java.time.temporal.ChronoUnit.DAYS);
-        List<ProjectionItem> items = List.of(
+        List<ProjectionTransaction> transactions = List.of(
                 txCurrency("t1", T0, "USD"),
-                new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a1", T0.plusSeconds(10), "P11",
+                new ProjectionTransaction(1L, SourceKind.MANUAL_ADJUSTMENT, "a1", T0.plusSeconds(10), "P11",
                         "instants", "b9", null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "USD", null, null, null),
                 txCurrency("t0", dayBefore, "USD"));
 
         List<String> expected = null;
-        for (List<ProjectionItem> order : permutations(items)) {
+        for (List<ProjectionTransaction> order : permutations(transactions)) {
             clearProjection();
             long offset = 0;
-            for (ProjectionItem item : order) {
-                writer.apply(new ProjectionBatch("s", List.of(item), ++offset));
+            for (ProjectionTransaction transaction : order) {
+                writer.apply(new ProjectionBatch("s", List.of(transaction), ++offset));
             }
             List<String> rows = sessionPageRows();
-            String described = order.stream().map(ProjectionItem::sourceId).toList().toString();
+            String described = order.stream().map(ProjectionTransaction::sourceId).toList().toString();
             assertThat(rows).as(described).hasSize(2).allMatch(row -> row.contains("USD"));
-            String sessionCurrency = db().value("select \"currency\" from \"wqSession\"", String.class);
+            String sessionCurrency = db().value("select \"currency\" from \"wqPrjSession\"", String.class);
             assertThat(sessionCurrency).as(described).isEqualTo("USD");
             assertThat(new ProjectionInvariants(jdbc()).drift()).as(described).isEmpty();
             if (expected == null) {
@@ -214,7 +214,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         }
 
         WriteResult mismatch = writer.apply(new ProjectionBatch("s", List.of(
-                new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a2", dayBefore.minusSeconds(5), "P11",
+                new ProjectionTransaction(1L, SourceKind.MANUAL_ADJUSTMENT, "a2", dayBefore.minusSeconds(5), "P11",
                         "instants", "b9", null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "AUD", null, null, null)),
                 9L));
         assertThat(mismatch.deadLettered()).isEqualTo(1);
@@ -225,26 +225,26 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     private List<String> sessionPageRows() {
         return db().maps("""
                 select 'web' as v, "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
-                from "wqWebHighLevel" where "kind" = 0
+                from "wqPrjWebHighLevel" where "kind" = 0
                 union all
                 select 'cc', "occurredAt", "productId", "productType", "currency", "visibleExclCancelled"
-                from "wqCcHighLevel" where "kind" = 0
+                from "wqPrjCcHighLevel" where "kind" = 0
                 order by 1""").stream().map(r -> r.values().toString()).toList();
     }
 
-    private ProjectionItem txCurrency(String id, Instant at, String currency) {
-        return new ProjectionItem(
+    private ProjectionTransaction txCurrency(String id, Instant at, String currency) {
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, id, at, "P11", "instants", "b9", "b9-p",
                 TxTypes.PLAY, new BigDecimal("5.0000"), currency, null, null, null);
     }
 
-    private static <T> List<List<T>> permutations(List<T> items) {
-        if (items.isEmpty()) {
+    private static <T> List<List<T>> permutations(List<T> transactions) {
+        if (transactions.isEmpty()) {
             return List.of(List.of());
         }
         List<List<T>> result = new java.util.ArrayList<>();
-        for (int i = 0; i < items.size(); i++) {
-            List<T> rest = new java.util.ArrayList<>(items);
+        for (int i = 0; i < transactions.size(); i++) {
+            List<T> rest = new java.util.ArrayList<>(transactions);
             T head = rest.remove(i);
             for (List<T> tail : permutations(rest)) {
                 List<T> order = new java.util.ArrayList<>();
@@ -268,40 +268,40 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     /** The day counter at test product {@code product}'s type; 0 reads the ALL sentinel ''. */
     private int productDayCount(int view, int pageUnit, int product, Instant at) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqCountDay"
-                where "viewKind" = ? and "pageUnit" = ? and "productType" = ? and "typeId" = 0
+                select coalesce(sum("cntAll"),0)::int from "wqPrjCountDay"
+                where "viewKind" = ? and "pageUnit" = ? and "productType" = ? and "type" = ''
                   and "period" = (?::timestamptz at time zone 'UTC')::date
                 """, Integer.class, (short) view, (short) pageUnit, product == 0 ? "" : Products.type(product),
                 at.toString());
     }
 
-    private ProjectionItem tx(String id, String batchId, String subBatchId) {
+    private ProjectionTransaction tx(String id, String batchId, String subBatchId) {
         return txAt(id, batchId, subBatchId, T0);
     }
 
-    private ProjectionItem txAt(String id, String batchId, String subBatchId, Instant at) {
-        return new ProjectionItem(
+    private ProjectionTransaction txAt(String id, String batchId, String subBatchId, Instant at) {
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, id, at, "P11", "instants", batchId, subBatchId,
                 TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
-    private ProjectionItem txProduct(
+    private ProjectionTransaction txProduct(
             String id, String batchId, String subBatchId, Instant at, Integer product) {
-        return new ProjectionItem(
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, id, at,
                 product == null ? null : Products.id(product),
                 product == null ? null : Products.type(product), batchId, subBatchId,
                 TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
-    private ProjectionItem ccOnlyAdjustment(String id, String batchId, Instant at, int product) {
-        return new ProjectionItem(
+    private ProjectionTransaction ccOnlyAdjustment(String id, String batchId, Instant at, int product) {
+        return new ProjectionTransaction(
                 1L, SourceKind.MANUAL_ADJUSTMENT, id, at, Products.id(product), Products.type(product),
                 batchId, null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
-    private ProjectionItem ccOnlyPayment(String id, Instant at) {
-        return new ProjectionItem(
+    private ProjectionTransaction ccOnlyPayment(String id, Instant at) {
+        return new ProjectionTransaction(
                 1L, SourceKind.PAYMENT, id, at, null, null, null, null,
                 TxTypes.NEUTRAL, new BigDecimal("20.0000"), "EUR", null, null, null);
     }
@@ -313,14 +313,14 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     private int sentinel(String table, int pageUnit) {
         return db().value("""
                 select coalesce(sum("cntAll"),0)::int from "%s"
-                where "viewKind" = 1 and "pageUnit" = ? and "productType" = '' and "typeId" = 0
+                where "viewKind" = 1 and "pageUnit" = ? and "productType" = '' and "type" = ''
                 """.formatted(table), Integer.class, (short) pageUnit);
     }
 
     private int monthSentinel(int view, int pageUnit, String period) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqCountMonth"
-                where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "typeId" = 0
+                select coalesce(sum("cntAll"),0)::int from "wqPrjCountMonth"
+                where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
                   and "period" = ?::date
                 """, Integer.class, (short) view, (short) pageUnit, period);
     }
@@ -328,8 +328,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     /** Non-zero day-tier sentinel cntAll per UTC day for one view and page unit. */
     private Map<String, Integer> sentinelsByDay(int view, int pageUnit) {
         return toMap(db().rows("""
-                select "period"::text as d, "cntAll"::int as n from "wqCountDay"
-                where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "typeId" = 0
+                select "period"::text as d, "cntAll"::int as n from "wqPrjCountDay"
+                where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
                   and "cntAll" > 0
                 """, (short) view, (short) pageUnit));
     }
@@ -348,6 +348,6 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     private int sessionTxCount() {
-        return db().value("select \"txCount\" from \"wqSession\"", Integer.class);
+        return db().value("select \"txCount\" from \"wqPrjSession\"", Integer.class);
     }
 }

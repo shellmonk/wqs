@@ -16,7 +16,7 @@ public record ProjectionResponse<T>(int pageNumber, long pagesAvailable, int pag
     /** The level-0 response for a reader page. */
     public static ProjectionResponse<TxView> ofLevel0(ProjectionPage page) {
         return new ProjectionResponse<>((int) page.page(), page.totalPages(), (int) page.pageSize(),
-                page.totalItems(), page.items().stream().map(TxView::of).toList());
+                page.totalItems(), page.transactions().stream().map(TxView::of).toList());
     }
 
     /** The level-1/2 response for a high-level page served at {@code pageSize} (the effective size). */

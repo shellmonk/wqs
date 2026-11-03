@@ -8,7 +8,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 
@@ -31,11 +31,11 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "p1", T0, TxTypes.PLAY, "5.0000"),
                 tx("t2", "p2", T0.plusSeconds(30), TxTypes.WIN, "-7.0000"),
-                // A /cc-only item a day earlier at a lower product: the session's key moves.
-                new ProjectionItem(1L, SourceKind.MANUAL_ADJUSTMENT, "a1",
+                // A /cc-only transaction a day earlier at a lower product: the session's key moves.
+                new ProjectionTransaction(1L, SourceKind.MANUAL_ADJUSTMENT, "a1",
                         T0.minusSeconds(86_400), "P07", "bingo", "b1", null, TxTypes.NEUTRAL,
                         new BigDecimal("1.0000"), "EUR", null, null, null),
-                new ProjectionItem(1L, SourceKind.PAYMENT, "pay1", T0.plusSeconds(3_600), null,
+                new ProjectionTransaction(1L, SourceKind.PAYMENT, "pay1", T0.plusSeconds(3_600), null,
                         null, null, null, TxTypes.NEUTRAL, new BigDecimal("20.0000"), "EUR", null, null, null),
                 cancel(SourceKind.TRANSACTION, "c1", "t1"),
                 cancel(SourceKind.PAYMENT, "pc1", "pay1")), 1L));
@@ -48,7 +48,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_bumped_month_tier_product_counter_is_counter_drift() {
         execute("""
-                update "wqCountMonth" set "cntAll" = "cntAll" + 1
+                update "wqPrjCountMonth" set "cntAll" = "cntAll" + 1
                 where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
@@ -56,25 +56,25 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     }
 
     /**
-     * Ruling R1: the write path keys every counter at the ALL-types sentinel 0 for now, so a row
-     * at a real type id is drift -- the oracle compares "typeId" too, not only the product type.
+     * Ruling R1: the write path keys every HIGH_LEVEL counter at the ALL-types sentinel '', so a
+     * row at a real type code is drift -- the oracle compares "type" too, not only the product type.
      */
     @Test
-    void a_counter_row_at_a_real_type_id_is_counter_drift() {
+    void a_counter_row_at_a_real_type_code_is_counter_drift() {
         execute("""
-                update "wqCountMonth" set "typeId" = 1
+                update "wqPrjCountMonth" set "type" = 'TT_BUY'
                 where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
 
         assertThat(invariants.counterDrift()).hasSize(2)
-                .anySatisfy(d -> assertThat(d).startsWith("orphan counter row").contains("typeId=1"))
-                .anySatisfy(d -> assertThat(d).startsWith("missing counter row").contains("typeId=0"));
+                .anySatisfy(d -> assertThat(d).startsWith("orphan counter row").contains(" type=TT_BUY "))
+                .anySatisfy(d -> assertThat(d).startsWith("missing counter row").contains(" type= "));
     }
 
     @Test
     void a_stored_zero_counter_row_is_counter_drift() {
         execute("""
-                insert into "wqCountDay"
-                values (1, 1, 1, 'ghost', 0, date '2034-03-30', 0, 0)""");
+                insert into "wqPrjCountDay"
+                values (1, 1, 1, 'ghost', '', date '2034-03-30', 0, 0)""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
                 .startsWith("orphan counter row").contains("productType=ghost");
@@ -83,8 +83,8 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_deleted_counter_row_is_counter_drift() {
         execute("""
-                delete from "wqCountDay"
-                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "typeId" = 0
+                delete from "wqPrjCountDay"
+                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "type" = ''
                   and "period" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
@@ -93,10 +93,10 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
     @Test
     void a_changed_excl_cancelled_count_alone_is_counter_drift() {
-        // /cc items on April 1: pay1 (cancelled), c1 and pc1 -- excl is 2 of 3.
+        // /cc transactions on April 1: pay1 (cancelled), c1 and pc1 -- excl is 2 of 3.
         execute("""
-                update "wqCountDay" set "cntExclCancelled" = "cntExclCancelled" - 1
-                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "typeId" = 0
+                update "wqPrjCountDay" set "cntExclCancelled" = "cntExclCancelled" - 1
+                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "type" = ''
                   and "period" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
@@ -107,9 +107,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     // --- P-4 -------------------------------------------------------------------------------------
 
     @Test
-    void a_play_without_items_is_aggregation_drift() {
+    void a_play_without_transactions_is_aggregation_drift() {
         execute("""
-                insert into "wqPlay" ("userId", "batchId", "subBatchId", "startedAt", "endedAt",
+                insert into "wqPrjPlay" ("userId", "batchId", "subBatchId", "startedAt", "endedAt",
                                       "currency")
                 values (1, 'b1', 'ghost', timestamptz '2034-03-31 10:00Z',
                         timestamptz '2034-03-31 10:00Z', 'EUR')""");
@@ -121,7 +121,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_deleted_session_row_is_aggregation_drift() {
         execute("""
-                delete from "wqSession" where "batchId" = 'b1'""");
+                delete from "wqPrjSession" where "batchId" = 'b1'""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("missing session row").contains("batchId=b1");
@@ -130,7 +130,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_changed_session_play_count_is_aggregation_drift() {
         execute("""
-                update "wqSession" set "playCount" = "playCount" + 1""");
+                update "wqPrjSession" set "playCount" = "playCount" + 1""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("session mismatch").contains("batchId=b1");
@@ -140,7 +140,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     void a_changed_session_play_count_excl_cancelled_is_aggregation_drift() {
         // p1's only transaction is cancelled, p2's is not: one surviving play.
         execute("""
-                update "wqSession" set "playCountExclCancelled" = "playCountExclCancelled" - 1""");
+                update "wqPrjSession" set "playCountExclCancelled" = "playCountExclCancelled" - 1""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("session mismatch").contains("batchId=b1");
@@ -149,7 +149,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_changed_session_tx_count_excl_cancelled_is_aggregation_drift() {
         execute("""
-                update "wqSession" set "txCountExclCancelled" = "txCountExclCancelled" + 1""");
+                update "wqPrjSession" set "txCountExclCancelled" = "txCountExclCancelled" + 1""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("session mismatch").contains("batchId=b1");
@@ -158,7 +158,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_changed_play_net_is_aggregation_drift() {
         execute("""
-                update "wqPlay" set "netExclCancelled" = "netExclCancelled" + 1
+                update "wqPrjPlay" set "netExclCancelled" = "netExclCancelled" + 1
                 where "subBatchId" = 'p2'""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
@@ -168,7 +168,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_misplaced_group_locator_is_aggregation_drift() {
         execute("""
-                update "wqGroupLocator" set "startedAt" = "startedAt" + interval '1 second'
+                update "wqPrjGroupLocator" set "startedAt" = "startedAt" + interval '1 second'
                 where "subBatchId" = ''""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
@@ -176,9 +176,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     }
 
     @Test
-    void a_session_without_items_is_aggregation_drift() {
+    void a_session_without_transactions_is_aggregation_drift() {
         execute("""
-                insert into "wqSession" ("userId", "batchId", "startedAt", "endedAt", "currency")
+                insert into "wqPrjSession" ("userId", "batchId", "startedAt", "endedAt", "currency")
                 values (1, 'ghost', timestamptz '2034-03-31 10:00Z', timestamptz '2034-03-31 10:00Z',
                         'EUR')""");
 
@@ -191,7 +191,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_flipped_page_row_visibility_is_high_level_drift() {
         execute("""
-                update "wqWebHighLevel" set "visibleExclCancelled" = not "visibleExclCancelled"
+                update "wqPrjWebHighLevel" set "visibleExclCancelled" = not "visibleExclCancelled"
                 where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
@@ -202,7 +202,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     void a_session_row_missing_from_one_view_is_high_level_drift() {
         // Materialisation is per view: the session must have its row in /web as well as /cc.
         execute("""
-                delete from "wqWebHighLevel" where "kind" = 0""");
+                delete from "wqPrjWebHighLevel" where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("missing page row").contains("view=WEB", "kind=0", "refId=b1");
@@ -211,7 +211,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_session_row_with_another_currency_is_high_level_drift() {
         execute("""
-                update "wqCcHighLevel" set "currency" = 'USD' where "kind" = 0""");
+                update "wqPrjCcHighLevel" set "currency" = 'USD' where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("page row currency mismatch").contains("view=CC",
@@ -222,7 +222,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_session_row_with_another_product_type_is_high_level_drift() {
         execute("""
-                update "wqCcHighLevel" set "productType" = 'lottery' where "kind" = 0""");
+                update "wqPrjCcHighLevel" set "productType" = 'lottery' where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("page row key mismatch").contains("view=CC",
@@ -232,15 +232,15 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_session_with_another_product_type_is_aggregation_drift() {
         execute("""
-                update "wqSession" set "productType" = 'lottery'""");
+                update "wqPrjSession" set "productType" = 'lottery'""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("session mismatch").contains("batchId=b1");
     }
 
     /**
-     * D6: the oracle expects the FIRST item's pair. Here the per-column LEAST is (P03, arcade) --
-     * no item's product -- while the first item's is (P13, arcade); a session or page row carrying
+     * D6: the oracle expects the FIRST transaction's pair. Here the per-column LEAST is (P03, arcade) --
+     * no transaction's product -- while the first transaction's is (P13, arcade); a session or page row carrying
      * the LEAST id is drift.
      */
     @Test
@@ -248,12 +248,12 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 labelled("x1", T0, "P13", "arcade"),
                 labelled("x2", T0.plusSeconds(1), "P03", "lottery")), 2L));
-        assertThat(invariants.drift()).as("first item's pair").isEmpty();
+        assertThat(invariants.drift()).as("first transaction's pair").isEmpty();
 
         execute("""
-                update "wqSession" set "productId" = 'P03' where "batchId" = 'b2'""");
+                update "wqPrjSession" set "productId" = 'P03' where "batchId" = 'b2'""");
         execute("""
-                update "wqCcHighLevel" set "productId" = 'P03' where "refId" = 'b2'""");
+                update "wqPrjCcHighLevel" set "productId" = 'P03' where "refId" = 'b2'""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("session mismatch").contains("batchId=b2");
@@ -262,15 +262,15 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
                         "expectedProductId=P13", "storedProductId=P03");
     }
 
-    private static ProjectionItem labelled(String id, Instant at, String productId, String productType) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, productId, productType, "b2", "b2-p",
+    private static ProjectionTransaction labelled(String id, Instant at, String productId, String productType) {
+        return new ProjectionTransaction(1L, SourceKind.TRANSACTION, id, at, productId, productType, "b2", "b2-p",
                 TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 
     @Test
     void a_page_row_at_a_stale_key_is_high_level_drift() {
         execute("""
-                update "wqCcHighLevel" set "occurredAt" = "occurredAt" + interval '1 day'
+                update "wqPrjCcHighLevel" set "occurredAt" = "occurredAt" + interval '1 day'
                 where "kind" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
@@ -278,9 +278,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     }
 
     @Test
-    void a_page_row_for_a_cc_only_item_in_web_is_high_level_drift() {
+    void a_page_row_for_a_cc_only_transaction_in_web_is_high_level_drift() {
         execute("""
-                insert into "wqWebHighLevel"
+                insert into "wqPrjWebHighLevel"
                 values (1, timestamptz '2034-04-01 00:00Z', 4, 'pay1', null, 'EUR', false)""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
@@ -290,7 +290,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_deleted_unsessioned_page_row_is_high_level_drift() {
         execute("""
-                delete from "wqCcHighLevel" where "kind" = 4""");
+                delete from "wqPrjCcHighLevel" where "kind" = 4""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
                 .startsWith("missing page row").contains("refId=pay1");
@@ -303,7 +303,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void an_unapplied_cancel_is_cancellation_drift() {
         execute("""
-                update "wqWebItem" set "cancelled" = false, "cancelledBy" = null
+                update "wqPrjWebTransaction" set "cancelled" = false, "cancelledBy" = null
                 where "sourceId" = 't1'""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
@@ -313,7 +313,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_wrong_cancelled_by_is_cancellation_drift() {
         execute("""
-                update "wqCcItem" set "cancelledBy" = 'zz'
+                update "wqPrjCcTransaction" set "cancelledBy" = 'zz'
                 where "sourceId" = 'pay1'""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
@@ -323,7 +323,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_cancelled_flag_without_any_cancel_is_cancellation_drift() {
         execute("""
-                update "wqCcItem" set "cancelled" = true, "cancelledBy" = 'ghost'
+                update "wqPrjCcTransaction" set "cancelled" = true, "cancelledBy" = 'ghost'
                 where "sourceId" = 't2'""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
@@ -334,7 +334,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_zero_amount_cancel_in_the_locator_is_seen_by_the_cancellation_oracle() {
         execute("""
-                insert into "wqItemLocator" ("source", "sourceId", "userId", "occurredAt", "itemId",
+                insert into "wqPrjTransactionLocator" ("source", "sourceId", "userId", "occurredAt", "transactionId",
                     "zeroAmount", "cancels")
                 values (1, 'cz', 1, timestamptz '2034-04-01 02:00:00+00', -1, true, 't2')""");
 
@@ -345,9 +345,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_parked_cancel_whose_target_exists_is_cancellation_drift() {
         execute("""
-                insert into "wqPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "userId",
+                insert into "wqPrjPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "userId",
                     "occurredAt", "type", "amount", "currency")
-                values (1, 'c9', 't2', 1, timestamptz '2034-04-01 00:00:00+00', 1, 1, 'EUR')""");
+                values (1, 'c9', 't2', 1, timestamptz '2034-04-01 00:00:00+00', 'TT_CANCEL', 1, 'EUR')""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
                 .startsWith("unexpected pending cancel").contains("cancelSourceId=c9");
@@ -357,14 +357,14 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
         assertThat(db().execute(sql)).as(sql).isEqualTo(1);
     }
 
-    private static ProjectionItem tx(
-            String id, String subBatchId, Instant at, short type, String amount) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, "P11", "instants", "b1", subBatchId,
+    private static ProjectionTransaction tx(
+            String id, String subBatchId, Instant at, String type, String amount) {
+        return new ProjectionTransaction(1L, SourceKind.TRANSACTION, id, at, "P11", "instants", "b1", subBatchId,
                 type, new BigDecimal(amount), "EUR", null, null, null);
     }
 
-    private static ProjectionItem cancel(SourceKind source, String id, String cancels) {
-        return new ProjectionItem(1L, source, id, T0.plusSeconds(7_200), "P13", "arcade", null, null,
+    private static ProjectionTransaction cancel(SourceKind source, String id, String cancels) {
+        return new ProjectionTransaction(1L, source, id, T0.plusSeconds(7_200), "P13", "arcade", null, null,
                 TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, cancels, null);
     }
 }

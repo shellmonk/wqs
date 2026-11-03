@@ -3,24 +3,16 @@ package wqs.gen;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import wqs.db.PostgresTestBase;
-import wqs.db.TxTypeRegistry;
 import wqs.domain.MoneyDirection;
+import wqs.domain.TransactionType;
 
-class TxTypesTest extends PostgresTestBase {
+class TxTypesTest {
 
     @Test
-    void test_constants_name_the_seeded_types() {
-        TxTypeRegistry registry = new TxTypeRegistry(jdbc(), new DataSourceTransactionManager(dataSource()));
-
-        assertThat(registry.codeOf(TxTypes.PLAY)).isEqualTo("TT_BUY");
-        assertThat(registry.codeOf(TxTypes.WIN)).isEqualTo("PRIZE");
-        assertThat(registry.codeOf(TxTypes.NEUTRAL)).isEqualTo("TT_TRANSFER_OUT");
-        assertThat(registry.codeOf(TxTypes.CANCEL)).isEqualTo("TT_CANCEL");
-        assertThat(registry.directionOf(TxTypes.PLAY)).isEqualTo(MoneyDirection.PLAY);
-        assertThat(registry.directionOf(TxTypes.WIN)).isEqualTo(MoneyDirection.WIN);
-        assertThat(registry.directionOf(TxTypes.NEUTRAL)).isEqualTo(MoneyDirection.NEUTRAL);
-        assertThat(registry.directionOf(TxTypes.CANCEL)).isEqualTo(MoneyDirection.NEUTRAL);
+    void test_constants_name_known_types_with_their_direction() {
+        assertThat(TransactionType.valueOf(TxTypes.PLAY).direction()).isEqualTo(MoneyDirection.PLAY);
+        assertThat(TransactionType.valueOf(TxTypes.WIN).direction()).isEqualTo(MoneyDirection.WIN);
+        assertThat(TransactionType.valueOf(TxTypes.NEUTRAL).direction()).isEqualTo(MoneyDirection.NEUTRAL);
+        assertThat(TransactionType.valueOf(TxTypes.CANCEL).direction()).isEqualTo(MoneyDirection.NEUTRAL);
     }
 }

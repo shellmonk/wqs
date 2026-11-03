@@ -34,7 +34,7 @@ import wqs.domain.DataDomain;
  * <p><b>Sanity window.</b> A month after now + {@code maxMonthsAhead} (12 by default) or before the
  * provisioning floor ({@code wqs.partition.provision-floor}, 2010-01 by default) is a garbage
  * timestamp, not a partition to create: {@link IllegalArgumentException} BEFORE any DDL, so the
- * item takes the normal retry / per-item / dead-letter path. The floor bounds what a stream of
+ * transaction takes the normal retry / per-transaction / dead-letter path. The floor bounds what a stream of
  * garbage timestamps can create to (now + 12 - floor) months x tables (ruling R103). There is
  * deliberately no per-batch cap: it would dead-letter legitimate deep-replay data.
  */

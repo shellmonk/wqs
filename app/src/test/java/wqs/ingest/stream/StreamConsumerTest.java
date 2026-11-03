@@ -37,7 +37,6 @@ class StreamConsumerTest extends PostgresTestBase {
     @Autowired private ProjectionWriter writer;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private StreamPayloadMapper payloadMapper;
-    @Autowired private wqs.db.TxTypeRegistry txTypes;
     @Autowired private PartitionManager partitionManager;
     @Autowired private wqs.ingest.DeadLetterStore deadLetterStore;
 
@@ -48,7 +47,7 @@ class StreamConsumerTest extends PostgresTestBase {
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 9), 0);
         clearProjection();
-        db().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqIngestCursor\"");
         source = new FakeStreamSource();
         registry = new SimpleMeterRegistry();
     }
@@ -63,7 +62,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.poll();
 
-        assertThat(count("wqWebItem")).isEqualTo(2);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
         assertThat(offsetStore.read("wallet-transactions")).contains(2L);
     }
 
@@ -106,7 +105,7 @@ class StreamConsumerTest extends PostgresTestBase {
         MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
         StreamConsumer consumer = new StreamConsumer(
                 source, new StreamProperties(true, "wallet-transactions", 10, Duration.ofMillis(200), 3, null, null),
-                payloadMapper, txTypes, writer, offsetStore, registry, clock, deadLetterStore);
+                payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
         var gauge = registry.find("wqs.ingest.lag.seconds").gauge();
         assertThat(gauge.value()).isNaN();
 
@@ -122,7 +121,7 @@ class StreamConsumerTest extends PostgresTestBase {
         MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
         new StreamConsumer(
                 source, new StreamProperties(true, "wallet-transactions", 10, Duration.ofMillis(200), 3, null, null),
-                payloadMapper, txTypes, writer, offsetStore, registry, clock, deadLetterStore);
+                payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
         var gauge = registry.find("wqs.ingest.stream.offset.lag").gauge();
         assertThat(gauge.value()).isNaN(); // fake source: head unknown
 
@@ -165,7 +164,7 @@ class StreamConsumerTest extends PostgresTestBase {
 
         assertThat(registry.find("wqs.ingest.events").tag("outcome", "duplicate").counter().count())
                 .isEqualTo(1.0);
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
     }
 
     @Test
@@ -191,7 +190,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.queue(payload("tx-10"), 10);
         source.deliverAll();
         consumer.poll();
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(10L);
     }
 
@@ -224,20 +223,20 @@ class StreamConsumerTest extends PostgresTestBase {
     }
 
     /**
-     * The registry reaches the database on a first-sighted type code. A transient failure there is
-     * infrastructure, not poison: no dead letter, no offset advance, and the message is applied
+     * A transient failure while mapping (none today: mapping never touches the database, plan D1;
+     * the classification stays for whatever mapping reaches next) is infrastructure, not poison: no dead letter, no offset advance, and the message is applied
      * after recovery.
      */
     @Test
-    void a_transient_registry_failure_recovers_instead_of_dead_lettering() {
-        wqs.db.TxTypeRegistry flaky = org.mockito.Mockito.spy(txTypes);
+    void a_transient_mapping_failure_recovers_instead_of_dead_lettering() {
+        StreamPayloadMapper flaky = org.mockito.Mockito.spy(payloadMapper);
         org.mockito.Mockito.doThrow(new org.springframework.dao.TransientDataAccessResourceException("blip"))
-                .doCallRealMethod().when(flaky).idOf("TT_BUY");
+                .doCallRealMethod().when(flaky).toTransaction(org.mockito.ArgumentMatchers.any());
         MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null);
         StreamConsumer consumer = new StreamConsumer(
-                source, properties, payloadMapper, flaky, writer, offsetStore, registry, clock, deadLetterStore);
+                source, properties, flaky, writer, offsetStore, registry, clock, deadLetterStore);
         db().execute("delete from \"wqDeadLetter\"");
         consumer.start();
 
@@ -246,21 +245,21 @@ class StreamConsumerTest extends PostgresTestBase {
 
         assertThat(count("wqDeadLetter")).as("not dead-lettered").isZero();
         assertThat(offsetStore.read("wallet-transactions")).as("offset not advanced").isEmpty();
-        assertThat(count("wqWebItem")).isZero();
+        assertThat(count("wqPrjWebTransaction")).isZero();
 
         clock.advance(Duration.ofSeconds(6));
         consumer.poll(); // backoff elapsed: re-subscribes from the stored offset
         source.redeliverFromSubscription();
         consumer.poll();
 
-        assertThat(count("wqWebItem")).as("applied after recovery").isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).as("applied after recovery").isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(5L);
         assertThat(count("wqDeadLetter")).isZero();
     }
 
     /**
      * Security gate (spec 4.1, D8): owner "2-7" is NOT player 7. A non-player event writes nothing
-     * at all -- no locator, item, rollup, page row or counter -- is counted, and the offset still
+     * at all -- no locator, transaction, rollup, page row or counter -- is counted, and the offset still
      * moves past it, alone or behind a buffered player event.
      */
     @Test
@@ -272,9 +271,9 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.poll();
 
-        for (String table : java.util.List.of("wqItemLocator", "wqWebItem", "wqCcItem", "wqGroupLocator",
-                "wqSession", "wqPlay", "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth",
-                "wqPendingCancel", "wqDeadLetter")) {
+        for (String table : java.util.List.of("wqPrjTransactionLocator", "wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjGroupLocator",
+                "wqPrjSession", "wqPrjPlay", "wqPrjWebHighLevel", "wqPrjCcHighLevel", "wqPrjCountDay", "wqPrjCountMonth",
+                "wqPrjPendingCancel", "wqDeadLetter")) {
             assertThat(count(table)).as(table).isZero();
         }
         assertThat(offsetStore.read("wallet-transactions")).contains(4L);
@@ -292,7 +291,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.stop(); // flushes the buffered batch
 
-        assertThat(count("wqItemLocator")).isEqualTo(1);
+        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
         assertThat(skipped("non-player")).isEqualTo(1.0);
         assertThat(offsetStore.read("wallet-transactions")).contains(6L);
     }
@@ -308,8 +307,8 @@ class StreamConsumerTest extends PostgresTestBase {
         consumer.poll();
 
         assertThat(skipped("zero-amount")).isEqualTo(1.0);
-        assertThat(count("wqItemLocator")).isEqualTo(1);
-        assertThat(count("wqWebItem")).isZero();
+        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isZero();
         assertThat(offsetStore.read("wallet-transactions")).contains(3L);
     }
 
@@ -324,19 +323,19 @@ class StreamConsumerTest extends PostgresTestBase {
     }
 
     /**
-     * F2b: a NON-transient database failure while mapping (here a constraint violation from the
-     * registry's first-sighting insert) will fail the same way on every retry, so it is poison:
+     * F2b: a NON-transient database failure while mapping (here a simulated constraint violation)
+     * will fail the same way on every retry, so it is poison:
      * dead-lettered with the offset advanced, never a permanent stall.
      */
     @Test
-    void a_non_transient_registry_failure_is_dead_lettered_and_the_offset_advances() {
-        wqs.db.TxTypeRegistry broken = org.mockito.Mockito.spy(txTypes);
+    void a_non_transient_mapping_failure_is_dead_lettered_and_the_offset_advances() {
+        StreamPayloadMapper broken = org.mockito.Mockito.spy(payloadMapper);
         org.mockito.Mockito.doThrow(new org.springframework.dao.DataIntegrityViolationException("value too long"))
-                .when(broken).idOf("TT_BUY");
+                .when(broken).toTransaction(org.mockito.ArgumentMatchers.any());
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null);
         StreamConsumer consumer = new StreamConsumer(
-                source, properties, payloadMapper, broken, writer, offsetStore, registry,
+                source, properties, broken, writer, offsetStore, registry,
                 Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
         consumer.start();
 
@@ -347,7 +346,7 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(db().row("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").asMap().values().toArray())
                 .containsExactly("tx-poison", 6L);
         assertThat(offsetStore.read("wallet-transactions")).contains(6L);
-        assertThat(count("wqWebItem")).isZero();
+        assertThat(count("wqPrjWebTransaction")).isZero();
         assertThat(source.subscribeCount()).as("no recovery re-subscribe").isEqualTo(1);
     }
 
@@ -357,15 +356,15 @@ class StreamConsumerTest extends PostgresTestBase {
      * message is applied after recovery. Only a data-integrity violation from mapping is poison.
      */
     @Test
-    void a_connection_failure_in_the_registry_recovers_instead_of_dead_lettering() {
-        wqs.db.TxTypeRegistry flaky = org.mockito.Mockito.spy(txTypes);
+    void a_connection_failure_in_mapping_recovers_instead_of_dead_lettering() {
+        StreamPayloadMapper flaky = org.mockito.Mockito.spy(payloadMapper);
         org.mockito.Mockito.doThrow(new org.springframework.jdbc.CannotGetJdbcConnectionException("pool timeout"))
-                .doCallRealMethod().when(flaky).idOf("TT_BUY");
+                .doCallRealMethod().when(flaky).toTransaction(org.mockito.ArgumentMatchers.any());
         MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null);
         StreamConsumer consumer = new StreamConsumer(
-                source, properties, payloadMapper, flaky, writer, offsetStore, registry, clock, deadLetterStore);
+                source, properties, flaky, writer, offsetStore, registry, clock, deadLetterStore);
         consumer.start();
 
         source.queue(payload("tx-outage"), 5);
@@ -379,18 +378,18 @@ class StreamConsumerTest extends PostgresTestBase {
         source.redeliverFromSubscription();
         consumer.poll();
 
-        assertThat(count("wqWebItem")).as("applied after recovery").isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).as("applied after recovery").isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(5L);
         assertThat(count("wqDeadLetter")).isZero();
     }
 
     /**
-     * Final review I-C: a deadlock (40P01) or other lock conflict while applying an item alone is a
+     * Final review I-C: a deadlock (40P01) or other lock conflict while applying a transaction alone is a
      * transient conflict with a concurrent writer (the delta poller, ruling I2), not poison: no dead
-     * letter, no offset advance, and the item is applied after recovery.
+     * letter, no offset advance, and the transaction is applied after recovery.
      */
     @Test
-    void a_lock_conflict_applying_an_item_alone_recovers_instead_of_dead_lettering() {
+    void a_lock_conflict_applying_an_transaction_alone_recovers_instead_of_dead_lettering() {
         for (RuntimeException conflict : java.util.List.<RuntimeException>of(
                 new org.springframework.dao.CannotAcquireLockException("ERROR: deadlock detected (40P01)"),
                 new org.springframework.dao.PessimisticLockingFailureException("ERROR: deadlock detected (40P01)"))) {
@@ -401,7 +400,7 @@ class StreamConsumerTest extends PostgresTestBase {
             MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
             StreamConsumer consumer = new StreamConsumer(source,
                     new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
-                    payloadMapper, txTypes, conflicted, offsetStore, registry, clock, deadLetterStore);
+                    payloadMapper, conflicted, offsetStore, registry, clock, deadLetterStore);
             consumer.start();
 
             source.queue(payload("tx-locked"), 5);
@@ -410,27 +409,27 @@ class StreamConsumerTest extends PostgresTestBase {
             assertThat(count("wqDeadLetter")).as("%s is not poison", conflict).isZero();
             assertThat(offsetStore.read("wallet-transactions")).as("offset not advanced").isEmpty();
 
-            for (int round = 0; round < 3 && count("wqWebItem") == 0; round++) {
+            for (int round = 0; round < 3 && count("wqPrjWebTransaction") == 0; round++) {
                 clock.advance(Duration.ofSeconds(6));
                 consumer.poll();
                 source.redeliverFromSubscription();
                 consumer.poll();
             }
 
-            assertThat(count("wqWebItem")).as("applied after recovery").isEqualTo(1);
+            assertThat(count("wqPrjWebTransaction")).as("applied after recovery").isEqualTo(1);
             assertThat(offsetStore.read("wallet-transactions")).contains(5L);
             assertThat(count("wqDeadLetter")).isZero();
             consumer.stop();
         }
     }
 
-    /** A data-integrity rejection applying an item alone is still poison: dead-lettered, offset advanced. */
+    /** A data-integrity rejection applying a transaction alone is still poison: dead-lettered, offset advanced. */
     @Test
-    void a_data_integrity_violation_applying_an_item_alone_is_dead_lettered() {
+    void a_data_integrity_violation_applying_an_transaction_alone_is_dead_lettered() {
         ProjectionWriter rejecting = failing(new org.springframework.dao.DataIntegrityViolationException("bad"), 99);
         StreamConsumer consumer = new StreamConsumer(source,
                 new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
-                payloadMapper, txTypes, rejecting, offsetStore, registry,
+                payloadMapper, rejecting, offsetStore, registry,
                 Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
         consumer.start();
 
@@ -440,15 +439,15 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(db().value("select \"sourceId\" from \"wqDeadLetter\"", String.class))
                 .isEqualTo("tx-rejected");
         assertThat(offsetStore.read("wallet-transactions")).contains(7L);
-        assertThat(count("wqWebItem")).isZero();
+        assertThat(count("wqPrjWebTransaction")).isZero();
     }
 
     /**
-     * Last fix T: an unknown bug (NPE, IllegalStateException) applying an item alone is not on the
+     * Last fix T: an unknown bug (NPE, IllegalStateException) applying a transaction alone is not on the
      * transient allowlist: dead-lettered, offset advanced -- never a recovery loop stalling the stream.
      */
     @Test
-    void a_bug_applying_an_item_alone_is_dead_lettered_and_the_offset_advances() {
+    void a_bug_applying_an_transaction_alone_is_dead_lettered_and_the_offset_advances() {
         long offset = 20;
         for (RuntimeException bug : java.util.List.<RuntimeException>of(
                 new NullPointerException("bug"), new IllegalStateException("bug"))) {
@@ -456,7 +455,7 @@ class StreamConsumerTest extends PostgresTestBase {
             source = new FakeStreamSource();
             StreamConsumer consumer = new StreamConsumer(source,
                     new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
-                    payloadMapper, txTypes, failing(bug, 99), offsetStore, registry,
+                    payloadMapper, failing(bug, 99), offsetStore, registry,
                     Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
             consumer.start();
 
@@ -473,11 +472,11 @@ class StreamConsumerTest extends PostgresTestBase {
     /** Last fix T: a bug while MAPPING (not data, not infrastructure) is dead-lettered too. */
     @Test
     void a_bug_in_mapping_is_dead_lettered_and_the_offset_advances() {
-        wqs.db.TxTypeRegistry buggy = org.mockito.Mockito.spy(txTypes);
-        org.mockito.Mockito.doThrow(new NullPointerException("bug")).when(buggy).idOf("TT_BUY");
+        StreamPayloadMapper buggy = org.mockito.Mockito.spy(payloadMapper);
+        org.mockito.Mockito.doThrow(new NullPointerException("bug")).when(buggy).toTransaction(org.mockito.ArgumentMatchers.any());
         StreamConsumer consumer = new StreamConsumer(source,
                 new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
-                payloadMapper, buggy, writer, offsetStore, registry,
+                buggy, writer, offsetStore, registry,
                 Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
         consumer.start();
 
@@ -506,14 +505,14 @@ class StreamConsumerTest extends PostgresTestBase {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);
         return new StreamConsumer(
-                source, properties, payloadMapper, txTypes, writer, offsetStore, registry, clock, deadLetterStore);
+                source, properties, payloadMapper, writer, offsetStore, registry, clock, deadLetterStore);
     }
 
     private StreamConsumer consumer(int batchSize, Duration maxWait) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, maxWait, 3, null, null);
         return new StreamConsumer(
-                source, properties, payloadMapper, txTypes, writer, offsetStore, registry,
+                source, properties, payloadMapper, writer, offsetStore, registry,
                 Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
     }
 

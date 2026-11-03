@@ -10,48 +10,44 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
-import wqs.db.TxTypeRegistry;
 import wqs.domain.ViewKind;
-import wqs.read.ItemEntry;
-import wqs.read.ItemKey;
+import wqs.read.TransactionEntry;
+import wqs.read.TransactionKey;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
-import wqs.read.TypeCodes;
 
-/** Level-0 reads of the cc view; touches only "wqCcItem". */
+/** Level-0 reads of the cc view; touches only "wqPrjCcTransaction". */
 @Component
 public class CcLevel0Query implements Level0Query {
 
     private static final String COUNT = """
-            select count(*) from "wqCcItem"
+            select count(*) from "wqPrjCcTransaction"
             where %s
             """;
 
     private static final String KEYS = """
-            select "wqCcItem"."occurredAt", "wqCcItem"."itemId" from "wqCcItem"
+            select "wqPrjCcTransaction"."occurredAt", "wqPrjCcTransaction"."transactionId" from "wqPrjCcTransaction"
             where %s
-            order by "wqCcItem"."occurredAt" desc, "wqCcItem"."itemId" desc
+            order by "wqPrjCcTransaction"."occurredAt" desc, "wqPrjCcTransaction"."transactionId" desc
             offset :offset rows fetch next :limit rows only
             """;
 
     private static final String FETCH = """
-            select "wqCcItem"."userId", "wqCcItem"."itemId", "wqCcItem"."source", "wqCcItem"."sourceId",
-                   "wqCcItem"."occurredAt", "wqCcItem"."productId", "wqCcItem"."batchId",
-                   "wqCcItem"."subBatchId", "wqCcItem"."type", "wqCcItem"."amount", "wqCcItem"."currency",
-                   "wqCcItem"."balanceAfter", "wqCcItem"."cancelled", "wqCcItem"."cancelledBy",
-                   "wqCcItem"."cancels", "wqCcItem"."detail", "wqCcItem"."ingestedAt", "wqCcItem"."productType"
-            from "wqCcItem"
-            join unnest(cast(:ids as bigint[])) as "wanted" ("id") on "wqCcItem"."itemId" = "wanted"."id"
-            where ("wqCcItem"."userId" = :userId
-                   and "wqCcItem"."occurredAt" between cast(:min as timestamptz) and cast(:max as timestamptz))
+            select "wqPrjCcTransaction"."userId", "wqPrjCcTransaction"."transactionId", "wqPrjCcTransaction"."source", "wqPrjCcTransaction"."sourceId",
+                   "wqPrjCcTransaction"."occurredAt", "wqPrjCcTransaction"."productId", "wqPrjCcTransaction"."batchId",
+                   "wqPrjCcTransaction"."subBatchId", "wqPrjCcTransaction"."type", "wqPrjCcTransaction"."amount", "wqPrjCcTransaction"."currency",
+                   "wqPrjCcTransaction"."balanceAfter", "wqPrjCcTransaction"."cancelled", "wqPrjCcTransaction"."cancelledBy",
+                   "wqPrjCcTransaction"."cancels", "wqPrjCcTransaction"."detail", "wqPrjCcTransaction"."ingestedAt", "wqPrjCcTransaction"."productType"
+            from "wqPrjCcTransaction"
+            join unnest(cast(:ids as bigint[])) as "wanted" ("id") on "wqPrjCcTransaction"."transactionId" = "wanted"."id"
+            where ("wqPrjCcTransaction"."userId" = :userId
+                   and "wqPrjCcTransaction"."occurredAt" between cast(:min as timestamptz) and cast(:max as timestamptz))
             """;
 
-    private final CcItemMapper mapper;
-    private final TxTypeRegistry txTypes;
+    private final CcTransactionMapper mapper;
 
-    public CcLevel0Query(CcItemMapper mapper, TxTypeRegistry txTypes) {
+    public CcLevel0Query(CcTransactionMapper mapper) {
         this.mapper = mapper;
-        this.txTypes = txTypes;
     }
 
     @Override
@@ -65,43 +61,41 @@ public class CcLevel0Query implements Level0Query {
     }
 
     @Override
-    public List<ItemKey> keys(
+    public List<TransactionKey> keys(
             JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
         return range(tx.sql(KEYS.formatted(range(f))), f, lo, hi)
                 .param("offset", offset)
                 .param("limit", limit)
-                .query((rs, n) -> new ItemKey(
-                        rs.getObject("occurredAt", OffsetDateTime.class).toInstant(), rs.getLong("itemId")))
+                .query((rs, n) -> new TransactionKey(
+                        rs.getObject("occurredAt", OffsetDateTime.class).toInstant(), rs.getLong("transactionId")))
                 .list();
     }
 
     @Override
-    public List<ItemEntry> fetch(JdbcClient tx, long userId, List<ItemKey> keys) {
+    public List<TransactionEntry> fetch(JdbcClient tx, long userId, List<TransactionKey> keys) {
         if (keys.isEmpty()) {
             return List.of();
         }
-        Instant min = keys.stream().map(ItemKey::occurredAt).min(Comparator.naturalOrder()).orElseThrow();
-        Instant max = keys.stream().map(ItemKey::occurredAt).max(Comparator.naturalOrder()).orElseThrow();
+        Instant min = keys.stream().map(TransactionKey::occurredAt).min(Comparator.naturalOrder()).orElseThrow();
+        Instant max = keys.stream().map(TransactionKey::occurredAt).max(Comparator.naturalOrder()).orElseThrow();
         // One array bind instead of 2 binds per key: page size is unbounded. Joined through
-        // unnest(?), which Postgres evaluates once; "itemId" = any(?) re-evaluates the text-bound
-        // array per row (array_in is not constant-folded), O(rows x keys). itemId comes from a
+        // unnest(?), which Postgres evaluates once; "transactionId" = any(?) re-evaluates the text-bound
+        // array per row (array_in is not constant-folded), O(rows x keys). transactionId comes from a
         // global sequence, so within the user and the occurredAt window it identifies one row.
-        long[] ids = keys.stream().mapToLong(ItemKey::itemId).toArray();
-        // Codes resolve through the caller's transaction (M2), never the registry's writer client.
-        TypeCodes codes = id -> txTypes.codeOf(tx, id);
-        Map<ItemKey, ItemEntry> byKey = new HashMap<>();
+        long[] ids = keys.stream().mapToLong(TransactionKey::transactionId).toArray();
+        Map<TransactionKey, TransactionEntry> byKey = new HashMap<>();
         tx.sql(FETCH)
                 .param("ids", ids)
                 .param("userId", userId)
                 .param("min", utc(min))
                 .param("max", utc(max))
                 .query(rs -> {
-                    byKey.put(new ItemKey(rs.getObject("occurredAt", OffsetDateTime.class).toInstant(),
-                            rs.getLong("itemId")), mapper.toEntry(rs, codes));
+                    byKey.put(new TransactionKey(rs.getObject("occurredAt", OffsetDateTime.class).toInstant(),
+                            rs.getLong("transactionId")), mapper.toEntry(rs));
                 });
-        List<ItemEntry> out = new ArrayList<>(keys.size());
-        for (ItemKey k : keys) {
-            ItemEntry e = byKey.get(k);
+        List<TransactionEntry> out = new ArrayList<>(keys.size());
+        for (TransactionKey k : keys) {
+            TransactionEntry e = byKey.get(k);
             if (e != null) {
                 out.add(e);
             }
@@ -115,16 +109,16 @@ public class CcLevel0Query implements Level0Query {
      */
     private static String range(Level0Filter f) {
         StringBuilder c = new StringBuilder("""
-                ("wqCcItem"."userId" = :userId and "wqCcItem"."occurredAt" >= cast(:lo as timestamptz) \
-                and "wqCcItem"."occurredAt" < cast(:hi as timestamptz)""");
+                ("wqPrjCcTransaction"."userId" = :userId and "wqPrjCcTransaction"."occurredAt" >= cast(:lo as timestamptz) \
+                and "wqPrjCcTransaction"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c.append(" and not (\"wqCcItem\".\"cancelled\")");
+            c.append(" and not (\"wqPrjCcTransaction\".\"cancelled\")");
         }
         if (!f.productTypes().isEmpty()) {
-            c.append(" and \"wqCcItem\".\"productType\" in (:productTypes)");
+            c.append(" and \"wqPrjCcTransaction\".\"productType\" in (:productTypes)");
         }
-        if (!f.typeIds().isEmpty()) {
-            c.append(" and \"wqCcItem\".\"type\" in (:typeIds)");
+        if (!f.typeCodes().isEmpty()) {
+            c.append(" and \"wqPrjCcTransaction\".\"type\" in (:typeCodes)");
         }
         return c.append(')').toString();
     }
@@ -134,8 +128,8 @@ public class CcLevel0Query implements Level0Query {
         if (!f.productTypes().isEmpty()) {
             spec = spec.param("productTypes", f.productTypes());
         }
-        if (!f.typeIds().isEmpty()) {
-            spec = spec.param("typeIds", f.typeIds());
+        if (!f.typeCodes().isEmpty()) {
+            spec = spec.param("typeCodes", f.typeCodes());
         }
         return spec;
     }

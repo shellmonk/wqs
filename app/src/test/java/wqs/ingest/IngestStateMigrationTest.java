@@ -9,16 +9,16 @@ import wqs.db.PostgresTestBase;
 class IngestStateMigrationTest extends PostgresTestBase {
 
     @Test
-    void stream_offset_table_exists_with_a_single_row_per_stream() {
+    void ingest_cursor_has_a_single_row_per_feed() {
         List<String> pk = db().column("""
                        select a.attname
                        from pg_index i
                        join pg_class c on c.oid = i.indrelid
                        join pg_attribute a on a.attrelid = c.oid and a.attnum = any(i.indkey)
-                       where c.relname = 'wqStreamOffset' and i.indisprimary
+                       where c.relname = 'wqIngestCursor' and i.indisprimary
                        """, String.class);
 
-        assertThat(pk).containsExactly("stream");
+        assertThat(pk).containsExactly("feed");
     }
 
     @Test

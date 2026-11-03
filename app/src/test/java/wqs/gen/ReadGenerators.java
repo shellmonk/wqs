@@ -15,7 +15,7 @@ import net.jqwik.api.Arbitrary;
 import net.jqwik.api.Combinators;
 import net.jqwik.api.Tuple;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.read.HighLevelFilter;
@@ -25,13 +25,13 @@ import wqs.read.Level0Request;
 
 /**
  * Read-side generators (spec 8.1): small level-0 histories shaped to stress the counter/live
- * split -- sparse days and months, ties on "occurredAt", items exactly on day and month
+ * split -- sparse days and months, ties on "occurredAt", transactions exactly on day and month
  * boundaries, /cc-only payments, null and non-null products, and cancels on both sides of their
  * originals in arrival order -- plus boundary-heavy level-0 queries over them.
  */
 public final class ReadGenerators {
 
-    /** Items lie in [WINDOW_START, WINDOW_END); partitions 2033-12 through 2034-03 cover it. */
+    /** Transactions lie in [WINDOW_START, WINDOW_END); partitions 2033-12 through 2034-03 cover it. */
     public static final Instant WINDOW_START = Instant.parse("2033-12-20T00:00:00Z");
     public static final Instant WINDOW_END = Instant.parse("2034-03-10T00:00:00Z");
 
@@ -55,11 +55,11 @@ public final class ReadGenerators {
      */
     private static final List<Integer> EDGE_DAYS = List.of(11, 12, 42, 43, 70, 71);
 
-    private static final int MAX_ITEMS = 150;
+    private static final int MAX_TRANSACTIONS = 150;
 
     /**
      * {@code productTypes} and {@code transactionTypes} (codes) are empty (no filter) or a subset
-     * of the values the histories use plus one value no item has.
+     * of the values the histories use plus one value no transaction has.
      */
     public record ReadQuery(
             ViewKind view, long userId, Instant from, Instant to, boolean excludeCancelled,
@@ -84,7 +84,7 @@ public final class ReadGenerators {
         }
     }
 
-    /** Product types the histories use, and one no item has. */
+    /** Product types the histories use, and one no transaction has. */
     static final List<String> PRODUCT_TYPE_POOL = List.of("keno", "lottery", "absent-product");
     /** Type codes the histories use (PLAY, WIN, NEUTRAL, CANCEL), and one no table has. */
     static final List<String> TYPE_CODE_POOL =
@@ -100,14 +100,14 @@ public final class ReadGenerators {
 
     private enum TimeKind { BOUNDARY, TIE, CLUSTER }
 
-    /** How one original item picks its "occurredAt"; resolved against the items before it. */
+    /** How one original transaction picks its "occurredAt"; resolved against the transactions before it. */
     private record TimeSpec(TimeKind kind, int pick, int secondOfDay) {}
 
-    /** A cancel of the item: its delay after the original and its place in arrival order. */
+    /** A cancel of the transaction: its delay after the original and its place in arrival order. */
     private record CancelSpec(long delaySeconds, boolean beforeOriginal, int positionPick) {}
 
     /** {@code session < 0}: unsessioned; otherwise the slot of the user's session it joins. */
-    private record ItemSpec(
+    private record TransactionSpec(
             long userId, TimeSpec time, SourceKind source, String[] product, CancelSpec cancel,
             String detail, long amountCents, int session) {}
 
@@ -143,7 +143,7 @@ public final class ReadGenerators {
                 .as(CancelSpec::new);
     }
 
-    private static Arbitrary<ItemSpec> itemSpecs(Arbitrary<TimeSpec> times, Arbitrary<Integer> sessions) {
+    private static Arbitrary<TransactionSpec> transactionSpecs(Arbitrary<TimeSpec> times, Arbitrary<Integer> sessions) {
         return Combinators.combine(
                         historyUsers(),
                         times,
@@ -157,10 +157,10 @@ public final class ReadGenerators {
                         cancelSpecs().injectNull(0.8),
                         Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(4)
                                 .map(c -> "{\"gameCode\": \"" + c + "\"}").injectNull(0.5),
-                        // Never zero: a zero-amount item is locator-only (spec 4.1) and in no view.
+                        // Never zero: a zero-amount transaction is locator-only (spec 4.1) and in no view.
                         Arbitraries.longs().between(-50_000, 50_000).filter(cents -> cents != 0),
                         sessions)
-                .as(ItemSpec::new);
+                .as(TransactionSpec::new);
     }
 
     /** 2-4 dense days per user, offsets from WINDOW_START, a quarter next to a month boundary. */
@@ -172,13 +172,13 @@ public final class ReadGenerators {
     }
 
     /**
-     * 20-150 level-0 items (at most 125 originals plus their cancels, capped at 150). Every
+     * 20-150 level-0 transactions (at most 125 originals plus their cancels, capped at 150). Every
      * "batchId" is null: level 0 ignores sessions, and this keeps rollups out of the way.
      */
-    public static Arbitrary<List<ProjectionItem>> history() {
+    public static Arbitrary<List<ProjectionTransaction>> history() {
         return Combinators.combine(
                         denseDays(), denseDays(), denseDays(),
-                        itemSpecs(timeSpecs(15, 15, 70), Arbitraries.just(-1)).list().ofMinSize(20).ofMaxSize(125))
+                        transactionSpecs(timeSpecs(15, 15, 70), Arbitraries.just(-1)).list().ofMinSize(20).ofMaxSize(125))
                 .as((d1, d2, d3, specs) -> build(Map.of(1L, d1, 2L, d2, 3L, d3), specs));
     }
 
@@ -186,35 +186,35 @@ public final class ReadGenerators {
     private static final int SESSION_SLOTS = 10;
 
     /**
-     * 20-150 items for level-1/2 paging: like {@link #history()}, but about half the
+     * 20-150 projected transactions for level-1/2 paging: like {@link #history()}, but about half the
      * transactions and claimable prizes join one of each user's {@value #SESSION_SLOTS} sessions
      * ("u{user}-b{slot}"; payments never do), and times are tie-heavy -- month boundaries and
      * reused instants -- so page-index rows share "occurredAt" across kinds (a session, kind 0,
-     * beside unsessioned items of kinds 1, 3 and 4) and within one kind, and the "kind" and
+     * beside unsessioned transactions of kinds 1, 3 and 4) and within one kind, and the "kind" and
      * "refId" tie-breaks decide page boundaries. Cancels carry no "batchId"; cancelling every
-     * live item of a session hides its row, so excludeCancelled filters sessions too.
+     * live transaction of a session hides its row, so excludeCancelled filters sessions too.
      */
-    public static Arbitrary<List<ProjectionItem>> highLevelHistory() {
+    public static Arbitrary<List<ProjectionTransaction>> highLevelHistory() {
         Arbitrary<Integer> sessions = Arbitraries.frequencyOf(
                 Tuple.of(1, Arbitraries.just(-1)),
                 Tuple.of(1, Arbitraries.integers().between(0, SESSION_SLOTS - 1)));
         return Combinators.combine(
                         denseDays(), denseDays(), denseDays(),
-                        itemSpecs(timeSpecs(30, 35, 35), sessions).list().ofMinSize(20).ofMaxSize(125))
+                        transactionSpecs(timeSpecs(30, 35, 35), sessions).list().ofMinSize(20).ofMaxSize(125))
                 .as((d1, d2, d3, specs) -> build(Map.of(1L, d1, 2L, d2, 3L, d3), specs));
     }
 
-    private record Placed(ProjectionItem item, double order) {}
+    private record Placed(ProjectionTransaction transaction, double order) {}
 
-    private static List<ProjectionItem> build(Map<Long, List<Integer>> dense, List<ItemSpec> specs) {
-        List<ProjectionItem> originals = new ArrayList<>();
+    private static List<ProjectionTransaction> build(Map<Long, List<Integer>> dense, List<TransactionSpec> specs) {
+        List<ProjectionTransaction> originals = new ArrayList<>();
         for (int i = 0; i < specs.size(); i++) {
-            ItemSpec s = specs.get(i);
+            TransactionSpec s = specs.get(i);
             Instant at = resolveTime(s, dense.get(s.userId()), originals);
             // Payments are never sessioned (spec 7.4: an operator-only, unsessioned source).
             String batchId = s.session() < 0 || s.source() == SourceKind.PAYMENT
                     ? null : "u" + s.userId() + "-b" + s.session();
-            originals.add(new ProjectionItem(
+            originals.add(new ProjectionTransaction(
                     s.userId(), s.source(), "h" + i, at,
                     s.product() == null ? null : s.product()[0],
                     s.product() == null ? null : s.product()[1],
@@ -226,17 +226,17 @@ public final class ReadGenerators {
         List<Placed> placed = new ArrayList<>();
         int total = originals.size();
         for (int i = 0; i < originals.size(); i++) {
-            ProjectionItem o = originals.get(i);
+            ProjectionTransaction o = originals.get(i);
             placed.add(new Placed(o, i));
             CancelSpec c = specs.get(i).cancel();
-            if (c == null || total >= MAX_ITEMS) {
+            if (c == null || total >= MAX_TRANSACTIONS) {
                 continue;
             }
             Instant at = o.occurredAt().plusSeconds(c.delaySeconds());
             if (!at.isBefore(WINDOW_END)) {
                 at = WINDOW_END.minusSeconds(1);
             }
-            ProjectionItem cancel = new ProjectionItem(
+            ProjectionTransaction cancel = new ProjectionTransaction(
                     o.userId(), o.source(), o.sourceId() + "-c", at, o.productId(), o.productType(),
                     null, null, TxTypes.CANCEL, o.amount().negate(), o.currency(), null, o.sourceId(), null);
             // Arrival position strictly before (at a random earlier slot) or after the original.
@@ -247,10 +247,10 @@ public final class ReadGenerators {
             total++;
         }
         placed.sort(Comparator.comparingDouble(Placed::order));
-        return placed.stream().map(Placed::item).toList();
+        return placed.stream().map(Placed::transaction).toList();
     }
 
-    private static Instant resolveTime(ItemSpec s, List<Integer> dense, List<ProjectionItem> earlier) {
+    private static Instant resolveTime(TransactionSpec s, List<Integer> dense, List<ProjectionTransaction> earlier) {
         TimeSpec t = s.time();
         switch (t.kind()) {
             case BOUNDARY -> {
@@ -261,11 +261,11 @@ public final class ReadGenerators {
                 return WINDOW_START.plus((t.pick() / 2) % WINDOW_DAYS, ChronoUnit.DAYS);
             }
             case TIE -> {
-                // Reuse an earlier item's instant -- the same user's when there is one.
+                // Reuse an earlier transaction's instant -- the same user's when there is one.
                 List<Instant> same = earlier.stream()
-                        .filter(e -> e.userId() == s.userId()).map(ProjectionItem::occurredAt).toList();
+                        .filter(e -> e.userId() == s.userId()).map(ProjectionTransaction::occurredAt).toList();
                 List<Instant> pool = same.isEmpty()
-                        ? earlier.stream().map(ProjectionItem::occurredAt).toList() : same;
+                        ? earlier.stream().map(ProjectionTransaction::occurredAt).toList() : same;
                 if (!pool.isEmpty()) {
                     return pool.get(t.pick() % pool.size());
                 }
@@ -282,7 +282,7 @@ public final class ReadGenerators {
         return WINDOW_START.plus(day, ChronoUnit.DAYS).plusSeconds(secondOfDay);
     }
 
-    private static short typeOf(SourceKind source) {
+    private static String typeOf(SourceKind source) {
         return switch (source) {
             case TRANSACTION -> TxTypes.PLAY;
             case CLAIMABLE_PRIZE -> TxTypes.WIN;

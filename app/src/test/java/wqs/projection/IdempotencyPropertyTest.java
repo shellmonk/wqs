@@ -12,7 +12,7 @@ import net.jqwik.api.Tag;
 import net.jqwik.api.lifecycle.BeforeTry;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.gen.EventGenerators;
 
 /**
@@ -38,60 +38,60 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
 
     @Property(tries = 40)
     void a_permuted_and_duplicated_sequence_converges_to_the_same_state(
-            @ForAll("sequences") List<ProjectionItem> items,
+            @ForAll("sequences") List<ProjectionTransaction> transactions,
             @ForAll long seed) {
-        assertPermutedAndDuplicatedConverges(items, seed);
+        assertPermutedAndDuplicatedConverges(transactions, seed);
     }
 
     @Property(tries = 40)
     void a_permuted_and_duplicated_sequence_with_cancels_converges_to_the_same_state(
-            @ForAll("sequencesWithCancels") List<ProjectionItem> items,
+            @ForAll("sequencesWithCancels") List<ProjectionTransaction> transactions,
             @ForAll long seed) {
-        assertPermutedAndDuplicatedConverges(items, seed);
+        assertPermutedAndDuplicatedConverges(transactions, seed);
     }
 
     @Property(tries = 20)
     void applying_a_sequence_twice_changes_nothing(
-            @ForAll("sequences") List<ProjectionItem> items) {
-        assertReplayChangesNothing(items);
+            @ForAll("sequences") List<ProjectionTransaction> transactions) {
+        assertReplayChangesNothing(transactions);
     }
 
     @Property(tries = 20)
     void applying_a_sequence_with_cancels_twice_changes_nothing(
-            @ForAll("sequencesWithCancels") List<ProjectionItem> items) {
-        assertReplayChangesNothing(items);
+            @ForAll("sequencesWithCancels") List<ProjectionTransaction> transactions) {
+        assertReplayChangesNothing(transactions);
     }
 
-    private void assertPermutedAndDuplicatedConverges(List<ProjectionItem> items, long seed) {
-        ProjectionSnapshot inOrder = applyAndSnapshot(items);
+    private void assertPermutedAndDuplicatedConverges(List<ProjectionTransaction> transactions, long seed) {
+        ProjectionSnapshot inOrder = applyAndSnapshot(transactions);
 
         reset();
-        ProjectionSnapshot shuffledWithDuplicates = applyAndSnapshot(perturb(items, seed));
+        ProjectionSnapshot shuffledWithDuplicates = applyAndSnapshot(perturb(transactions, seed));
 
         assertThat(shuffledWithDuplicates).isEqualTo(inOrder);
     }
 
-    private void assertReplayChangesNothing(List<ProjectionItem> items) {
-        ProjectionSnapshot once = applyAndSnapshot(items);
-        applyBatches(items);
+    private void assertReplayChangesNothing(List<ProjectionTransaction> transactions) {
+        ProjectionSnapshot once = applyAndSnapshot(transactions);
+        applyBatches(transactions);
 
-        assertRoutedExactly(items);
+        assertRoutedExactly(transactions);
         assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(once);
     }
 
     @net.jqwik.api.Provide
-    net.jqwik.api.Arbitrary<List<ProjectionItem>> sequences() {
-        return EventGenerators.itemSequences();
+    net.jqwik.api.Arbitrary<List<ProjectionTransaction>> sequences() {
+        return EventGenerators.transactionSequences();
     }
 
     @net.jqwik.api.Provide
-    net.jqwik.api.Arbitrary<List<ProjectionItem>> sequencesWithCancels() {
-        return EventGenerators.itemSequencesWithCancels();
+    net.jqwik.api.Arbitrary<List<ProjectionTransaction>> sequencesWithCancels() {
+        return EventGenerators.transactionSequencesWithCancels();
     }
 
-    private ProjectionSnapshot applyAndSnapshot(List<ProjectionItem> items) {
-        applyBatches(items);
-        assertRoutedExactly(items);
+    private ProjectionSnapshot applyAndSnapshot(List<ProjectionTransaction> transactions) {
+        applyBatches(transactions);
+        assertRoutedExactly(transactions);
         return ProjectionSnapshot.of(jdbc());
     }
 
@@ -99,22 +99,22 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
      * Convergence cannot see deterministic misrouting or deterministic dropping, so check
      * completeness directly: each distinct (source, sourceId) with a non-zero amount is in exactly
      * the view tables its source routes to (once), and nothing else is -- in particular no
-     * zero-amount item; and every item, zero-amount or not, has its locator row.
+     * zero-amount transaction; and every transaction, zero-amount or not, has its locator row.
      */
-    private void assertRoutedExactly(List<ProjectionItem> items) {
+    private void assertRoutedExactly(List<ProjectionTransaction> transactions) {
         List<String> expectedWeb = new ArrayList<>();
         List<String> expectedCc = new ArrayList<>();
-        for (ProjectionItem item : items) {
-            if (item.amount().signum() == 0) continue; // locator only (spec 4.1, D8)
-            String key = item.source().code() + "/" + item.sourceId();
+        for (ProjectionTransaction transaction : transactions) {
+            if (transaction.amount().signum() == 0) continue; // locator only (spec 4.1, D8)
+            String key = transaction.source().code() + "/" + transaction.sourceId();
             if (expectedWeb.contains(key) || expectedCc.contains(key)) continue; // generated keys are unique
-            if (item.source().views().contains(wqs.domain.ViewKind.WEB)) expectedWeb.add(key);
-            if (item.source().views().contains(wqs.domain.ViewKind.CC)) expectedCc.add(key);
+            if (transaction.source().views().contains(wqs.domain.ViewKind.WEB)) expectedWeb.add(key);
+            if (transaction.source().views().contains(wqs.domain.ViewKind.CC)) expectedCc.add(key);
         }
-        assertThat(keys("wqWebItem")).as("wqWebItem").containsExactlyInAnyOrderElementsOf(expectedWeb);
-        assertThat(keys("wqCcItem")).as("wqCcItem").containsExactlyInAnyOrderElementsOf(expectedCc);
-        assertThat(keys("wqItemLocator")).as("wqItemLocator").containsExactlyInAnyOrderElementsOf(
-                items.stream().map(i -> i.source().code() + "/" + i.sourceId()).distinct().toList());
+        assertThat(keys("wqPrjWebTransaction")).as("wqPrjWebTransaction").containsExactlyInAnyOrderElementsOf(expectedWeb);
+        assertThat(keys("wqPrjCcTransaction")).as("wqPrjCcTransaction").containsExactlyInAnyOrderElementsOf(expectedCc);
+        assertThat(keys("wqPrjTransactionLocator")).as("wqPrjTransactionLocator").containsExactlyInAnyOrderElementsOf(
+                transactions.stream().map(i -> i.source().code() + "/" + i.sourceId()).distinct().toList());
     }
 
     private List<String> keys(String table) {
@@ -122,12 +122,12 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
     }
 
     /** Shuffles and duplicates roughly a third of the events. */
-    private static List<ProjectionItem> perturb(List<ProjectionItem> items, long seed) {
+    private static List<ProjectionTransaction> perturb(List<ProjectionTransaction> transactions, long seed) {
         Random random = new Random(seed);
-        List<ProjectionItem> perturbed = new ArrayList<>(items);
-        for (ProjectionItem item : items) {
+        List<ProjectionTransaction> perturbed = new ArrayList<>(transactions);
+        for (ProjectionTransaction transaction : transactions) {
             if (random.nextInt(3) == 0) {
-                perturbed.add(item);
+                perturbed.add(transaction);
             }
         }
         Collections.shuffle(perturbed, random);

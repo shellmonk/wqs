@@ -12,8 +12,8 @@ import wqs.read.HighLevelKey;
 import wqs.read.HighLevelQuery;
 
 /**
- * Level-1/2 reads of the web view's page index (spec 5.6); touches only "wqWebHighLevel". Every
- * predicate and sort column is in "wqWebHighLevel_cover" -- key ("userId", "occurredAt" desc,
+ * Level-1/2 reads of the web view's page index (spec 5.6); touches only "wqPrjWebHighLevel". Every
+ * predicate and sort column is in "wqPrjWebHighLevel_cover" -- key ("userId", "occurredAt" desc,
  * "kind" desc, "refId" desc), INCLUDE ("productType", "visibleExclCancelled") -- so both queries
  * are covering index scans.
  */
@@ -21,15 +21,15 @@ import wqs.read.HighLevelQuery;
 public class WebHighLevelQuery implements HighLevelQuery {
 
     private static final String COUNT = """
-            select count(*) from "wqWebHighLevel"
+            select count(*) from "wqPrjWebHighLevel"
             where %s
             """;
 
     private static final String KEYS = """
-            select "wqWebHighLevel"."occurredAt", "wqWebHighLevel"."kind", "wqWebHighLevel"."refId"
-            from "wqWebHighLevel"
+            select "wqPrjWebHighLevel"."occurredAt", "wqPrjWebHighLevel"."kind", "wqPrjWebHighLevel"."refId"
+            from "wqPrjWebHighLevel"
             where %s
-            order by "wqWebHighLevel"."occurredAt" desc, "wqWebHighLevel"."kind" desc, "wqWebHighLevel"."refId" desc
+            order by "wqPrjWebHighLevel"."occurredAt" desc, "wqPrjWebHighLevel"."kind" desc, "wqPrjWebHighLevel"."refId" desc
             offset :offset rows fetch next :limit rows only
             """;
 
@@ -57,13 +57,13 @@ public class WebHighLevelQuery implements HighLevelQuery {
     /** The key-range predicate, value-free: the filter only decides which fixed fragments appear. */
     private static String range(HighLevelFilter f) {
         StringBuilder c = new StringBuilder("""
-                ("wqWebHighLevel"."userId" = :userId and "wqWebHighLevel"."occurredAt" >= cast(:lo as timestamptz) \
-                and "wqWebHighLevel"."occurredAt" < cast(:hi as timestamptz)""");
+                ("wqPrjWebHighLevel"."userId" = :userId and "wqPrjWebHighLevel"."occurredAt" >= cast(:lo as timestamptz) \
+                and "wqPrjWebHighLevel"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c.append(" and \"wqWebHighLevel\".\"visibleExclCancelled\" = true");
+            c.append(" and \"wqPrjWebHighLevel\".\"visibleExclCancelled\" = true");
         }
         if (!f.productTypes().isEmpty()) {
-            c.append(" and \"wqWebHighLevel\".\"productType\" in (:productTypes)");
+            c.append(" and \"wqPrjWebHighLevel\".\"productType\" in (:productTypes)");
         }
         return c.append(')').toString();
     }

@@ -7,7 +7,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 import wqs.projection.ProjectionBatch;
@@ -21,15 +21,15 @@ class BatchAccumulatorTest {
         MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
         BatchAccumulator accumulator = new BatchAccumulator("s", 3, MAX_WAIT, clock);
 
-        accumulator.add(item("a"), 1);
-        accumulator.add(item("b"), 2);
+        accumulator.add(transaction("a"), 1);
+        accumulator.add(transaction("b"), 2);
         assertThat(accumulator.drainIfReady()).isEmpty();
 
-        accumulator.add(item("c"), 3);
+        accumulator.add(transaction("c"), 3);
         Optional<ProjectionBatch> batch = accumulator.drainIfReady();
 
         assertThat(batch).isPresent();
-        assertThat(batch.get().items()).hasSize(3);
+        assertThat(batch.get().transactions()).hasSize(3);
         assertThat(batch.get().committedOffset()).isEqualTo(3L);
         assertThat(accumulator.pending()).isZero();
     }
@@ -39,14 +39,14 @@ class BatchAccumulatorTest {
         MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
         BatchAccumulator accumulator = new BatchAccumulator("s", 500, MAX_WAIT, clock);
 
-        accumulator.add(item("a"), 1);
+        accumulator.add(transaction("a"), 1);
         assertThat(accumulator.drainIfReady()).isEmpty();
 
         clock.advance(Duration.ofMillis(201));
         Optional<ProjectionBatch> batch = accumulator.drainIfReady();
 
         assertThat(batch).isPresent();
-        assertThat(batch.get().items()).hasSize(1);
+        assertThat(batch.get().transactions()).hasSize(1);
     }
 
     @Test
@@ -65,16 +65,16 @@ class BatchAccumulatorTest {
         MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
         BatchAccumulator accumulator = new BatchAccumulator("s", 10, MAX_WAIT, clock);
 
-        accumulator.add(item("a"), 7);
-        accumulator.add(item("b"), 9);
-        accumulator.add(item("c"), 8);
+        accumulator.add(transaction("a"), 7);
+        accumulator.add(transaction("b"), 9);
+        accumulator.add(transaction("c"), 8);
 
         ProjectionBatch batch = accumulator.drainNow().orElseThrow();
         assertThat(batch.committedOffset()).isEqualTo(9L);
-        // Each item keeps its own offset, for its dead-letter row.
-        assertThat(batch.itemOffsets()).containsExactly(7L, 9L, 8L);
-        accumulator.add(item("d"), 10);
-        assertThat(accumulator.drainNow().orElseThrow().itemOffsets()).containsExactly(10L);
+        // Each transaction keeps its own offset, for its dead-letter row.
+        assertThat(batch.transactionOffsets()).containsExactly(7L, 9L, 8L);
+        accumulator.add(transaction("d"), 10);
+        assertThat(accumulator.drainNow().orElseThrow().transactionOffsets()).containsExactly(10L);
     }
 
     @Test
@@ -82,16 +82,16 @@ class BatchAccumulatorTest {
         MutableClock clock = new MutableClock(Instant.parse("2033-01-01T00:00:00Z"));
         BatchAccumulator accumulator = new BatchAccumulator("s", 100, MAX_WAIT, clock);
 
-        accumulator.add(item("a"), 1);
+        accumulator.add(transaction("a"), 1);
         clock.advance(Duration.ofMillis(201));
         accumulator.drainIfReady();
 
-        accumulator.add(item("b"), 2);
+        accumulator.add(transaction("b"), 2);
         assertThat(accumulator.drainIfReady()).isEmpty();
     }
 
-    private static ProjectionItem item(String sourceId) {
-        return new ProjectionItem(
+    private static ProjectionTransaction transaction(String sourceId) {
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, sourceId, Instant.parse("2033-01-01T00:00:00Z"),
                 "P1", "instants", "b", "p", TxTypes.PLAY, BigDecimal.ONE, "EUR", null, null, null);
     }

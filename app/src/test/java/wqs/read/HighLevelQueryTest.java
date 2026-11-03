@@ -12,7 +12,7 @@ import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 import wqs.read.cc.CcHighLevelQuery;
@@ -36,9 +36,9 @@ class HighLevelQueryTest extends Level0TestSupport {
         return Instant.parse(s);
     }
 
-    private static ProjectionItem hl(SourceKind source, String id, String at, String productType,
+    private static ProjectionTransaction hl(SourceKind source, String id, String at, String productType,
                                      String batchId, String cancels) {
-        return new ProjectionItem(USER, source, id, t(at), productType == null ? null : "P-" + productType,
+        return new ProjectionTransaction(USER, source, id, t(at), productType == null ? null : "P-" + productType,
                 productType, batchId, batchId == null ? null : batchId + "-p0",
                 cancels == null ? TxTypes.PLAY : TxTypes.CANCEL, new BigDecimal(cancels == null ? "1.0000" : "-1.0000"),
                 "EUR", null, cancels, null);
@@ -49,7 +49,7 @@ class HighLevelQueryTest extends Level0TestSupport {
         project(
                 hl(TRANSACTION, "a", "2034-02-01T00:00:00Z", "keno", null, null),     // on the lower bound
                 hl(TRANSACTION, "b", "2034-03-01T00:00:00Z", "keno", null, null),     // on the upper bound: out
-                hl(TRANSACTION, "s1", "2034-02-10T10:00:00Z", "lottery", "b1", null), // session b1, 2 items
+                hl(TRANSACTION, "s1", "2034-02-10T10:00:00Z", "lottery", "b1", null), // session b1, 2 transactions
                 hl(TRANSACTION, "s2", "2034-02-11T10:00:00Z", "keno", "b1", null),
                 hl(TRANSACTION, "c", "2034-02-12T10:00:00Z", "keno", null, null),
                 hl(TRANSACTION, "c-x", "2034-02-12T11:00:00Z", "keno", null, "c"),    // hides c; no row itself
@@ -62,7 +62,7 @@ class HighLevelQueryTest extends Level0TestSupport {
         // c and b2 are hidden: "visibleExclCancelled" is false for them.
         assertThat(web.count(readerJdbc, new HighLevelFilter(USER, true), FEB, MAR)).isEqualTo(2);
         assertThat(cc.count(readerJdbc, new HighLevelFilter(USER, true), FEB, MAR)).isEqualTo(3);
-        // b1 is labelled by its FIRST item's product ("lottery"), not "keno".
+        // b1 is labelled by its FIRST transaction's product ("lottery"), not "keno".
         assertThat(web.count(readerJdbc, new HighLevelFilter(USER, Set.of("keno"), false), FEB, MAR)).isEqualTo(2);
         assertThat(web.count(readerJdbc, new HighLevelFilter(USER, Set.of("lottery", "absent"), false), FEB, MAR))
                 .isEqualTo(1);

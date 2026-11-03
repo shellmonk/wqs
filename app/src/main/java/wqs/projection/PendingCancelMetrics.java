@@ -16,7 +16,7 @@ public class PendingCancelMetrics {
 
     public PendingCancelMetrics(PendingCancelStore store, MeterRegistry registry, Clock clock) {
         Gauge.builder("wqs.pendingcancel.depth", store, PendingCancelStore::depth)
-                .description("Cancels parked awaiting their target item")
+                .description("Cancels parked awaiting their target transaction")
                 .register(registry);
 
         Gauge.builder("wqs.pendingcancel.oldest.age.seconds", store,

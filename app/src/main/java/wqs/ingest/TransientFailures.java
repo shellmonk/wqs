@@ -8,7 +8,7 @@ import org.springframework.dao.RecoverableDataAccessException;
 import org.springframework.dao.TransientDataAccessException;
 
 /**
- * The one rule, shared by the stream consumer (mapping and per-item apply) and the delta poller
+ * The one rule, shared by the stream consumer (mapping and per-transaction apply) and the delta poller
  * (decode and per-row apply), for which failures are retried rather than dead-lettered: an explicit
  * ALLOWLIST of transient infrastructure failures, looked for anywhere in the cause chain. A failure
  * on it is retried -- the stream enters recovery, the poller's run fails -- with no dead letter and

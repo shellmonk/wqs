@@ -3,7 +3,7 @@ package wqs.read;
 import java.util.List;
 
 /**
- * Per-segment item counts for a decomposed range (spec 7.5). {@code counts[i]} belongs to
+ * Per-segment transaction counts for a decomposed range (spec 7.5). {@code counts[i]} belongs to
  * {@code segments.get(i)}; {@code counterRows} is how many stored counter rows were used.
  * Immutable: {@code counts} is copied on the way in and on the way out.
  */

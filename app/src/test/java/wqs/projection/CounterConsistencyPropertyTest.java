@@ -10,7 +10,7 @@ import net.jqwik.api.Provide;
 import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.gen.EventGenerators;
 
 /**
@@ -24,15 +24,15 @@ class CounterConsistencyPropertyTest extends ProjectionPropertyBase {
 
     @Property(tries = 30)
     void counters_always_match_the_projection(
-            @ForAll("sequencesWithCancels") List<ProjectionItem> items) {
+            @ForAll("sequencesWithCancels") List<ProjectionTransaction> transactions) {
         reset();
-        applyBatches(items);
+        applyBatches(transactions);
 
         assertThat(new ProjectionInvariants(jdbc()).counterDrift()).isEmpty();
     }
 
     @Provide
-    Arbitrary<List<ProjectionItem>> sequencesWithCancels() {
-        return EventGenerators.itemSequencesWithCancels();
+    Arbitrary<List<ProjectionTransaction>> sequencesWithCancels() {
+        return EventGenerators.transactionSequencesWithCancels();
     }
 }

@@ -21,9 +21,8 @@ import wqs.domain.AggregationLevel;
 
 /**
  * Level-1/2 page assembly (spec 7.3, 7.4): turns a page's high-level keys into entries, in the
- * keys' (page-index) order. At most four queries whatever the page size and whatever the type
- * registry's cache holds -- the page's sessions, their plays (level 2 only), the view's items of
- * those sessions, and its unsessioned items -- each an array-bound join on the page's keys, so none
+ * keys' (page-index) order. At most four queries whatever the page size -- the page's sessions, their plays (level 2 only), the view's transactions of
+ * those sessions, and its unsessioned transactions -- each an array-bound join on the page's keys, so none
  * grows in binds or round trips with the page; each member probe is per session or per key, so
  * none reads rows outside the page's own (final review F1). A session's rows include its
  * cancellation rows dated after its "endedAt", up to the range end (F3); at level 2 a row whose
@@ -34,7 +33,7 @@ import wqs.domain.AggregationLevel;
  * nested transactions (spec 4.1 (b)): sessions, plays and their totals do not depend on it.
  * {@code excludeCancelled} hides cancelled nested transactions exactly as level 0 does (cancellation
  * rows stay), and at level 2 omits plays with no surviving transaction. The rollup tables are
- * shared by both views; the view's {@link HighLevelItemQuery} reads its own item table.
+ * shared by both views; the view's {@link HighLevelTransactionQuery} reads its own projected transaction table.
  */
 @Component
 public class HighLevelAssembler {
@@ -59,11 +58,11 @@ public class HighLevelAssembler {
      * skipped rather than failing the page.
      */
     public List<HighLevelEntry> assemble(
-            JdbcClient tx, HighLevelItemQuery items, long userId, Nesting n, List<HighLevelKey> keys) {
+            JdbcClient tx, HighLevelTransactionQuery transactions, long userId, Nesting n, List<HighLevelKey> keys) {
         List<HighLevelKey> sessionKeys = new ArrayList<>();
-        List<HighLevelKey> itemKeys = new ArrayList<>();
+        List<HighLevelKey> transactionKeys = new ArrayList<>();
         for (HighLevelKey k : keys) {
-            (k.kind() == 0 ? sessionKeys : itemKeys).add(k);
+            (k.kind() == 0 ? sessionKeys : transactionKeys).add(k);
         }
 
         Map<HighLevelKey, SessionRow> sessions = sessions(tx, userId, sessionKeys);
@@ -71,7 +70,7 @@ public class HighLevelAssembler {
         Map<String, List<TxView>> txsByBatch = Map.of();
         Map<String, Map<String, List<TxView>>> txsByPlay = Map.of();
         if (!sessions.isEmpty()) {
-            // Bounds of the page's sessions' "startedAt" only (partition pruning of "wqSession");
+            // Bounds of the page's sessions' "startedAt" only (partition pruning of "wqPrjSession");
             // every member probe is per session, inside its own window (final review F1).
             Instant lo = sessions.values().stream().map(s -> s.startedAt())
                     .min(Comparator.naturalOrder()).orElseThrow();
@@ -85,11 +84,11 @@ public class HighLevelAssembler {
             Map<String, Set<String>> listedPlays = new HashMap<>();
             plays.forEach((b, ps) -> ps.forEach(
                     p -> listedPlays.computeIfAbsent(b, x -> new HashSet<>()).add(p.subBatchId())));
-            List<ItemEntry> children = items.sessionItems(
+            List<TransactionEntry> children = transactions.sessionTransactions(
                     tx, userId, byBatch.keySet(), lo, hi, n.to(), n.transactionTypes(), n.excludeCancelled());
             txsByBatch = new HashMap<>();
             txsByPlay = new HashMap<>();
-            for (ItemEntry e : children) {
+            for (TransactionEntry e : children) {
                 if (!byBatch.containsKey(e.batchId())) {
                     continue;
                 }
@@ -104,7 +103,7 @@ public class HighLevelAssembler {
                 }
             }
         }
-        Map<HighLevelKey, ItemEntry> unsessioned = itemKeys.isEmpty() ? Map.of() : items.unsessioned(tx, userId, itemKeys);
+        Map<HighLevelKey, TransactionEntry> unsessioned = transactionKeys.isEmpty() ? Map.of() : transactions.unsessioned(tx, userId, transactionKeys);
 
         List<HighLevelEntry> out = new ArrayList<>(keys.size());
         for (HighLevelKey k : keys) {
@@ -116,7 +115,7 @@ public class HighLevelAssembler {
                             txsByPlay.getOrDefault(s.batchId(), Map.of())));
                 }
             } else {
-                ItemEntry e = unsessioned.get(k);
+                TransactionEntry e = unsessioned.get(k);
                 if (e != null) {
                     out.add(TxView.of(e));
                 }
@@ -178,7 +177,7 @@ public class HighLevelAssembler {
 
     /**
      * The sessions' plays, newest first ("startedAt" desc, "subBatchId" desc), grouped by batch:
-     * per session, through "wqPlay_batch", inside the session's own window (final review F1).
+     * per session, through "wqPrjPlay_batch", inside the session's own window (final review F1).
      * Under excludeCancelled a play with no surviving transaction is omitted.
      */
     private static Map<String, List<PlayRow>> plays(JdbcClient tx, long userId,
@@ -204,46 +203,46 @@ public class HighLevelAssembler {
 
     // Value-free statements: every value is a named bind.
     private static final String SESSIONS = """
-            select "wqSession"."userId", "wqSession"."batchId", "wqSession"."startedAt", "wqSession"."endedAt",
-                   "wqSession"."productId", "wqSession"."currency", "wqSession"."txCount",
-                   "wqSession"."txCountExclCancelled", "wqSession"."playCount", "wqSession"."playCountExclCancelled",
-                   "wqSession"."totalPlays", "wqSession"."totalWins", "wqSession"."net",
-                   "wqSession"."totalPlaysExclCancelled", "wqSession"."totalWinsExclCancelled",
-                   "wqSession"."netExclCancelled", "wqSession"."productType", "wqSession"."firstSourceId",
-                   "wqSession"."firstSource"
-            from "wqSession"
-            join unnest(cast(:ids as text[])) as "wanted" ("id") on "wqSession"."batchId" = "wanted"."id"
-            where ("wqSession"."userId" = :userId
-                   and "wqSession"."startedAt" between cast(:lo as timestamptz) and cast(:hi as timestamptz))
+            select "wqPrjSession"."userId", "wqPrjSession"."batchId", "wqPrjSession"."startedAt", "wqPrjSession"."endedAt",
+                   "wqPrjSession"."productId", "wqPrjSession"."currency", "wqPrjSession"."txCount",
+                   "wqPrjSession"."txCountExclCancelled", "wqPrjSession"."playCount", "wqPrjSession"."playCountExclCancelled",
+                   "wqPrjSession"."totalPlays", "wqPrjSession"."totalWins", "wqPrjSession"."net",
+                   "wqPrjSession"."totalPlaysExclCancelled", "wqPrjSession"."totalWinsExclCancelled",
+                   "wqPrjSession"."netExclCancelled", "wqPrjSession"."productType", "wqPrjSession"."firstSourceId",
+                   "wqPrjSession"."firstSource"
+            from "wqPrjSession"
+            join unnest(cast(:ids as text[])) as "wanted" ("id") on "wqPrjSession"."batchId" = "wanted"."id"
+            where ("wqPrjSession"."userId" = :userId
+                   and "wqPrjSession"."startedAt" between cast(:lo as timestamptz) and cast(:hi as timestamptz))
             """;
 
     private static final String PLAYS_FROM = """
-            select "wqPlay"."userId", "wqPlay"."batchId", "wqPlay"."subBatchId", "wqPlay"."startedAt",
-                   "wqPlay"."endedAt", "wqPlay"."productId", "wqPlay"."currency", "wqPlay"."txCount",
-                   "wqPlay"."txCountExclCancelled", "wqPlay"."totalPlays", "wqPlay"."totalWins", "wqPlay"."net",
-                   "wqPlay"."totalPlaysExclCancelled", "wqPlay"."totalWinsExclCancelled", "wqPlay"."netExclCancelled",
-                   "wqPlay"."productType", "wqPlay"."firstSourceId", "wqPlay"."firstSource"
+            select "wqPrjPlay"."userId", "wqPrjPlay"."batchId", "wqPrjPlay"."subBatchId", "wqPrjPlay"."startedAt",
+                   "wqPrjPlay"."endedAt", "wqPrjPlay"."productId", "wqPrjPlay"."currency", "wqPrjPlay"."txCount",
+                   "wqPrjPlay"."txCountExclCancelled", "wqPrjPlay"."totalPlays", "wqPrjPlay"."totalWins", "wqPrjPlay"."net",
+                   "wqPrjPlay"."totalPlaysExclCancelled", "wqPrjPlay"."totalWinsExclCancelled", "wqPrjPlay"."netExclCancelled",
+                   "wqPrjPlay"."productType", "wqPrjPlay"."firstSourceId", "wqPrjPlay"."firstSource"
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqSession" on ("wqSession"."userId" = :userId and "wqSession"."batchId" = "wanted"."id"
-                   and "wqSession"."startedAt" between cast(:lo as timestamptz) and cast(:hi as timestamptz))
-            join "wqPlay" on ("wqPlay"."userId" = :userId and "wqPlay"."batchId" = "wqSession"."batchId"
-                   and "wqPlay"."startedAt" between "wqSession"."startedAt" and "wqSession"."endedAt")
+            join "wqPrjSession" on ("wqPrjSession"."userId" = :userId and "wqPrjSession"."batchId" = "wanted"."id"
+                   and "wqPrjSession"."startedAt" between cast(:lo as timestamptz) and cast(:hi as timestamptz))
+            join "wqPrjPlay" on ("wqPrjPlay"."userId" = :userId and "wqPrjPlay"."batchId" = "wqPrjSession"."batchId"
+                   and "wqPrjPlay"."startedAt" between "wqPrjSession"."startedAt" and "wqPrjSession"."endedAt")
             """;
     private static final String PLAYS_ORDER = """
-            order by "wqPlay"."startedAt" desc, "wqPlay"."subBatchId" desc
+            order by "wqPrjPlay"."startedAt" desc, "wqPrjPlay"."subBatchId" desc
             """;
     private static final String PLAYS = PLAYS_FROM + PLAYS_ORDER;
     private static final String PLAYS_EXCL = PLAYS_FROM + """
-            where "wqPlay"."txCountExclCancelled" > :zero
+            where "wqPrjPlay"."txCountExclCancelled" > :zero
             """ + PLAYS_ORDER;
 
-    /** The "wqSession" columns assembly reads. */
+    /** The "wqPrjSession" columns assembly reads. */
     private record SessionRow(String batchId, Instant startedAt, Instant endedAt, String productId,
                               String productType, String currency, BigDecimal totalPlays, BigDecimal totalWins,
                               BigDecimal net, BigDecimal totalPlaysExclCancelled, BigDecimal totalWinsExclCancelled,
                               BigDecimal netExclCancelled, int playCount, int playCountExclCancelled) {}
 
-    /** The "wqPlay" columns assembly reads. */
+    /** The "wqPrjPlay" columns assembly reads. */
     private record PlayRow(String batchId, String subBatchId, Instant startedAt, BigDecimal totalPlays,
                            BigDecimal totalWins, BigDecimal net, BigDecimal totalPlaysExclCancelled,
                            BigDecimal totalWinsExclCancelled, BigDecimal netExclCancelled) {}
@@ -268,7 +267,7 @@ public class HighLevelAssembler {
         return t == null ? null : t.toInstant();
     }
 
-    /** One array bind, joined through unnest(?) as the phase-4 item fetch does. */
+    /** One array bind, joined through unnest(?) as the phase-4 transaction fetch does. */
     private static String[] batchIds(Set<String> ids) {
         return ids.toArray(String[]::new);
     }

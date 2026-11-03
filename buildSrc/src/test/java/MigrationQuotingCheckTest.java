@@ -11,35 +11,35 @@ class MigrationQuotingCheckTest {
 
     @Test
     void fullyQuotedSqlYieldsNoViolations() {
-        String sql = "create table \"wqWebItem\" (\"userId\" bigint, \"occurredAt\" timestamptz);";
+        String sql = "create table \"wqPrjWebTransaction\" (\"userId\" bigint, \"occurredAt\" timestamptz);";
         assertEquals(List.of(), find(sql));
     }
 
     @Test
     void unquotedTableNameIsReported() {
-        String sql = "create index on wqWebItem (\"userId\");";
-        assertEquals(List.of("wqWebItem"), find(sql));
+        String sql = "create index on wqPrjWebTransaction (\"userId\");";
+        assertEquals(List.of("wqPrjWebTransaction"), find(sql));
     }
 
     @Test
     void unquotedColumnInsideOtherwiseQuotedSqlIsReported() {
-        String sql = "create index on \"wqWebItem\" (occurredAt);";
+        String sql = "create index on \"wqPrjWebTransaction\" (occurredAt);";
         assertEquals(List.of("occurredAt"), find(sql));
     }
 
     @Test
     void lineCommentsAreIgnored() {
         String sql = """
-                -- wqWebItem is partitioned by occurredAt
-                create table "wqWebItem" ("userId" bigint);""";
+                -- wqPrjWebTransaction is partitioned by occurredAt
+                create table "wqPrjWebTransaction" ("userId" bigint);""";
         assertEquals(List.of(), find(sql));
     }
 
     @Test
     void blockCommentsAreIgnored() {
         String sql = """
-                /* wqWebItem block comment mentions camelCase occurredAt */
-                create table "wqWebItem" ("userId" bigint);""";
+                /* wqPrjWebTransaction block comment mentions camelCase occurredAt */
+                create table "wqPrjWebTransaction" ("userId" bigint);""";
         assertEquals(List.of(), find(sql));
     }
 
@@ -77,7 +77,7 @@ class MigrationQuotingCheckTest {
 
     @Test
     void camelCaseIdentifierWithADigitInTheHumpIsReported() {
-        String sql = "create index on \"t\" (item2Id);";
-        assertEquals(List.of("item2Id"), find(sql));
+        String sql = "create index on \"t\" (transaction2Id);";
+        assertEquals(List.of("transaction2Id"), find(sql));
     }
 }

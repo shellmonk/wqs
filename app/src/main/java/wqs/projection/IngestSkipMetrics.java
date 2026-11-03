@@ -8,7 +8,7 @@ import io.micrometer.core.instrument.MeterRegistry;
  * Both reasons are registered up front, so a dashboard sees 0 rather than no series.
  * <ul>
  *   <li>{@code non-player}: the owner's userType is not 1. Nothing at all is written.</li>
- *   <li>{@code zero-amount}: recorded in "wqItemLocator" only, counted once on first sight
+ *   <li>{@code zero-amount}: recorded in "wqPrjTransactionLocator" only, counted once on first sight
  *       (a re-delivery is a duplicate).</li>
  * </ul>
  */

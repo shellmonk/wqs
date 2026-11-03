@@ -10,32 +10,32 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.ViewKind;
 
 /**
  * Maintains the level-1/2 page index (spec 5.6): exactly one row per session and one per
- * unsessioned item.
+ * unsessioned transaction.
  *
  * A session row is keyed and populated from the SESSION's current key in {@link RollupResult}
- * (its start and product), never from the triggering item: a session's start moves earlier when
- * an earlier item arrives, so the row is MOVED (the start is in the primary key and the partition
+ * (its start and product), never from the triggering projected transaction: a session's start moves earlier when
+ * an earlier projected transaction arrives, so the row is MOVED (the start is in the primary key and the partition
  * key) and its productId / productType updated in place when only the product changed. A transaction joining a
  * session with an unchanged key inserts nothing in views that already hold the row, which keeps
- * page counts equal to the number of high-level items rather than the number of transactions.
- * Every sessioned item also ensures the row exists in each view its own source feeds, so the end
+ * page counts equal to the number of high-level rows rather than the number of transactions.
+ * Every sessioned projected transaction also ensures the row exists in each view its own source feeds, so the end
  * state does not depend on which source opened the session.
  *
  * Visibility ("visibleExclCancelled") is per view: a session row in view V is visible while the
- * session has at least one surviving (non-cancelled, non-cancellation) item whose source feeds V.
- * {@link CancellationApplier} hides a row when a cancel removes the last such item; here, a live
- * item joining a session whose row in a view its source feeds is hidden REVIVES it, since the
- * item is itself a surviving item in that view.
+ * session has at least one surviving (non-cancelled, non-cancellation) transaction whose source feeds V.
+ * {@link CancellationApplier} hides a row when a cancel removes the last such transaction; here, a live
+ * transaction joining a session whose row in a view its source feeds is hidden REVIVES it, since the
+ * transaction is itself a surviving transaction in that view.
  *
  * Currency: a session row carries the SESSION's currency (from {@link RollupResult#sessionCurrency},
- * exactly as "wqSession" holds it). A session is single-currency -- an item of another currency
+ * exactly as "wqPrjSession" holds it). A session is single-currency -- a transaction of another currency
  * is dead-lettered before it gets here (plan D6) -- so the currency never changes and rows never
- * need re-syncing. An unsessioned row carries its item's own currency.
+ * need re-syncing. An unsessioned row carries its transaction's own currency.
  *
  * A cancellation never creates a row; its effects are applied by {@link CancellationApplier}.
  */
@@ -51,29 +51,29 @@ public class HighLevelUpdater {
     }
 
     /**
-     * Applies one item's effect on the page index. A move is a delete plus an insert, so callers
+     * Applies one projected transaction's effect on the page index. A move is a delete plus an insert, so callers
      * must supply the transaction.
      *
-     * @param rollup what {@link RollupUpdater} did for this item ({@link RollupResult#NONE} for
-     *               unsessioned items and cancellations)
+     * @param rollup what {@link RollupUpdater} did for this projected transaction ({@link RollupResult#NONE} for
+     *               unsessioned transactions and cancellations)
      * @return the views where a row was inserted, where an existing session row moved or
      *         changed product, and where a hidden session row was revived; see
      *         {@link HighLevelResult}
      */
     @Transactional(propagation = Propagation.MANDATORY)
-    public HighLevelResult applyItem(ProjectionItem item, RollupResult rollup) {
-        if (item.isCancellation()) {
+    public HighLevelResult applyTransaction(ProjectionTransaction transaction, RollupResult rollup) {
+        if (transaction.isCancellation()) {
             return HighLevelResult.NONE;
         }
-        if (!item.isSessioned()) {
+        if (!transaction.isSessioned()) {
             return new HighLevelResult(
-                    insertForSource(item, item.occurredAt(), (short) item.source().code(),
-                            item.sourceId(), item.productId(), item.productType(), item.currency()),
+                    insertForSource(transaction, transaction.occurredAt(), (short) transaction.source().code(),
+                            transaction.sourceId(), transaction.productId(), transaction.productType(), transaction.currency()),
                     Set.of(), null, null, Map.of(), Set.of());
         }
         if (rollup.sessionStart() == null) {
             throw new IllegalStateException(
-                    "sessioned item " + item.sourceId() + " has no session key in its RollupResult");
+                    "sessioned transaction " + transaction.sourceId() + " has no session key in its RollupResult");
         }
         Map<ViewKind, Boolean> movedVisible = HighLevelResult.newViewMap();
         boolean startMoved = rollup.sessionKeyChanged()
@@ -81,25 +81,25 @@ public class HighLevelUpdater {
         if (rollup.sessionKeyChanged()) {
             for (ViewKind view : ViewKind.values()) {
                 Boolean visible = startMoved
-                        ? move(view(view), item, rollup)
-                        : updateProduct(view(view), item, rollup);
+                        ? move(view(view), transaction, rollup)
+                        : updateProduct(view(view), transaction, rollup);
                 if (visible != null) {
                     movedVisible.put(view, visible);
                 }
             }
         }
         Set<ViewKind> moved = movedVisible.keySet();
-        // Materialise the session row in every view THIS item's source feeds, whatever order the
-        // session's items arrived in (P-1). The item is live (cancellations return above), so
-        // the session has a surviving item in that view and the row is visible.
-        Set<ViewKind> inserted = insertForSource(item, rollup.sessionStart(), KIND_SESSION,
-                item.batchId(), rollup.sessionProductId(), rollup.sessionProductType(),
+        // Materialise the session row in every view THIS transaction's source feeds, whatever order the
+        // session's transactions arrived in (P-1). The transaction is live (cancellations return above), so
+        // the session has a surviving transaction in that view and the row is visible.
+        Set<ViewKind> inserted = insertForSource(transaction, rollup.sessionStart(), KIND_SESSION,
+                transaction.batchId(), rollup.sessionProductId(), rollup.sessionProductType(),
                 rollup.sessionCurrency());
-        // Where the row already existed, it may have been hidden by cancels; this live item
+        // Where the row already existed, it may have been hidden by cancels; this live transaction
         // makes the session visible again in the views its source feeds.
         Set<ViewKind> revived = HighLevelResult.newViewSet();
-        for (ViewKind view : item.source().views()) {
-            if (!inserted.contains(view) && revive(view(view), item, rollup)) {
+        for (ViewKind view : transaction.source().views()) {
+            if (!inserted.contains(view) && revive(view(view), transaction, rollup)) {
                 revived.add(view);
             }
         }
@@ -110,18 +110,18 @@ public class HighLevelUpdater {
     }
 
     /** Flips a hidden session row visible at the session's current key; true iff it flipped. */
-    private boolean revive(View v, ProjectionItem item, RollupResult rollup) {
+    private boolean revive(View v, ProjectionTransaction transaction, RollupResult rollup) {
         return jdbc.sql(v.revive())
-                .params(item.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, item.batchId())
+                .params(transaction.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, transaction.batchId())
                 .update() > 0;
     }
 
-    private Set<ViewKind> insertForSource(ProjectionItem item, Instant at, short kind,
+    private Set<ViewKind> insertForSource(ProjectionTransaction transaction, Instant at, short kind,
                                           String refId, String productId, String productType,
                                           String currency) {
         Set<ViewKind> inserted = HighLevelResult.newViewSet();
-        for (ViewKind view : item.source().views()) {
-            if (insert(view(view), item.userId(), at, kind, refId, productId, productType,
+        for (ViewKind view : transaction.source().views()) {
+            if (insert(view(view), transaction.userId(), at, kind, refId, productId, productType,
                     currency, true) > 0) {
                 inserted.add(view);
             }
@@ -142,17 +142,17 @@ public class HighLevelUpdater {
      *
      * @return the moved row's visibility, or null when this view held no row
      */
-    private Boolean move(View v, ProjectionItem item, RollupResult rollup) {
+    private Boolean move(View v, ProjectionTransaction transaction, RollupResult rollup) {
         Boolean visible = jdbc.sql(v.delete())
-                .params(item.userId(), timestamptz(rollup.previousSessionStart()), KIND_SESSION,
-                        item.batchId())
+                .params(transaction.userId(), timestamptz(rollup.previousSessionStart()), KIND_SESSION,
+                        transaction.batchId())
                 .query(Boolean.class)
                 .optional()
                 .orElse(null);
         if (visible == null) {
             return null;
         }
-        insert(v, item.userId(), rollup.sessionStart(), KIND_SESSION, item.batchId(),
+        insert(v, transaction.userId(), rollup.sessionStart(), KIND_SESSION, transaction.batchId(),
                 rollup.sessionProductId(), rollup.sessionProductType(), rollup.sessionCurrency(),
                 visible);
         return visible;
@@ -163,10 +163,10 @@ public class HighLevelUpdater {
      *
      * @return the row's visibility, or null when this view held no row
      */
-    private Boolean updateProduct(View v, ProjectionItem item, RollupResult rollup) {
+    private Boolean updateProduct(View v, ProjectionTransaction transaction, RollupResult rollup) {
         return jdbc.sql(v.updateProduct())
                 .params(text(rollup.sessionProductId()), text(rollup.sessionProductType()),
-                        item.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, item.batchId())
+                        transaction.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, transaction.batchId())
                 .query(Boolean.class)
                 .optional()
                 .orElse(null);
@@ -179,8 +179,8 @@ public class HighLevelUpdater {
     /** The two page-index tables share a column shape; this carries one table's statements. */
     private record View(String insert, String revive, String delete, String updateProduct) {
 
-        static final View WEB = of("wqWebHighLevel");
-        static final View CC = of("wqCcHighLevel");
+        static final View WEB = of("wqPrjWebHighLevel");
+        static final View CC = of("wqPrjCcHighLevel");
 
         private static final String KEY = """
                 "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?""";

@@ -15,7 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
@@ -33,8 +33,8 @@ import wqs.read.Segment.Tier;
  * sessions (kind 0), unsessioned transactions (kind 1), a claimable prize (kind 3) and a payment
  * (kind 4, /cc only), so the "kind" and "refId" tie-breaks decide where pages split. It spans
  * Dec 2033 - Mar 2034 and three product types (keno, lottery, none), and includes a fully
- * cancelled session, a cancelled unsessioned item and a session that re-anchors onto a tie
- * instant after a later item opened it.
+ * cancelled session, a cancelled unsessioned transaction and a session that re-anchors onto a tie
+ * instant after a later transaction opened it.
  */
 @SpringBootTest
 class HighLevelPagingTest extends ReadPropertyBase {
@@ -86,7 +86,7 @@ class HighLevelPagingTest extends ReadPropertyBase {
                         .contains((short) 0, (short) 1, (short) 3);
                 assertThat(group.stream().filter(k -> k.kind() == 0)).as(v + " sessions at " + tie).hasSizeGreaterThan(1);
             }
-            // the cancelled session and item exist, and excludeCancelled hides them
+            // the cancelled session and transaction exist, and excludeCancelled hides them
             long hidden = oracle.highLevelCount(v, FILTERS.get(0), all.from(), all.to())
                     - oracle.highLevelCount(v, FILTERS.get(2), all.from(), all.to());
             assertThat(hidden).as(v + " hidden rows").isEqualTo(2);
@@ -164,7 +164,7 @@ class HighLevelPagingTest extends ReadPropertyBase {
             assertThat(recording.countCalls).as(v + " live counts").isZero();
             assertThat(sc.counterRows()).as(v.name()).isEqualTo(4);
             assertThat(sc.total()).as(v.name()).isEqualTo(oracle.highLevelCount(v, FILTERS.get(0), all.from(), all.to()));
-            // Fewer page rows than items: sessions are one row each, cancels none.
+            // Fewer page rows than transactions: sessions are one row each, cancels none.
             assertThat(sc.total()).as(v.name()).isLessThan(oracle.count(v, new Level0Filter(USER, false), all.from(), all.to()));
         }
     }
@@ -194,54 +194,54 @@ class HighLevelPagingTest extends ReadPropertyBase {
 
     // ------------------------------------------------------------------ the dataset
 
-    private static List<ProjectionItem> dataset() {
-        List<ProjectionItem> d = new ArrayList<>();
+    private static List<ProjectionTransaction> dataset() {
+        List<ProjectionTransaction> d = new ArrayList<>();
         Function<String, Instant> at = Instant::parse;
         for (int g = 0; g < TIES.length; g++) {
             Instant tie = at.apply(TIES[g]);
             String p = "g" + g;
-            // Session A opens at the tie (keno, its first item) and continues an hour later.
-            d.add(item(SourceKind.TRANSACTION, p + "-a1", tie, "keno", p + "-sa"));
-            d.add(item(SourceKind.TRANSACTION, p + "-a2", tie.plus(Duration.ofHours(1)), "lottery", p + "-sa"));
+            // Session A opens at the tie (keno, its first projected transaction) and continues an hour later.
+            d.add(transaction(SourceKind.TRANSACTION, p + "-a1", tie, "keno", p + "-sa"));
+            d.add(transaction(SourceKind.TRANSACTION, p + "-a2", tie.plus(Duration.ofHours(1)), "lottery", p + "-sa"));
             // Session B opens at the tie (lottery) and continues two days later.
-            d.add(item(SourceKind.TRANSACTION, p + "-b1", tie, "lottery", p + "-sb"));
-            d.add(item(SourceKind.CLAIMABLE_PRIZE, p + "-b2", tie.plus(Duration.ofDays(2)), "lottery", p + "-sb"));
+            d.add(transaction(SourceKind.TRANSACTION, p + "-b1", tie, "lottery", p + "-sb"));
+            d.add(transaction(SourceKind.CLAIMABLE_PRIZE, p + "-b2", tie.plus(Duration.ofDays(2)), "lottery", p + "-sb"));
             // Unsessioned peers on the same instant: transactions (kind 1), a prize (3), a payment (4, /cc).
-            d.add(item(SourceKind.TRANSACTION, p + "-t1", tie, "keno", null));
-            d.add(item(SourceKind.TRANSACTION, p + "-t2", tie, null, null));
-            d.add(item(SourceKind.TRANSACTION, p + "-t3", tie, "lottery", null));
-            d.add(item(SourceKind.CLAIMABLE_PRIZE, p + "-z1", tie, "keno", null));
-            d.add(item(SourceKind.PAYMENT, p + "-y1", tie, null, null));
+            d.add(transaction(SourceKind.TRANSACTION, p + "-t1", tie, "keno", null));
+            d.add(transaction(SourceKind.TRANSACTION, p + "-t2", tie, null, null));
+            d.add(transaction(SourceKind.TRANSACTION, p + "-t3", tie, "lottery", null));
+            d.add(transaction(SourceKind.CLAIMABLE_PRIZE, p + "-z1", tie, "keno", null));
+            d.add(transaction(SourceKind.PAYMENT, p + "-y1", tie, null, null));
         }
         // Session C of the first group arrives late-first, then re-anchors onto the tie instant.
-        d.add(item(SourceKind.TRANSACTION, "g0-c2", at.apply("2034-01-01T03:00:00Z"), null, "g0-sc"));
-        d.add(item(SourceKind.TRANSACTION, "g0-c1", at.apply(TIES[0]), null, "g0-sc"));
-        // Fully cancelled session: g1's session B (both items); a cancelled unsessioned item: g2-t1.
+        d.add(transaction(SourceKind.TRANSACTION, "g0-c2", at.apply("2034-01-01T03:00:00Z"), null, "g0-sc"));
+        d.add(transaction(SourceKind.TRANSACTION, "g0-c1", at.apply(TIES[0]), null, "g0-sc"));
+        // Fully cancelled session: g1's session B (both projected transactions); a cancelled unsessioned projected transaction: g2-t1.
         d.add(cancel("g1-b1-x", at.apply("2034-02-14T12:00:00Z"), "g1-b1"));
         d.add(cancel("g1-b2-x", at.apply("2034-02-16T12:00:00Z"), "g1-b2"));
         d.add(cancel("g2-t1-x", at.apply("2034-03-01T05:00:00Z"), "g2-t1"));
         // Scattered rows: December (two tied on a partial-day bound), a session across Jan/Feb,
         // the last second of February, just after the Mar 1 tie, and a March payment.
-        d.add(item(SourceKind.TRANSACTION, "d1", at.apply("2033-12-05T08:00:00Z"), "keno", null));
-        d.add(item(SourceKind.TRANSACTION, "d2", at.apply("2033-12-20T06:00:00Z"), "lottery", null));
-        d.add(item(SourceKind.CLAIMABLE_PRIZE, "d3", at.apply("2033-12-20T06:00:00Z"), "keno", null));
-        d.add(item(SourceKind.TRANSACTION, "j1", at.apply("2034-01-15T09:00:00Z"), "keno", "jsess"));
-        d.add(item(SourceKind.TRANSACTION, "j2", at.apply("2034-02-03T09:00:00Z"), "keno", "jsess"));
-        d.add(item(SourceKind.TRANSACTION, "f1", at.apply("2034-02-28T23:59:59Z"), null, null));
-        d.add(item(SourceKind.TRANSACTION, "m1", at.apply("2034-03-01T00:00:01Z"), "keno", null));
-        d.add(item(SourceKind.PAYMENT, "m2", at.apply("2034-03-10T10:00:00Z"), null, null));
+        d.add(transaction(SourceKind.TRANSACTION, "d1", at.apply("2033-12-05T08:00:00Z"), "keno", null));
+        d.add(transaction(SourceKind.TRANSACTION, "d2", at.apply("2033-12-20T06:00:00Z"), "lottery", null));
+        d.add(transaction(SourceKind.CLAIMABLE_PRIZE, "d3", at.apply("2033-12-20T06:00:00Z"), "keno", null));
+        d.add(transaction(SourceKind.TRANSACTION, "j1", at.apply("2034-01-15T09:00:00Z"), "keno", "jsess"));
+        d.add(transaction(SourceKind.TRANSACTION, "j2", at.apply("2034-02-03T09:00:00Z"), "keno", "jsess"));
+        d.add(transaction(SourceKind.TRANSACTION, "f1", at.apply("2034-02-28T23:59:59Z"), null, null));
+        d.add(transaction(SourceKind.TRANSACTION, "m1", at.apply("2034-03-01T00:00:01Z"), "keno", null));
+        d.add(transaction(SourceKind.PAYMENT, "m2", at.apply("2034-03-10T10:00:00Z"), null, null));
         return d;
     }
 
-    private static ProjectionItem item(SourceKind source, String id, Instant at, String productType, String batchId) {
-        return new ProjectionItem(USER, source, id, at, productType == null ? null : "P-" + productType, productType,
+    private static ProjectionTransaction transaction(SourceKind source, String id, Instant at, String productType, String batchId) {
+        return new ProjectionTransaction(USER, source, id, at, productType == null ? null : "P-" + productType, productType,
                 batchId, batchId == null ? null : batchId + "-p0", TxTypes.PLAY, new BigDecimal("1.0000"), "EUR",
                 null, null, null);
     }
 
-    private static ProjectionItem cancel(String id, Instant at, String target) {
+    private static ProjectionTransaction cancel(String id, Instant at, String target) {
         String source = target.contains("-b2") ? "prize" : "tx";
-        return new ProjectionItem(USER, source.equals("prize") ? SourceKind.CLAIMABLE_PRIZE : SourceKind.TRANSACTION,
+        return new ProjectionTransaction(USER, source.equals("prize") ? SourceKind.CLAIMABLE_PRIZE : SourceKind.TRANSACTION,
                 id, at, null, null, null, null, TxTypes.CANCEL, new BigDecimal("-1.0000"), "EUR", null, target, null);
     }
 

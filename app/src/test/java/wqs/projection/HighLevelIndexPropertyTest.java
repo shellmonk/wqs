@@ -10,12 +10,12 @@ import net.jqwik.api.Provide;
 import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.gen.EventGenerators;
 
 /**
- * Property P-8 (spec 8.1): each view's page index holds exactly one row per session with an item
- * in that view and one per unsessioned item, at the right key, with visibility agreeing with the
+ * Property P-8 (spec 8.1): each view's page index holds exactly one row per session with a transaction
+ * in that view and one per unsessioned transaction, at the right key, with visibility agreeing with the
  * underlying rows.
  *
  * This property exists because the index is a MATERIALISED merge. A read-time union could never
@@ -28,9 +28,9 @@ class HighLevelIndexPropertyTest extends ProjectionPropertyBase {
 
     @Property(tries = 30)
     void the_page_index_always_reconciles_with_its_sources(
-            @ForAll("sequencesWithCancels") List<ProjectionItem> items) {
+            @ForAll("sequencesWithCancels") List<ProjectionTransaction> transactions) {
         reset();
-        applyBatches(items);
+        applyBatches(transactions);
 
         assertThat(new ProjectionInvariants(jdbc()).highLevelDrift()).isEmpty();
         // The cancellations that drive visibility are themselves exactly right (spec 6.3).
@@ -38,7 +38,7 @@ class HighLevelIndexPropertyTest extends ProjectionPropertyBase {
     }
 
     @Provide
-    Arbitrary<List<ProjectionItem>> sequencesWithCancels() {
-        return EventGenerators.itemSequencesWithCancels();
+    Arbitrary<List<ProjectionTransaction>> sequencesWithCancels() {
+        return EventGenerators.transactionSequencesWithCancels();
     }
 }

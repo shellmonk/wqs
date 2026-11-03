@@ -30,9 +30,9 @@ class ProjectionApiTest extends ApiTestBase {
     void fixtures() {
         reset();
         project(
-                item(1L, SourceKind.TRANSACTION, "t1", "2034-02-10T10:00:00Z"),
-                item(1L, SourceKind.PAYMENT, "p1", "2034-02-11T10:00:00Z"),
-                item(1L, SourceKind.LIMIT, "l1", "2034-02-12T10:00:00Z"));
+                transaction(1L, SourceKind.TRANSACTION, "t1", "2034-02-10T10:00:00Z"),
+                transaction(1L, SourceKind.PAYMENT, "p1", "2034-02-11T10:00:00Z"),
+                transaction(1L, SourceKind.LIMIT, "l1", "2034-02-12T10:00:00Z"));
     }
 
     /** A valid /cc level-0 request for user 1 over Feb 2034; override params per test. */
@@ -77,7 +77,7 @@ class ProjectionApiTest extends ApiTestBase {
                 .andExpect(jsonPath("$.data[0].detail", instanceOf(Map.class)))
                 .andExpect(jsonPath("$.data[0].detail.note").value("l1"))
                 // Internal columns stay internal.
-                .andExpect(jsonPath("$.data[0].itemId").doesNotExist())
+                .andExpect(jsonPath("$.data[0].transactionId").doesNotExist())
                 .andExpect(jsonPath("$.data[0].ingestedAt").doesNotExist());
     }
 
@@ -116,12 +116,12 @@ class ProjectionApiTest extends ApiTestBase {
                 .andExpect(jsonPath("$.data[0].subitems[0].playTimestamp").value("2034-02-13T10:00:00Z"))
                 .andExpect(jsonPath("$.data[0].subitems[0].playAmount").value(12.5))
                 .andExpect(jsonPath("$.data[0].subitems[0].txs[*].txId", org.hamcrest.Matchers.contains("s1-a")))
-                // the play-less item stays on the session at level 2
+                // the play-less transaction stays on the session at level 2
                 .andExpect(jsonPath("$.data[0].txs[*].txId", org.hamcrest.Matchers.contains("s1-b")));
     }
 
-    private static wqs.domain.ProjectionItem session(String sourceId, String at, String subBatchId) {
-        return new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, sourceId, java.time.Instant.parse(at), "P10",
+    private static wqs.domain.ProjectionTransaction session(String sourceId, String at, String subBatchId) {
+        return new wqs.domain.ProjectionTransaction(1L, SourceKind.TRANSACTION, sourceId, java.time.Instant.parse(at), "P10",
                 "keno", "s1", subBatchId, TxTypes.PLAY, new java.math.BigDecimal("12.5000"), "EUR", null, null, null);
     }
 
@@ -207,7 +207,7 @@ class ProjectionApiTest extends ApiTestBase {
     /**
      * M3: bounds are truncated to microseconds (Postgres' precision) before the read, so a
      * sub-microsecond bound answers exactly like its truncation, never like a DB-rounded value.
-     * /cc sees all three fixtures; the l1 item sits exactly on the truncated instant.
+     * /cc sees all three fixtures; the l1 transaction sits exactly on the truncated instant.
      */
     @Test
     void sub_microsecond_bounds_are_truncated() throws Exception {
@@ -400,7 +400,7 @@ class ProjectionApiTest extends ApiTestBase {
 
     @Test
     void excludeCancelledTransactions_is_optional_and_bound() throws Exception {
-        project(new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, "t1-cancel",
+        project(new wqs.domain.ProjectionTransaction(1L, SourceKind.TRANSACTION, "t1-cancel",
                 java.time.Instant.parse("2034-02-13T10:00:00Z"), "P10", "keno", null, null,
                 TxTypes.CANCEL,
                 new java.math.BigDecimal("12.5000"), "EUR", null, "t1", null));
@@ -487,9 +487,9 @@ class ProjectionApiTest extends ApiTestBase {
 
     private void projectFilterFixtures() {
         project(
-                new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, "x1", java.time.Instant.parse("2034-02-13T10:00:00Z"),
+                new wqs.domain.ProjectionTransaction(1L, SourceKind.TRANSACTION, "x1", java.time.Instant.parse("2034-02-13T10:00:00Z"),
                         "idx1", "lottery", null, null, TxTypes.WIN, new java.math.BigDecimal("1.0000"), "EUR", null, null, null),
-                new wqs.domain.ProjectionItem(1L, SourceKind.TRANSACTION, "x2", java.time.Instant.parse("2034-02-14T10:00:00Z"),
+                new wqs.domain.ProjectionTransaction(1L, SourceKind.TRANSACTION, "x2", java.time.Instant.parse("2034-02-14T10:00:00Z"),
                         "idx2", "bingo", null, null, TxTypes.PLAY, new java.math.BigDecimal("1.0000"), "EUR", null, null, null));
     }
 
@@ -497,7 +497,7 @@ class ProjectionApiTest extends ApiTestBase {
     @Test
     void list_filters_bind_repeated_and_comma_forms_trimmed_with_blanks_dropped() throws Exception {
         projectFilterFixtures();
-        // cc sees all 5 items: keno x3 (t1, p1, l1), lottery x1, bingo x1.
+        // cc sees all 5 transactions: keno x3 (t1, p1, l1), lottery x1, bingo x1.
         mvc.perform(cc().param("productTypes", "lottery", "bingo"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.totalRowCount").value(2));
         mvc.perform(cc().param("productTypes", "lottery,bingo"))

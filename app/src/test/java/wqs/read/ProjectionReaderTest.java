@@ -16,12 +16,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
-import wqs.db.TxTypeRegistry;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
-import wqs.read.web.WebItemMapper;
+import wqs.read.web.WebTransactionMapper;
 import wqs.read.web.WebLevel0Query;
 
 @SpringBootTest
@@ -29,7 +28,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
     private static final Level0Filter ALL = new Level0Filter(1L, false);
 
-    @Autowired WebItemMapper webMapper;
+    @Autowired WebTransactionMapper webMapper;
 
     @BeforeEach
     void clean() {
@@ -43,11 +42,11 @@ class ProjectionReaderTest extends ReadPropertyBase {
     @Test
     void day_counters_are_read_per_run_not_across_whole_months() {
         applyBatches(List.of(
-                item("j", "2034-01-20T10:00:00Z"),
-                item("f1", "2034-02-01T10:00:00Z"),
-                item("f15", "2034-02-15T10:00:00Z"),
-                item("f28", "2034-02-28T10:00:00Z"),
-                item("m", "2034-03-05T10:00:00Z")));
+                transaction("j", "2034-01-20T10:00:00Z"),
+                transaction("f1", "2034-02-01T10:00:00Z"),
+                transaction("f15", "2034-02-15T10:00:00Z"),
+                transaction("f28", "2034-02-28T10:00:00Z"),
+                transaction("m", "2034-03-05T10:00:00Z")));
         RowCountingCounterReader counting = new RowCountingCounterReader();
         ProjectionReader probe = probeReader(counting);
         Instant from = Instant.parse("2034-01-10T00:00:00Z");
@@ -69,7 +68,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     /** Spec 7.9 / review focus 3: overflowing or huge offsets are "beyond the end", never an error. */
     @Test
     void far_beyond_last_page_is_empty_not_an_error() {
-        applyBatches(fiveItems());
+        applyBatches(fiveTransactions());
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
         long[][] beyond = {
@@ -81,7 +80,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         };
         for (long[] pp : beyond) {
             ProjectionPage page = reader.readLevel0(webQuery, new Level0Request(ALL, from, to, pp[0], pp[1]));
-            assertThat(page.items()).as("page=%d size=%d", pp[0], pp[1]).isEmpty();
+            assertThat(page.transactions()).as("page=%d size=%d", pp[0], pp[1]).isEmpty();
             assertThat(page.totalItems()).isEqualTo(5);
             assertThat(page.totalPages()).isEqualTo(1);
             assertThat(page.page()).isEqualTo(pp[0]);
@@ -89,13 +88,13 @@ class ProjectionReaderTest extends ReadPropertyBase {
         }
         // Page 1 with a page size past int range still returns everything (limit cast is guarded).
         for (long size : new long[] {Integer.MAX_VALUE, Long.MAX_VALUE}) {
-            assertThat(reader.readLevel0(webQuery, new Level0Request(ALL, from, to, 1, size)).items())
+            assertThat(reader.readLevel0(webQuery, new Level0Request(ALL, from, to, 1, size)).transactions())
                     .isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 0, Integer.MAX_VALUE))
                     .hasSize(5);
         }
         ProjectionPage empty = reader.readLevel0(webQuery,
                 new Level0Request(new Level0Filter(4L, false), from, to, Integer.MAX_VALUE, Integer.MAX_VALUE));
-        assertThat(empty.items()).isEmpty();
+        assertThat(empty.transactions()).isEmpty();
         assertThat(empty.totalItems()).isZero();
         assertThat(empty.totalPages()).isZero();
     }
@@ -103,7 +102,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     /** Review focus 5: months with no partitions at all are just empty. */
     @Test
     void range_far_outside_provisioned_partitions_is_fine() {
-        applyBatches(fiveItems());
+        applyBatches(fiveTransactions());
         Instant from = Instant.parse("1990-01-01T00:00:00Z");
         Instant to = Instant.parse("2100-01-01T00:00:00Z");
         for (ViewKind v : ViewKind.values()) {
@@ -111,8 +110,8 @@ class ProjectionReaderTest extends ReadPropertyBase {
             assertThat(page.totalItems()).isEqualTo(5).isEqualTo(oracle.count(v, ALL, from, to));
             assertThat(page.totalPages()).isEqualTo(2);
             assertThat(page.aggregationLevel()).isZero();
-            assertThat(page.items()).isEqualTo(oracle.page(v, ALL, from, to, 0, 3));
-            assertThat(reader.readLevel0(queryFor(v), new Level0Request(ALL, from, to, 2, 3)).items())
+            assertThat(page.transactions()).isEqualTo(oracle.page(v, ALL, from, to, 0, 3));
+            assertThat(reader.readLevel0(queryFor(v), new Level0Request(ALL, from, to, 2, 3)).transactions())
                     .isEqualTo(oracle.page(v, ALL, from, to, 3, 3));
         }
     }
@@ -120,11 +119,11 @@ class ProjectionReaderTest extends ReadPropertyBase {
     /** Spec 7.9 / D7: the ceiling ships disabled. */
     @Test
     void default_context_does_not_clamp_page_size() {
-        applyBatches(fiveItems());
+        applyBatches(fiveTransactions());
         ProjectionPage page = reader.readLevel0(webQuery, new Level0Request(ALL,
                 Instant.parse("2034-01-01T00:00:00Z"), Instant.parse("2034-03-01T00:00:00Z"), 1, 10));
         assertThat(page.pageSize()).isEqualTo(10);
-        assertThat(page.items()).hasSize(5);
+        assertThat(page.transactions()).hasSize(5);
         assertThat(page.totalPages()).isEqualTo(1);
     }
 
@@ -137,15 +136,15 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
         @Test
         void page_size_ceiling_clamps_when_enabled() {
-            applyBatches(fiveItems());
+            applyBatches(fiveTransactions());
             Instant from = Instant.parse("2034-01-01T00:00:00Z");
             Instant to = Instant.parse("2034-03-01T00:00:00Z");
             ProjectionPage page = clamped.readLevel0(webQuery, new Level0Request(ALL, from, to, 1, 10));
             assertThat(page.pageSize()).isEqualTo(3);
-            assertThat(page.items()).hasSize(3).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 0, 3));
+            assertThat(page.transactions()).hasSize(3).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 0, 3));
             assertThat(page.totalPages()).isEqualTo(2);
             // Page 2 is computed with the effective size, not the requested one.
-            assertThat(clamped.readLevel0(webQuery, new Level0Request(ALL, from, to, 2, 10)).items())
+            assertThat(clamped.readLevel0(webQuery, new Level0Request(ALL, from, to, 2, 10)).transactions())
                     .isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3)).hasSize(2);
             // A request under the ceiling is untouched.
             assertThat(clamped.readLevel0(webQuery, new Level0Request(ALL, from, to, 1, 2)).pageSize())
@@ -154,7 +153,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
         @Test
         void page_size_ceiling_clamps_high_level_pages_too() {
-            applyBatches(fiveItems());
+            applyBatches(fiveTransactions());
             Instant from = Instant.parse("2034-01-01T00:00:00Z");
             Instant to = Instant.parse("2034-03-01T00:00:00Z");
             assertThat(clamped.effectivePageSize(10)).isEqualTo(3);
@@ -167,21 +166,21 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     /**
-     * Spec 11.2. Feb has 3 items, Jan 2; page 2 of size 2 starts in the Feb month segment with
-     * residual 2 and returns Feb's 3rd item and Jan's 1st -- two distinct months touched.
+     * Spec 11.2. Feb has 3 transactions, Jan 2; page 2 of size 2 starts in the Feb month segment with
+     * residual 2 and returns Feb's 3rd transaction and Jan's 1st -- two distinct months touched.
      */
     @Test
     void metrics_record_residual_and_counter_rows() {
-        applyBatches(fiveItems());
+        applyBatches(fiveTransactions());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerJdbc, readerTx, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
+                readerJdbc, readerTx, new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
 
         ProjectionPage page = probe.readLevel0(webQuery, new Level0Request(ALL, from, to, 2, 2));
 
-        assertThat(page.items()).extracting(ItemEntry::sourceId).containsExactly("f1", "j2");
+        assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("f1", "j2");
         assertThat(registry.get("wqs.read.residual.offset").summary().max()).isEqualTo(2);
         assertThat(registry.get("wqs.read.counter.rows").summary().max()).isEqualTo(2);
         assertThat(registry.get("wqs.read.partitions.touched").tag("aggregationLevel", "0").summary().max())
@@ -204,10 +203,10 @@ class ProjectionReaderTest extends ReadPropertyBase {
      */
     @Test
     void walk_lands_in_the_target_segment_with_a_small_residual() {
-        applyBatches(fiveItems());
+        applyBatches(fiveTransactions());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerJdbc, readerTx, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
+                readerJdbc, readerTx, new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
@@ -217,18 +216,18 @@ class ProjectionReaderTest extends ReadPropertyBase {
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
                 from, Instant.parse("2034-02-01T00:00:00Z"), 1, 1));
         assertThat(registry.get("wqs.read.residual.offset").summary().max()).isEqualTo(1);
-        assertThat(page.items()).extracting(ItemEntry::sourceId).containsExactly("j1");
+        assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("j1");
     }
 
     /** Zero-count segments are walked past: Feb is empty, so offset 3 skips Mar (3) and Feb (0). */
     @Test
     void walk_skips_an_empty_middle_segment() {
         applyBatches(List.of(
-                item("j1", "2034-01-05T10:00:00Z"),
-                item("j2", "2034-01-25T10:00:00Z"),
-                item("m1", "2034-03-02T10:00:00Z"),
-                item("m2", "2034-03-14T10:00:00Z"),
-                item("m3", "2034-03-27T10:00:00Z")));
+                transaction("j1", "2034-01-05T10:00:00Z"),
+                transaction("j2", "2034-01-25T10:00:00Z"),
+                transaction("m1", "2034-03-02T10:00:00Z"),
+                transaction("m2", "2034-03-14T10:00:00Z"),
+                transaction("m3", "2034-03-27T10:00:00Z")));
         RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-04-01T00:00:00Z");
@@ -237,17 +236,17 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
                 from, Instant.parse("2034-02-01T00:00:00Z"), 0, 2));
-        assertThat(page.items()).extracting(ItemEntry::sourceId).containsExactly("j2", "j1");
-        assertThat(page.items()).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3));
+        assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("j2", "j1");
+        assertThat(page.transactions()).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3));
     }
 
     /**
-     * Spec 7.5 / P-3 within a request: totals and items come from ONE snapshot. A writer commit
+     * Spec 7.5 / P-3 within a request: totals and transactions come from ONE snapshot. A writer commit
      * (through the real writer, so counters move too) lands mid-read -- on the reader's first
      * Level0Query call, after the counter rows were read -- inside the range. Neither the total
      * nor the page may see it; the next read sees both. Two placements: in the live remainder
      * (a leak shows in the live count) and in a counter-covered month (counters were already
-     * read, so a leak shows only in the items).
+     * read, so a leak shows only in the transactions).
      */
     @Test
     void a_read_sees_one_snapshot_despite_a_concurrent_commit() {
@@ -257,7 +256,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     private void assertOneSnapshot(String lateAt, List<String> afterOrder) {
-        applyBatches(fiveItems());
+        applyBatches(fiveTransactions());
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T12:00:00Z");
         Level0Request req = new Level0Request(ALL, from, to, 1, 10);
@@ -265,15 +264,15 @@ class ProjectionReaderTest extends ReadPropertyBase {
         assertThat(before.totalItems()).isEqualTo(5);
 
         CommitOnFirstCall probe = new CommitOnFirstCall(webQuery, () -> writer.apply(new wqs.projection.ProjectionBatch(
-                "wallet-transactions", List.of(item("late", lateAt)), 100L)));
+                "wallet-transactions", List.of(transaction("late", lateAt)), 100L)));
         ProjectionPage during = reader.readLevel0(probe, req);
 
         assertThat(probe.fired).as("the commit happened inside the read").isTrue();
-        assertThat(during.totalItems()).as("total, late item at %s", lateAt).isEqualTo(5);
-        assertThat(during.items()).as("items, late item at %s", lateAt).isEqualTo(before.items());
+        assertThat(during.totalItems()).as("total, late transaction at %s", lateAt).isEqualTo(5);
+        assertThat(during.transactions()).as("transactions, late transaction at %s", lateAt).isEqualTo(before.transactions());
         ProjectionPage after = reader.readLevel0(webQuery, req);
         assertThat(after.totalItems()).isEqualTo(6);
-        assertThat(after.items()).extracting(ItemEntry::sourceId).containsExactlyElementsOf(afterOrder);
+        assertThat(after.transactions()).extracting(TransactionEntry::sourceId).containsExactlyElementsOf(afterOrder);
     }
 
     /** Delegate that runs {@code commit} (a writer-side transaction) before its first call of any kind. */
@@ -306,25 +305,26 @@ class ProjectionReaderTest extends ReadPropertyBase {
         }
 
         @Override
-        public List<ItemKey> keys(JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
+        public List<TransactionKey> keys(JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
             once();
             return delegate.keys(tx, f, lo, hi, offset, limit);
         }
 
         @Override
-        public List<ItemEntry> fetch(JdbcClient tx, long userId, List<ItemKey> keys) {
+        public List<TransactionEntry> fetch(JdbcClient tx, long userId, List<TransactionKey> keys) {
             once();
             return delegate.fetch(tx, userId, keys);
         }
     }
 
     /**
-     * A non-empty transactionTypes list that resolves to no registered code can match nothing:
-     * an empty page with totals 0, and no counter, count, key or fetch query is run.
+     * Plan D2: a transactionTypes list of codes no row carries matches nothing -- an empty page
+     * with totals 0, the same result the removed registry short-circuit gave, now from the
+     * counters themselves (no lookup).
      */
     @Test
-    void unknown_type_only_filter_returns_empty_without_query() {
-        applyBatches(fiveItems());
+    void unknown_type_only_filter_matches_nothing() {
+        applyBatches(fiveTransactions());
         RowCountingCounterReader counting = new RowCountingCounterReader();
         RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
@@ -333,14 +333,10 @@ class ProjectionReaderTest extends ReadPropertyBase {
         ProjectionPage page = probeReader(counting).readLevel0(recording, new Level0Request(
                 ALL, java.util.Set.of("TT_NEVER_REGISTERED", "TT_ALSO_NOT"), from, to, 1, 10));
 
-        assertThat(page.items()).isEmpty();
+        assertThat(page.transactions()).isEmpty();
         assertThat(page.totalItems()).isZero();
         assertThat(page.totalPages()).isZero();
-        assertThat(recording.countCalls).isZero();
-        assertThat(recording.keysCalls).isEmpty();
-        assertThat(recording.fetchCalls).isZero();
-        assertThat(counting.dayCalls).isZero();
-        assertThat(counting.monthCalls).isZero();
+        assertThat(recording.fetchCalls).as("no rows to fetch").isZero();
         // Control: a list with one known code is an ordinary read.
         RecordingLevel0Query ok = new RecordingLevel0Query(webQuery);
         ProjectionPage some = probeReader(counting).readLevel0(ok, new Level0Request(
@@ -350,39 +346,29 @@ class ProjectionReaderTest extends ReadPropertyBase {
     }
 
     @Test
-    void both_id_and_code_type_filters_are_refused() {
-        Level0Filter ids = new Level0Filter(1L, java.util.Set.of(), java.util.Set.of(TxTypes.PLAY), false);
+    void both_filter_and_request_type_codes_are_refused() {
+        Level0Filter codes = new Level0Filter(1L, java.util.Set.of(), java.util.Set.of(TxTypes.PLAY), false);
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> new Level0Request(
-                        ids, java.util.Set.of("TT_BUY"), Instant.EPOCH, Instant.EPOCH, 1, 1))
+                        codes, java.util.Set.of("TT_BUY"), Instant.EPOCH, Instant.EPOCH, 1, 1))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**
-     * M2: resolving transaction-type codes (filter) and ids (response) uses the reader's single
-     * transaction. The registry here has a writer DSL that cannot get a connection: any read-path
-     * touch of it fails the request.
+     * Plan D1/D2: the type filter and the response's transactionType are the stored code itself --
+     * no lookup on either side, so nothing outside the reader's single transaction is touched (M2).
      */
     @Test
-    void type_resolution_stays_on_the_reader_transaction() {
-        applyBatches(fiveItems());
-        javax.sql.DataSource dead = org.mockito.Mockito.mock(javax.sql.DataSource.class);
-        try {
-            org.mockito.Mockito.when(dead.getConnection()).thenThrow(new java.sql.SQLException("writer pool touched"));
-        } catch (java.sql.SQLException e) {
-            throw new AssertionError(e);
-        }
-        TxTypeRegistry isolated = new TxTypeRegistry(
-                org.springframework.jdbc.core.simple.JdbcClient.create(dead),
-                org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class));
-        WebLevel0Query web = new WebLevel0Query(webMapper, isolated);
-        ProjectionReader probe = new ProjectionReader(readerJdbc, readerTx, isolated, new CounterReader(),
+    void type_filter_and_response_use_the_stored_code() {
+        applyBatches(fiveTransactions());
+        WebLevel0Query web = new WebLevel0Query(webMapper);
+        ProjectionReader probe = new ProjectionReader(readerJdbc, readerTx, new CounterReader(),
                 new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
 
         ProjectionPage page = probe.readLevel0(web, new Level0Request(ALL, java.util.Set.of("TT_BUY"),
                 Instant.parse("2034-01-01T00:00:00Z"), Instant.parse("2034-03-01T00:00:00Z"), 1, 10));
 
         assertThat(page.totalItems()).isEqualTo(5);
-        assertThat(page.items()).hasSize(5).allSatisfy(e -> assertThat(e.transactionType()).isEqualTo("TT_BUY"));
+        assertThat(page.transactions()).hasSize(5).allSatisfy(e -> assertThat(e.transactionType()).isEqualTo("TT_BUY"));
     }
 
     // ------------------------------------------------------------------ readHighLevel (levels 1-2)
@@ -390,18 +376,18 @@ class ProjectionReaderTest extends ReadPropertyBase {
     private static final HighLevelFilter HL_ALL = new HighLevelFilter(1L, false);
 
     /**
-     * Five page-index rows: Feb holds f1, f2, f3; Jan holds session "jb" (items j1 and j1b, one
-     * row) and j2. Seven items, five rows -- an ITEM-unit walk would land elsewhere.
+     * Five page-index rows: Feb holds f1, f2, f3; Jan holds session "jb" (transactions j1 and j1b, one
+     * row) and j2. Seven transactions, five rows -- a TRANSACTION-unit walk would land elsewhere.
      */
-    private static List<ProjectionItem> fiveHighLevelRows() {
+    private static List<ProjectionTransaction> fiveHighLevelRows() {
         return List.of(
                 sessioned("j1", "2034-01-05T10:00:00Z", "jb"),
                 sessioned("j1b", "2034-01-06T10:00:00Z", "jb"),
-                item("j2", "2034-01-25T10:00:00Z"),
-                item("f1", "2034-02-02T10:00:00Z"),
+                transaction("j2", "2034-01-25T10:00:00Z"),
+                transaction("f1", "2034-02-02T10:00:00Z"),
                 sessioned("f2", "2034-02-14T10:00:00Z", "fb"),
                 sessioned("f2b", "2034-02-14T11:00:00Z", "fb"),
-                item("f3", "2034-02-27T10:00:00Z"));
+                transaction("f3", "2034-02-27T10:00:00Z"));
     }
 
     private static HighLevelRequest hlRequest(ViewKind v, Instant from, Instant to, long page, long size) {
@@ -418,7 +404,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveHighLevelRows());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerJdbc, readerTx, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
+                readerJdbc, readerTx, new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         RecordingHighLevelQuery recording = new RecordingHighLevelQuery(webHighLevelQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
@@ -445,7 +431,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     @Test
     void read_high_level_selects_the_requested_views_index() {
         applyBatches(fiveHighLevelRows());
-        applyBatches(List.of(new ProjectionItem(1L, SourceKind.PAYMENT, "pay", Instant.parse("2034-02-20T10:00:00Z"),
+        applyBatches(List.of(new ProjectionTransaction(1L, SourceKind.PAYMENT, "pay", Instant.parse("2034-02-20T10:00:00Z"),
                 null, null, null, null, TxTypes.NEUTRAL, new BigDecimal("3.0000"), "EUR", null, null, null)));
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
@@ -459,11 +445,11 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
     @Test
     void reader_needs_exactly_one_high_level_query_per_view() {
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerJdbc, readerTx, txTypes(),
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerJdbc, readerTx,
                         new CounterReader(), new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()),
                         List.of(webHighLevelQuery)))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("CC");
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerJdbc, readerTx, txTypes(),
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerJdbc, readerTx,
                         new CounterReader(), new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()),
                         List.of(webHighLevelQuery, ccHighLevelQuery, webHighLevelQuery)))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("WEB");
@@ -481,8 +467,8 @@ class ProjectionReaderTest extends ReadPropertyBase {
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T12:00:00Z");
         Runnable[] commits = {
-            () -> applyBatches(List.of(item("late1", "2034-03-01T06:00:00Z"))),
-            () -> applyBatches(List.of(item("late2", "2034-03-01T07:00:00Z"))),
+            () -> applyBatches(List.of(transaction("late1", "2034-03-01T06:00:00Z"))),
+            () -> applyBatches(List.of(transaction("late2", "2034-03-01T07:00:00Z"))),
         };
         HighLevelQuery commitOnKeys = new HighLevelQuery() {
             boolean fired;
@@ -543,25 +529,25 @@ class ProjectionReaderTest extends ReadPropertyBase {
         assertThat(reader.effectivePageSize(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
     }
 
-    static ProjectionItem sessioned(String id, String at, String batchId) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "keno", batchId,
+    static ProjectionTransaction sessioned(String id, String at, String batchId) {
+        return new ProjectionTransaction(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "keno", batchId,
                 batchId + "-p0", TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 
-    /** 3 items in Feb 2034, 2 in Jan 2034, all user 1. */
-    private static List<ProjectionItem> fiveItems() {
+    /** 3 transactions in Feb 2034, 2 in Jan 2034, all user 1. */
+    private static List<ProjectionTransaction> fiveTransactions() {
         return List.of(
-                item("j1", "2034-01-05T10:00:00Z"),
-                item("j2", "2034-01-25T10:00:00Z"),
-                item("f1", "2034-02-02T10:00:00Z"),
-                item("f2", "2034-02-14T10:00:00Z"),
-                item("f3", "2034-02-27T10:00:00Z"));
+                transaction("j1", "2034-01-05T10:00:00Z"),
+                transaction("j2", "2034-01-25T10:00:00Z"),
+                transaction("f1", "2034-02-02T10:00:00Z"),
+                transaction("f2", "2034-02-14T10:00:00Z"),
+                transaction("f3", "2034-02-27T10:00:00Z"));
     }
 
     /** Builds a reader around a test counter reader, with no ceiling and a private registry. */
     private ProjectionReader probeReader(CounterReader counters) {
         return new ProjectionReader(
-                readerJdbc, readerTx, txTypes(), counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
+                readerJdbc, readerTx, counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
     }
 
     /** Records every day row {@link CounterReader#dayCounts} returns, without a mocking framework. */
@@ -573,19 +559,19 @@ class ProjectionReaderTest extends ReadPropertyBase {
         @Override
         public Map<LocalDate, Long> monthCounts(
                 JdbcClient tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
-                java.util.Set<String> productTypes, java.util.Set<Short> typeIds,
+                java.util.Set<String> productTypes, java.util.Set<String> typeCodes,
                 boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
             monthCalls++;
-            return super.monthCounts(tx, userId, v, unit, productTypes, typeIds, excludeCancelled,
+            return super.monthCounts(tx, userId, v, unit, productTypes, typeCodes, excludeCancelled,
                     firstPeriod, lastPeriod);
         }
 
         @Override
         public Map<LocalDate, Long> dayCounts(
                 JdbcClient tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
-                java.util.Set<String> productTypes, java.util.Set<Short> typeIds,
+                java.util.Set<String> productTypes, java.util.Set<String> typeCodes,
                 boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
-            Map<LocalDate, Long> rows = super.dayCounts(tx, userId, v, unit, productTypes, typeIds,
+            Map<LocalDate, Long> rows = super.dayCounts(tx, userId, v, unit, productTypes, typeCodes,
                     excludeCancelled, firstPeriod, lastPeriod);
             dayKeys.addAll(rows.keySet());
             dayCalls++;
@@ -593,8 +579,8 @@ class ProjectionReaderTest extends ReadPropertyBase {
         }
     }
 
-    static ProjectionItem item(String id, String at) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "keno", null, null,
+    static ProjectionTransaction transaction(String id, String at) {
+        return new ProjectionTransaction(1L, SourceKind.TRANSACTION, id, Instant.parse(at), "P11", "keno", null, null,
                 TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 }

@@ -54,7 +54,7 @@ class StreamWiringTest extends PostgresTestBase {
     /** The context starts the consumer, so the offset table must be empty before it does. */
     @BeforeAll
     static void emptyOffsetTable() {
-        db().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqIngestCursor\"");
     }
 
     @Autowired private FakeStreamSource source;
@@ -69,7 +69,7 @@ class StreamWiringTest extends PostgresTestBase {
     }
 
     @Test
-    void the_consumer_is_started_polled_and_projects_into_the_item_tables() {
+    void the_consumer_is_started_polled_and_projects_into_the_transaction_tables() {
         assertThat(context.getBeanNamesForType(StreamConsumer.class)).hasSize(1);
         assertThat(context.getBeanNamesForType(StreamDisabledNotice.class)).isEmpty();
         // Started by ApplicationReadyEvent, from offset 0 on an empty offset table.
@@ -81,7 +81,7 @@ class StreamWiringTest extends PostgresTestBase {
         source.deliverAll();
 
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
-            assertThat(db().value("select count(*)::int from \"wqWebItem\"", Integer.class))
+            assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\"", Integer.class))
                     .isEqualTo(1);
             assertThat(offsetStore.read(STREAM)).contains(0L);
         });

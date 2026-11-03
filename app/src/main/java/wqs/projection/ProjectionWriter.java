@@ -14,18 +14,18 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import wqs.db.PartitionProvisioner;
 import wqs.domain.PageUnit;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.ViewKind;
 import wqs.projection.source.DeltaRow;
 
 /**
  * The single write choke point. Nothing else in WQS holds a write connection (spec section 6).
  *
- * Implements the ordering of spec 6.2: for each item, the ingest rules of spec 4.1 (a zero-amount
- * item is recorded in the locator only; a currency-mismatched or unsessioned eInstant item is
+ * Implements the ordering of spec 6.2: for each transaction, the ingest rules of spec 4.1 (a zero-amount
+ * transaction is recorded in the locator only; a currency-mismatched or unsessioned eInstant transaction is
  * dead-lettered alone), then gate and insert, then (for a cancellation)
- * apply or park it, then rollups, page index and counters; after the items, drain the cancels
- * parked for items this batch inserted; then the offset last -- all in one transaction, so
+ * apply or park it, then rollups, page index and counters; after the projected transactions, drain the cancels
+ * parked for projected transactions this batch inserted; then the offset last -- all in one transaction, so
  * projection state and consumer position advance or roll back together.
  *
  * <p>{@link #applyDelta} is the polled sources' path (phase 6): versioned upserts and the
@@ -36,7 +36,7 @@ public class ProjectionWriter {
 
     private static final Logger log = LoggerFactory.getLogger(ProjectionWriter.class);
 
-    private final ItemInserter itemInserter;
+    private final TransactionInserter transactionInserter;
     private final RollupUpdater rollupUpdater;
     private final HighLevelUpdater highLevelUpdater;
     private final CounterUpdater counterUpdater;
@@ -47,7 +47,7 @@ public class ProjectionWriter {
     private final DrainedCancelApplier drainedCancelApplier;
     private final DrainedCancelDeadLetters drainedCancelDeadLetters;
     private final IngestRules ingestRules;
-    private final RejectedItemDeadLetters rejectedItemDeadLetters;
+    private final RejectedTransactionDeadLetters rejectedTransactionDeadLetters;
     private final VersionedApplier versionedApplier;
     private final DeltaWatermarkStore watermarkStore;
     private final DeltaMetrics deltaMetrics;
@@ -56,7 +56,7 @@ public class ProjectionWriter {
     private static final int PLAYER = 1;
 
     public ProjectionWriter(
-            ItemInserter itemInserter,
+            TransactionInserter transactionInserter,
             RollupUpdater rollupUpdater,
             HighLevelUpdater highLevelUpdater,
             CounterUpdater counterUpdater,
@@ -67,11 +67,11 @@ public class ProjectionWriter {
             DrainedCancelApplier drainedCancelApplier,
             DrainedCancelDeadLetters drainedCancelDeadLetters,
             IngestRules ingestRules,
-            RejectedItemDeadLetters rejectedItemDeadLetters,
+            RejectedTransactionDeadLetters rejectedTransactionDeadLetters,
             VersionedApplier versionedApplier,
             DeltaWatermarkStore watermarkStore,
             DeltaMetrics deltaMetrics) {
-        this.itemInserter = itemInserter;
+        this.transactionInserter = transactionInserter;
         this.rollupUpdater = rollupUpdater;
         this.highLevelUpdater = highLevelUpdater;
         this.counterUpdater = counterUpdater;
@@ -82,7 +82,7 @@ public class ProjectionWriter {
         this.drainedCancelApplier = drainedCancelApplier;
         this.drainedCancelDeadLetters = drainedCancelDeadLetters;
         this.ingestRules = ingestRules;
-        this.rejectedItemDeadLetters = rejectedItemDeadLetters;
+        this.rejectedTransactionDeadLetters = rejectedTransactionDeadLetters;
         this.versionedApplier = versionedApplier;
         this.watermarkStore = watermarkStore;
         this.deltaMetrics = deltaMetrics;
@@ -96,70 +96,70 @@ public class ProjectionWriter {
     public WriteResult apply(ProjectionBatch batch) {
         // FIRST, before any projection write, and in its own transaction: no DDL ever runs inside
         // this one (spec 5.8, R100). The occurredAt months cover every partitioned row the batch
-        // can write -- item rows, session/play re-anchor targets (MIN(occurredAt)), page-index
-        // rows and "wqCountDay" periods. A month beyond the sanity window throws, which is poison.
-        partitionProvisioner.ensureMonths(batch.items().stream()
-                .map(item -> YearMonth.from(item.occurredAt().atZone(ZoneOffset.UTC)))
+        // can write -- projected transaction rows, session/play re-anchor targets (MIN(occurredAt)), page-index
+        // rows and "wqPrjCountDay" periods. A month beyond the sanity window throws, which is poison.
+        partitionProvisioner.ensureMonths(batch.transactions().stream()
+                .map(transaction -> YearMonth.from(transaction.occurredAt().atZone(ZoneOffset.UTC)))
                 .collect(Collectors.toSet()));
 
         int projected = 0;
         int duplicates = 0;
         int skipped = 0;
         int deadLettered = 0;
-        Set<ItemRef> inserted = new LinkedHashSet<>();
+        Set<TransactionRef> inserted = new LinkedHashSet<>();
 
-        for (int i = 0; i < batch.items().size(); i++) {
-            ProjectionItem item = batch.items().get(i);
+        for (int i = 0; i < batch.transactions().size(); i++) {
+            ProjectionTransaction transaction = batch.transactions().get(i);
 
             // Zero-amount (spec 4.1, D8): the locator row only, so it stays idempotent and a
             // cancel referencing it resolves; no view, rollup, page row or counter. A zero-amount
             // cancel still cancels its target -- the effect lives on the target's rows.
-            if (item.amount().signum() == 0) {
-                if (!itemInserter.recordLocatorOnly(item)) {
+            if (transaction.amount().signum() == 0) {
+                if (!transactionInserter.recordLocatorOnly(transaction)) {
                     duplicates++;
                     continue;
                 }
                 skipped++;
-                inserted.add(ItemRef.of(item));
-                if (item.isCancellation()) {
-                    cancellationApplier.apply(item);
+                inserted.add(TransactionRef.of(transaction));
+                if (transaction.isCancellation()) {
+                    cancellationApplier.apply(transaction);
                 }
                 continue;
             }
 
-            // Rejected items (D6, D7) are dead-lettered alone and nothing of them is written, not
+            // Rejected transactions (D6, D7) are dead-lettered alone and nothing of them is written, not
             // even the locator row; the rest of the batch applies. Checked before the gate, so a
-            // re-delivered rejected item is rejected again rather than counted as a duplicate.
-            String rejection = ingestRules.rejection(item);
+            // re-delivered rejected transaction is rejected again rather than counted as a duplicate.
+            String rejection = ingestRules.rejection(transaction);
             if (rejection != null) {
-                log.warn("Dead-lettering item {} (source {}): {}", item.sourceId(), item.source(), rejection);
-                rejectedItemDeadLetters.recordRejected(batch.stream(), batch.offsetOf(i), item, rejection);
+                log.warn("Dead-lettering transaction {} (source {}): {}", transaction.sourceId(), transaction.source(), rejection);
+                rejectedTransactionDeadLetters.recordRejected(batch.stream(), batch.offsetOf(i), transaction, rejection);
                 deadLettered++;
                 continue;
             }
 
             // The gate makes everything below safe to do incrementally: a replayed event never
             // gets past it, so no aggregate, counter or cancellation is ever applied twice.
-            if (!itemInserter.insertIfAbsent(item)) {
+            if (!transactionInserter.insertIfAbsent(transaction)) {
                 duplicates++;
                 continue;
             }
             projected++;
-            inserted.add(ItemRef.of(item));
-            if (item.isCancellation()) {
-                // Resolves against items committed earlier or inserted earlier in this batch;
+            inserted.add(TransactionRef.of(transaction));
+            if (transaction.isCancellation()) {
+                // Resolves against transactions committed earlier or inserted earlier in this batch;
                 // otherwise parks, to be drained below or by a later batch.
-                cancellationApplier.apply(item);
+                cancellationApplier.apply(transaction);
             }
-            project(item);
+            project(transaction);
         }
 
         // Cancels that arrived before their original: the original is now projected (by this
         // batch), so they resolve. This is what makes ingestion order-independent (spec 6.3).
         // Each is applied in its own savepoint. One that fails is rolled back alone, stays removed
-        // from "wqPendingCancel" and is dead-lettered ITSELF: failing the batch instead would make
-        // the per-item fallback dead-letter the innocent original whose arrival drained it.
-        for (ProjectionItem parked : pendingCancelStore.drainFor(inserted)) {
+        // from "wqPrjPendingCancel" and is dead-lettered ITSELF: failing the batch instead would make
+        // the per-transaction fallback dead-letter the innocent original whose arrival drained it.
+        for (ProjectionTransaction parked : pendingCancelStore.drainFor(inserted)) {
             try {
                 drainedCancelApplier.apply(parked);
             } catch (RuntimeException e) {
@@ -203,7 +203,7 @@ public class ProjectionWriter {
         }
         // As in apply(): partitions first, in their own transaction, before any projection write.
         partitionProvisioner.ensureMonths(players.stream()
-                .map(row -> YearMonth.from(row.item().occurredAt().atZone(ZoneOffset.UTC)))
+                .map(row -> YearMonth.from(row.transaction().occurredAt().atZone(ZoneOffset.UTC)))
                 .collect(Collectors.toSet()));
 
         int inserted = 0;
@@ -212,17 +212,17 @@ public class ProjectionWriter {
         int stale = 0;
         int deadLettered = 0;
         for (DeltaRow row : players) {
-            ProjectionItem item = row.item();
+            ProjectionTransaction transaction = row.transaction();
             VersionedApplier.Stored stored = versionedApplier.stored(row);
             switch (VersionedApplier.verdict(row, stored)) {
                 case ABSENT -> {
-                    String rejection = ingestRules.rejection(item);
+                    String rejection = ingestRules.rejection(transaction);
                     if (rejection != null) {
-                        log.warn("Dead-lettering polled row {} (source {}): {}", item.sourceId(), item.source(), rejection);
-                        rejectedItemDeadLetters.recordRejected(DeltaWatermarkStore.WALLET_DELTA, null, item, rejection);
+                        log.warn("Dead-lettering polled row {} (source {}): {}", transaction.sourceId(), transaction.source(), rejection);
+                        rejectedTransactionDeadLetters.recordRejected(DeltaWatermarkStore.WALLET_DELTA, null, transaction, rejection);
                         deadLettered++;
-                    } else if (itemInserter.insertIfAbsent(item, VersionedApplier.stored(row.version()))) {
-                        project(item);
+                    } else if (transactionInserter.insertIfAbsent(transaction, VersionedApplier.stored(row.version()))) {
+                        project(transaction);
                         inserted++;
                     } else {
                         duplicates++; // unreachable under the single sequential writer; never double-apply
@@ -232,9 +232,9 @@ public class ProjectionWriter {
                     String field = versionedApplier.immutableFieldChanged(row, stored);
                     if (field != null) {
                         log.warn("Dead-lettering polled row {} (source {}): version {} changes immutable field {}",
-                                item.sourceId(), item.source(), row.version(), field);
-                        rejectedItemDeadLetters.recordRejected(DeltaWatermarkStore.WALLET_DELTA, null, item,
-                                RejectedItemDeadLetters.IMMUTABLE_FIELD_CHANGED);
+                                transaction.sourceId(), transaction.source(), row.version(), field);
+                        rejectedTransactionDeadLetters.recordRejected(DeltaWatermarkStore.WALLET_DELTA, null, transaction,
+                                RejectedTransactionDeadLetters.IMMUTABLE_FIELD_CHANGED);
                         deadLettered++;
                     } else {
                         versionedApplier.applyNewer(row, stored);
@@ -256,31 +256,31 @@ public class ProjectionWriter {
     }
 
     /**
-     * Rollups, page index and counters for one newly inserted item.
+     * Rollups, page index and counters for one newly inserted transaction.
      *
-     * A cancellation item is a row in the item tables like any other, so it is counted at the
-     * ITEM page unit (P-2: counters equal live COUNTs); the rollup and page-index updaters return
+     * A cancellation transaction is a row in the transaction tables like any other, so it is counted at the
+     * TRANSACTION page unit (P-2: counters equal live COUNTs); the rollup and page-index updaters return
      * nothing for it, so it creates no page unit. Its effect on its original is applied by
      * {@link CancellationApplier}.
      */
-    private void project(ProjectionItem item) {
-        RollupResult rollup = rollupUpdater.applyItem(item);
-        HighLevelResult highLevel = highLevelUpdater.applyItem(item, rollup);
+    private void project(ProjectionTransaction transaction) {
+        RollupResult rollup = rollupUpdater.applyTransaction(transaction);
+        HighLevelResult highLevel = highLevelUpdater.applyTransaction(transaction, rollup);
 
-        counterUpdater.countItem(item);
+        counterUpdater.countTransaction(transaction);
 
         // HIGH_LEVEL counters mirror the page index per view, at the row's CURRENT key: the
-        // session's (start, product type) for a session row, the item's own for an unsessioned one.
+        // session's (start, product type) for a session row, the transaction's own for an unsessioned one.
         boolean sessioned = rollup.sessionStart() != null;
-        Instant at = sessioned ? rollup.sessionStart() : item.occurredAt();
-        String productType = sessioned ? rollup.sessionProductType() : item.productType();
+        Instant at = sessioned ? rollup.sessionStart() : transaction.occurredAt();
+        String productType = sessioned ? rollup.sessionProductType() : transaction.productType();
 
         for (ViewKind view : highLevel.inserted()) {
-            counterUpdater.countHighLevel(item.userId(), view, productType, at);
+            counterUpdater.countHighLevel(transaction.userId(), view, productType, at);
         }
         for (ViewKind view : highLevel.moved()) {
             counterUpdater.moveHighLevel(
-                    item.userId(), view,
+                    transaction.userId(), view,
                     highLevel.movedFromProductType(), highLevel.movedFrom(),
                     productType, at,
                     highLevel.movedVisible().get(view));
@@ -288,7 +288,7 @@ public class ProjectionWriter {
         // After the move: a revived row is counted in cntAll already, at the current key.
         for (ViewKind view : highLevel.revived()) {
             counterUpdater.recountExclCancelled(
-                    item.userId(), view, PageUnit.HIGH_LEVEL, productType,
+                    transaction.userId(), view, PageUnit.HIGH_LEVEL, productType,
                     wqs.domain.CounterSentinels.ALL_TYPES, at);
         }
     }

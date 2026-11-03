@@ -92,7 +92,7 @@ class PartitionRolloverJobBootTest extends PostgresTestBase {
         // make sure one the job's rollOver covers is absent; only a delegating execute() can bring it back.
         YearMonth target = YearMonth.now(Clock.systemUTC()).plusMonths(2);
         String partitionName =
-                PartitionedTable.WQ_WEB_ITEM.tableName() + "_" + target.format(MONTH_SUFFIX);
+                PartitionedTable.WQ_PRJ_WEB_TRANSACTION.tableName() + "_" + target.format(MONTH_SUFFIX);
         db().execute("DROP TABLE IF EXISTS \"" + partitionName + "\"");
         assertThat(partitionAttached(partitionName)).as("precondition: dropped").isFalse();
 
@@ -112,6 +112,6 @@ class PartitionRolloverJobBootTest extends PostgresTestBase {
                 select exists (select 1 from pg_inherits
                                where inhrelid = to_regclass(?)::oid and inhparent = to_regclass(?)::oid)
                 """, Boolean.class, "\"" + partitionName + "\"",
-                "\"" + PartitionedTable.WQ_WEB_ITEM.tableName() + "\"");
+                "\"" + PartitionedTable.WQ_PRJ_WEB_TRANSACTION.tableName() + "\"");
     }
 }

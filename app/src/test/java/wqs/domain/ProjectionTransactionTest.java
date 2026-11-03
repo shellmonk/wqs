@@ -10,73 +10,77 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import wqs.gen.TxTypes;
 
-class ProjectionItemTest {
+class ProjectionTransactionTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"", "  ", "\t"})
     void a_blank_sub_batch_id_means_no_play(String blank) {
-        ProjectionItem item = item("b1", blank);
+        ProjectionTransaction transaction = transaction("b1", blank);
 
-        assertThat(item.subBatchId()).isNull();
-        assertThat(item.hasPlay()).isFalse();
-        assertThat(item.isSessioned()).isTrue();
+        assertThat(transaction.subBatchId()).isNull();
+        assertThat(transaction.hasPlay()).isFalse();
+        assertThat(transaction.isSessioned()).isTrue();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"", "  ", "\t"})
     void a_blank_batch_id_means_no_session(String blank) {
-        ProjectionItem item = item(blank, "p1");
+        ProjectionTransaction transaction = transaction(blank, "p1");
 
-        assertThat(item.batchId()).isNull();
-        assertThat(item.isSessioned()).isFalse();
+        assertThat(transaction.batchId()).isNull();
+        assertThat(transaction.isSessioned()).isFalse();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"", "  ", "\t"})
     void a_blank_cancels_means_not_a_cancellation(String blank) {
-        ProjectionItem item = new ProjectionItem(
+        ProjectionTransaction transaction = new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, "t1", Instant.parse("2034-05-10T10:00:00Z"), "P11",
                 "instants", null, null, TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, blank, null);
 
-        assertThat(item.cancels()).isNull();
-        assertThat(item.isCancellation()).isFalse();
+        assertThat(transaction.cancels()).isNull();
+        assertThat(transaction.isCancellation()).isFalse();
     }
 
     /** '' is the counters' ALL-product-types sentinel, so it must be unreachable from input. */
     @ParameterizedTest
     @ValueSource(strings = {"", "  ", "\t"})
     void a_blank_product_id_and_type_mean_no_product(String blank) {
-        ProjectionItem item = new ProjectionItem(
+        ProjectionTransaction transaction = new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, "t1", Instant.parse("2034-05-10T10:00:00Z"), blank,
                 blank, null, null, TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
 
-        assertThat(item.productId()).isNull();
-        assertThat(item.productType()).isNull();
+        assertThat(transaction.productId()).isNull();
+        assertThat(transaction.productType()).isNull();
     }
 
-    /** 0 is the counters' ALL-transaction-types sentinel; real "wqTxType" ids start at 1. */
+    /** '' is the counters' ALL-transaction-types sentinel, so a blank (or missing) type code is rejected. */
     @ParameterizedTest
-    @ValueSource(shorts = {0, -1})
-    void a_type_that_is_not_a_registry_id_is_rejected(short type) {
-        assertThatThrownBy(() -> new ProjectionItem(
+    @ValueSource(strings = {"", "  ", "\t"})
+    void a_blank_type_code_is_rejected(String type) {
+        assertThatThrownBy(() -> new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, "t1", Instant.parse("2034-05-10T10:00:00Z"), "P11",
                 "instants", null, null, type, new BigDecimal("5.0000"), "EUR", null, null, null))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("type " + type);
+                .hasMessageContaining("transaction type code");
+        assertThatThrownBy(() -> new ProjectionTransaction(
+                1L, SourceKind.TRANSACTION, "t1", Instant.parse("2034-05-10T10:00:00Z"), "P11",
+                "instants", null, null, null, new BigDecimal("5.0000"), "EUR", null, null, null))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void non_blank_ids_are_kept_verbatim() {
-        ProjectionItem item = item(" b1", "p1 ");
+        ProjectionTransaction transaction = transaction(" b1", "p1 ");
 
-        assertThat(item.batchId()).isEqualTo(" b1");
-        assertThat(item.subBatchId()).isEqualTo("p1 ");
-        assertThat(item.isSessioned()).isTrue();
-        assertThat(item.hasPlay()).isTrue();
+        assertThat(transaction.batchId()).isEqualTo(" b1");
+        assertThat(transaction.subBatchId()).isEqualTo("p1 ");
+        assertThat(transaction.isSessioned()).isTrue();
+        assertThat(transaction.hasPlay()).isTrue();
     }
 
-    private static ProjectionItem item(String batchId, String subBatchId) {
-        return new ProjectionItem(
+    private static ProjectionTransaction transaction(String batchId, String subBatchId) {
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, "t1", Instant.parse("2034-05-10T10:00:00Z"), "P11",
                 "instants", batchId, subBatchId, TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }

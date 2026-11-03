@@ -18,7 +18,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.Products;
 import wqs.gen.TxTypes;
@@ -73,9 +73,9 @@ class CancellationTest extends PostgresTestBase {
         assertThat(sessionVisible(CC)).isTrue();
         // The session is still a page unit when cancellations are excluded.
         assertThat(highLevelSentinel(WEB, "cntExclCancelled")).isEqualTo(1);
-        // ITEM: t1 left the excl tally; t2 and the cancel row itself remain.
-        assertThat(itemSentinel(WEB, "cntExclCancelled")).isEqualTo(2);
-        assertThat(itemSentinel(WEB, "cntAll")).isEqualTo(3);
+        // TRANSACTION: t1 left the excl tally; t2 and the cancel row itself remain.
+        assertThat(transactionSentinel(WEB, "cntExclCancelled")).isEqualTo(2);
+        assertThat(transactionSentinel(WEB, "cntAll")).isEqualTo(3);
         assertNoDrift();
     }
 
@@ -128,10 +128,10 @@ class CancellationTest extends PostgresTestBase {
     }
 
     @Test
-    void an_unsessioned_item_drops_out_of_the_excl_cancelled_tally_immediately() {
+    void an_unsessioned_transaction_drops_out_of_the_excl_cancelled_tally_immediately() {
         apply(payment("pay1", T0));
 
-        apply(new ProjectionItem(1L, SourceKind.PAYMENT, "payc", T0.plusSeconds(60), null,
+        apply(new ProjectionTransaction(1L, SourceKind.PAYMENT, "payc", T0.plusSeconds(60), null,
                 null, null, null, TxTypes.CANCEL, new BigDecimal("-20.0000"), "EUR", null, "pay1", null));
 
         assertThat(rowVisible(CC, SourceKind.PAYMENT.code(), "pay1")).isFalse();
@@ -185,12 +185,12 @@ class CancellationTest extends PostgresTestBase {
         apply(cancelOf("c1", "t1"));
 
         assertThat(sessionField("txCountExclCancelled")).isEqualTo(1);
-        assertThat(itemSentinel(WEB, "cntExclCancelled")).isEqualTo(2);
+        assertThat(transactionSentinel(WEB, "cntExclCancelled")).isEqualTo(2);
         assertNoDrift();
     }
 
     @Test
-    void a_second_distinct_cancel_of_the_same_item_changes_no_tally_and_converges_on_cancelledBy() {
+    void a_second_distinct_cancel_of_the_same_transaction_changes_no_tally_and_converges_on_cancelledBy() {
         apply(tx("t1", "b1", "p1"), tx("t2", "b1", "p2"));
 
         apply(cancelOf("c2", "t1"));
@@ -256,7 +256,7 @@ class CancellationTest extends PostgresTestBase {
     void a_cancel_resolves_its_original_by_source_not_by_source_id_alone() {
         apply(tx("x1", "b1", "p1"), payment("x1", T0.plusSeconds(5)));
 
-        apply(new ProjectionItem(1L, SourceKind.PAYMENT, "payc", T0.plusSeconds(60), null,
+        apply(new ProjectionTransaction(1L, SourceKind.PAYMENT, "payc", T0.plusSeconds(60), null,
                 null, null, null, TxTypes.CANCEL, new BigDecimal("-20.0000"), "EUR", null, "x1", null));
 
         assertThat(cancelledOf(CC, SourceKind.PAYMENT, "x1")).isTrue();
@@ -268,7 +268,7 @@ class CancellationTest extends PostgresTestBase {
     }
 
     @Test
-    void a_parked_cancel_is_drained_only_by_an_item_of_its_own_source() {
+    void a_parked_cancel_is_drained_only_by_an_transaction_of_its_own_source() {
         apply(cancelOf("c1", "x1"));
 
         apply(payment("x1", T0.plusSeconds(5)));
@@ -286,7 +286,7 @@ class CancellationTest extends PostgresTestBase {
 
     @Test
     void a_parked_cancel_is_rebuilt_faithfully_with_its_real_source() {
-        ProjectionItem cancel = new ProjectionItem(7L, SourceKind.PAYMENT, "pc1", T0, "P04", "keno", "b9",
+        ProjectionTransaction cancel = new ProjectionTransaction(7L, SourceKind.PAYMENT, "pc1", T0, "P04", "keno", "b9",
                 "p9", TxTypes.CANCEL, new BigDecimal("-3.5000"), "USD", new BigDecimal("1.2500"),
                 "pay9", "{\"why\": \"chargeback\"}");
         writer.apply(new ProjectionBatch("s", List.of(cancel), 1L));
@@ -302,7 +302,7 @@ class CancellationTest extends PostgresTestBase {
     // --- R87: per-view visibility ----------------------------------------------------------------
 
     @Test
-    void cancelling_the_only_web_item_hides_the_web_row_but_not_the_cc_row() {
+    void cancelling_the_only_web_transaction_hides_the_web_row_but_not_the_cc_row() {
         apply(tx("t1", "b1", "p1"), adjustment("a1", "b1", T0.plusSeconds(30), 11));
 
         apply(cancelOf("c1", "t1"));
@@ -319,7 +319,7 @@ class CancellationTest extends PostgresTestBase {
     // --- R88: revival ----------------------------------------------------------------------------
 
     @Test
-    void a_live_item_joining_an_emptied_session_revives_its_rows() {
+    void a_live_transaction_joining_an_emptied_session_revives_its_rows() {
         apply(tx("t1", "b1", "p1"));
         apply(cancelOf("c1", "t1"));
         assertThat(sessionVisible(WEB)).isFalse();
@@ -334,7 +334,7 @@ class CancellationTest extends PostgresTestBase {
     }
 
     @Test
-    void a_cc_only_item_revives_only_the_cc_row() {
+    void a_cc_only_transaction_revives_only_the_cc_row() {
         apply(tx("t1", "b1", "p1"));
         apply(cancelOf("c1", "t1"));
 
@@ -346,7 +346,7 @@ class CancellationTest extends PostgresTestBase {
     }
 
     @Test
-    void a_live_item_joining_an_emptied_play_restores_the_session_play_count() {
+    void a_live_transaction_joining_an_emptied_play_restores_the_session_play_count() {
         apply(tx("t1", "b1", "p1"), tx("t2", "b1", "p2"));
         apply(cancelOf("c1", "t1"));
         assertThat(sessionField("playCountExclCancelled")).isEqualTo(1);
@@ -376,7 +376,7 @@ class CancellationTest extends PostgresTestBase {
         assertNoDrift();
 
         // At the session's start with a lower sourceId than a0 ("a" < "a0"): it is now the first
-        // item (D6), so a product-only change, and the WEB row is revived.
+        // transaction (D6), so a product-only change, and the WEB row is revived.
         apply(txProduct("a", "b1", "p9", T0.minus(1, ChronoUnit.DAYS), 3));
 
         assertThat(sessionVisible(WEB)).isTrue();
@@ -394,16 +394,16 @@ class CancellationTest extends PostgresTestBase {
     // --- R90: order independence -----------------------------------------------------------------
 
     @Test
-    void every_order_of_a_cancel_its_original_and_a_cc_only_item_converges() {
+    void every_order_of_a_cancel_its_original_and_a_cc_only_transaction_converges() {
         // t1 and t2 in different plays; a1 is /cc-only and a day earlier at a lower product, so
         // it re-anchors the session (start and product) whenever it arrives after the others.
-        List<ProjectionItem> items = List.of(
+        List<ProjectionTransaction> transactions = List.of(
                 txProduct("t1", "b1", "p1", T0, 11),
                 txProduct("t2", "b1", "p2", T0.plusSeconds(10), 11),
                 cancelOf("c1", "t1"),
                 adjustment("a1", "b1", T0.minus(1, ChronoUnit.DAYS), 7));
 
-        ProjectionSnapshot expected = assertAllOrdersConverge(items);
+        ProjectionSnapshot expected = assertAllOrdersConverge(transactions);
 
         assertThat(expected.pendingCancels()).isEmpty();
         assertThat(sessionVisible(WEB)).isTrue();
@@ -412,38 +412,38 @@ class CancellationTest extends PostgresTestBase {
     }
 
     @Test
-    void every_order_of_a_cancel_of_the_only_web_item_and_a_cc_only_item_converges() {
-        List<ProjectionItem> items = List.of(
+    void every_order_of_a_cancel_of_the_only_web_transaction_and_a_cc_only_transaction_converges() {
+        List<ProjectionTransaction> transactions = List.of(
                 txProduct("t1", "b1", "p1", T0, 11),
                 cancelOf("c1", "t1"),
                 adjustment("a1", "b1", T0.minus(1, ChronoUnit.DAYS), 7));
 
-        assertAllOrdersConverge(items);
+        assertAllOrdersConverge(transactions);
 
         assertThat(sessionVisible(WEB)).isFalse();
         assertThat(sessionVisible(CC)).isTrue();
     }
 
     /**
-     * Applies every permutation into clean state, once one item per batch (cancel and original in
+     * Applies every permutation into clean state, once one projected transaction per batch (cancel and original in
      * different transactions: the before case parks) and once as a single batch (parked and
      * drained within one transaction), and asserts every resulting snapshot is identical and
      * consistent. Leaves the last run's state in place.
      */
-    private ProjectionSnapshot assertAllOrdersConverge(List<ProjectionItem> items) {
+    private ProjectionSnapshot assertAllOrdersConverge(List<ProjectionTransaction> transactions) {
         ProjectionSnapshot expected = null;
-        for (List<ProjectionItem> order : permutations(items)) {
+        for (List<ProjectionTransaction> order : permutations(transactions)) {
             for (boolean singleBatch : List.of(false, true)) {
                 clearProjection();
                 if (singleBatch) {
                     writer.apply(new ProjectionBatch("s", order, ++offset));
                 } else {
-                    for (ProjectionItem item : order) {
-                        apply(item);
+                    for (ProjectionTransaction transaction : order) {
+                        apply(transaction);
                     }
                 }
                 ProjectionSnapshot snapshot = ProjectionSnapshot.of(jdbc());
-                String described = order.stream().map(ProjectionItem::sourceId).toList()
+                String described = order.stream().map(ProjectionTransaction::sourceId).toList()
                         + (singleBatch ? " as one batch" : " one per batch");
                 assertNoDrift();
                 if (expected == null) {
@@ -456,13 +456,13 @@ class CancellationTest extends PostgresTestBase {
         return expected;
     }
 
-    private static <T> List<List<T>> permutations(List<T> items) {
-        if (items.isEmpty()) {
+    private static <T> List<List<T>> permutations(List<T> transactions) {
+        if (transactions.isEmpty()) {
             return List.of(List.of());
         }
         List<List<T>> result = new ArrayList<>();
-        for (int i = 0; i < items.size(); i++) {
-            List<T> rest = new ArrayList<>(items);
+        for (int i = 0; i < transactions.size(); i++) {
+            List<T> rest = new ArrayList<>(transactions);
             T head = rest.remove(i);
             for (List<T> tail : permutations(rest)) {
                 List<T> order = new ArrayList<>();
@@ -474,73 +474,73 @@ class CancellationTest extends PostgresTestBase {
         return result;
     }
 
-    /** Counters, rollups, group locators and the page index all agree with the item rows. */
+    /** Counters, rollups, group locators and the page index all agree with the transaction rows. */
     private void assertNoDrift() {
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     // --- fixtures --------------------------------------------------------------------------------
 
-    private void apply(ProjectionItem... items) {
-        writer.apply(new ProjectionBatch("s", List.of(items), ++offset));
+    private void apply(ProjectionTransaction... transactions) {
+        writer.apply(new ProjectionBatch("s", List.of(transactions), ++offset));
     }
 
-    private List<ProjectionItem> drain(long userId, SourceKind source, String sourceId) {
+    private List<ProjectionTransaction> drain(long userId, SourceKind source, String sourceId) {
         // drainFor joins the projection transaction (MANDATORY); supply one, as the writer does.
         return transactionTemplate.execute(status ->
-                pendingCancelStore.drainFor(Set.of(new ItemRef(userId, source, sourceId))));
+                pendingCancelStore.drainFor(Set.of(new TransactionRef(userId, source, sourceId))));
     }
 
-    private ProjectionItem tx(String id, String batchId, String subBatchId) {
+    private ProjectionTransaction tx(String id, String batchId, String subBatchId) {
         return txAt(id, batchId, subBatchId, T0);
     }
 
-    private ProjectionItem txAt(String id, String batchId, String subBatchId, Instant at) {
+    private ProjectionTransaction txAt(String id, String batchId, String subBatchId, Instant at) {
         return txProduct(id, batchId, subBatchId, at, 11);
     }
 
-    private ProjectionItem txProduct(
+    private ProjectionTransaction txProduct(
             String id, String batchId, String subBatchId, Instant at, int product) {
-        return new ProjectionItem(
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, id, at, Products.id(product), Products.type(product),
                 batchId, subBatchId, TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
-    private ProjectionItem txTyped(
-            String id, String batchId, String subBatchId, short type, String amount) {
-        return new ProjectionItem(
+    private ProjectionTransaction txTyped(
+            String id, String batchId, String subBatchId, String type, String amount) {
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, id, T0.plusSeconds(1), "P11", "instants", batchId, subBatchId,
                 type, new BigDecimal(amount), "EUR", null, null, null);
     }
 
-    private ProjectionItem cancelOf(String id, String cancels) {
+    private ProjectionTransaction cancelOf(String id, String cancels) {
         return cancelOfUser(1L, id, cancels);
     }
 
-    private ProjectionItem cancelOfUser(long userId, String id, String cancels) {
-        return new ProjectionItem(
+    private ProjectionTransaction cancelOfUser(long userId, String id, String cancels) {
+        return new ProjectionTransaction(
                 userId, SourceKind.TRANSACTION, id, T0.plusSeconds(120), "P13", "arcade", null, null,
                 TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, cancels, null);
     }
 
-    private ProjectionItem adjustment(String id, String batchId, Instant at, int product) {
-        return new ProjectionItem(
+    private ProjectionTransaction adjustment(String id, String batchId, Instant at, int product) {
+        return new ProjectionTransaction(
                 1L, SourceKind.MANUAL_ADJUSTMENT, id, at, Products.id(product), Products.type(product),
                 batchId, null, TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
     }
 
-    private ProjectionItem payment(String id, Instant at) {
-        return new ProjectionItem(
+    private ProjectionTransaction payment(String id, Instant at) {
+        return new ProjectionTransaction(
                 1L, SourceKind.PAYMENT, id, at, null, null, null, null,
                 TxTypes.NEUTRAL, new BigDecimal("20.0000"), "EUR", null, null, null);
     }
 
-    private static String itemTable(int view) {
-        return view == WEB ? "wqWebItem" : "wqCcItem";
+    private static String transactionTable(int view) {
+        return view == WEB ? "wqPrjWebTransaction" : "wqPrjCcTransaction";
     }
 
     private static String pageTable(int view) {
-        return view == WEB ? "wqWebHighLevel" : "wqCcHighLevel";
+        return view == WEB ? "wqPrjWebHighLevel" : "wqPrjCcHighLevel";
     }
 
     private boolean cancelled(int view, String sourceId) {
@@ -549,41 +549,41 @@ class CancellationTest extends PostgresTestBase {
 
     private boolean cancelledOf(int view, SourceKind source, String sourceId) {
         return db().value(
-                "select \"cancelled\" from \"" + itemTable(view)
+                "select \"cancelled\" from \"" + transactionTable(view)
                         + "\" where \"source\" = ? and \"sourceId\" = ?", Boolean.class,
                 (short) source.code(), sourceId);
     }
 
     private String cancelledBy(String sourceId) {
         return db().value(
-                "select \"cancelledBy\" from \"wqCcItem\" where \"source\" = 1 and \"sourceId\" = ?", String.class,
+                "select \"cancelledBy\" from \"wqPrjCcTransaction\" where \"source\" = 1 and \"sourceId\" = ?", String.class,
                 sourceId);
     }
 
     private boolean exists(int view, String sourceId) {
-        return db().value("select count(*)::int from \"" + itemTable(view)
+        return db().value("select count(*)::int from \"" + transactionTable(view)
                 + "\" where \"sourceId\" = ?", Integer.class, sourceId) > 0;
     }
 
     private int sessionField(String field) {
-        return db().value("select \"" + field + "\" from \"wqSession\"", Integer.class);
+        return db().value("select \"" + field + "\" from \"wqPrjSession\"", Integer.class);
     }
 
     private BigDecimal sessionMoney(String field) {
-        return db().value("select \"" + field + "\" from \"wqSession\"", BigDecimal.class);
+        return db().value("select \"" + field + "\" from \"wqPrjSession\"", BigDecimal.class);
     }
 
     private Instant sessionStart() {
-        return db().value("select \"startedAt\" from \"wqSession\"", Instant.class);
+        return db().value("select \"startedAt\" from \"wqPrjSession\"", Instant.class);
     }
 
     private int playField(String subBatchId, String field) {
-        return db().value("select \"" + field + "\" from \"wqPlay\" where \"subBatchId\" = ?", Integer.class,
+        return db().value("select \"" + field + "\" from \"wqPrjPlay\" where \"subBatchId\" = ?", Integer.class,
                 subBatchId);
     }
 
     private BigDecimal playMoney(String subBatchId, String field) {
-        return db().value("select \"" + field + "\" from \"wqPlay\" where \"subBatchId\" = ?", BigDecimal.class,
+        return db().value("select \"" + field + "\" from \"wqPrjPlay\" where \"subBatchId\" = ?", BigDecimal.class,
                 subBatchId);
     }
 
@@ -606,14 +606,14 @@ class CancellationTest extends PostgresTestBase {
         return sentinel(view, 1, column);
     }
 
-    private int itemSentinel(int view, String column) {
+    private int transactionSentinel(int view, String column) {
         return sentinel(view, 0, column);
     }
 
     private int sentinel(int view, int pageUnit, String column) {
         return db().value("""
-                select coalesce(sum("%s"),0)::int from "wqCountDay"
-                where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "typeId" = 0
+                select coalesce(sum("%s"),0)::int from "wqPrjCountDay"
+                where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
                 """.formatted(column), Integer.class, (short) view, (short) pageUnit);
     }
 }

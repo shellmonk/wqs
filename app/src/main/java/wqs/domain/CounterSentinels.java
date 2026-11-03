@@ -6,8 +6,8 @@ public final class CounterSentinels {
     /** "productType" = '' is the ALL-product-types key; unreachable from input (blank is null). */
     public static final String ALL_PRODUCT_TYPES = "";
 
-    /** "typeId" = 0 is the ALL-transaction-types key; real "wqTxType" ids start at 1. */
-    public static final short ALL_TYPES = 0;
+    /** "type" = '' is the ALL-transaction-types key; unreachable from input (a type code is never blank). */
+    public static final String ALL_TYPES = "";
 
     private CounterSentinels() {}
 }

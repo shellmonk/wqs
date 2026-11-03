@@ -17,7 +17,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import wqs.db.PostgresTestBase;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.ingest.StrictJson;
 import wqs.projection.source.DeltaRow;
@@ -36,27 +36,27 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     @Test
     void payment_out_maps_per_D3_and_detail_is_the_D4_allowlist() {
         DeltaRow row = decode("payment");
-        ProjectionItem item = row.item();
+        ProjectionTransaction transaction = row.transaction();
 
         assertThat(row.source()).isEqualTo(SourceKind.PAYMENT);
         assertThat(row.ownerType()).isEqualTo(1);
         assertThat(row.userId()).isEqualTo(123456L);
         assertThat(row.version()).isEqualTo(Instant.parse("2026-10-30T09:20:00Z"));
-        assertThat(item.source()).isEqualTo(SourceKind.PAYMENT);
-        assertThat(item.sourceId()).isEqualTo("900001");
-        assertThat(item.userId()).isEqualTo(123456L);
-        assertThat(item.occurredAt()).isEqualTo(Instant.parse("2026-10-30T09:15:00Z"));
-        assertThat(item.amount()).isEqualByComparingTo("-25.500");     // paymentInOut 2 = OUT
-        assertThat(item.currency()).isEqualTo("EUR");
-        assertThat(txTypes().codeOf(item.type())).isEqualTo("WITHDRAWAL");
-        assertThat(item.productId()).isNull();
-        assertThat(item.productType()).isNull();
-        assertThat(item.batchId()).isNull();
-        assertThat(item.subBatchId()).isNull();
-        assertThat(item.cancels()).isNull();
-        assertThat(item.balanceAfter()).isNull();
+        assertThat(transaction.source()).isEqualTo(SourceKind.PAYMENT);
+        assertThat(transaction.sourceId()).isEqualTo("900001");
+        assertThat(transaction.userId()).isEqualTo(123456L);
+        assertThat(transaction.occurredAt()).isEqualTo(Instant.parse("2026-10-30T09:15:00Z"));
+        assertThat(transaction.amount()).isEqualByComparingTo("-25.500");     // paymentInOut 2 = OUT
+        assertThat(transaction.currency()).isEqualTo("EUR");
+        assertThat(transaction.type()).isEqualTo("WITHDRAWAL");
+        assertThat(transaction.productId()).isNull();
+        assertThat(transaction.productType()).isNull();
+        assertThat(transaction.batchId()).isNull();
+        assertThat(transaction.subBatchId()).isNull();
+        assertThat(transaction.cancels()).isNull();
+        assertThat(transaction.balanceAfter()).isNull();
         // subChannel "" is dropped; card, bank, email, xml and json data never reach detail.
-        assertThat(detail(item)).containsExactlyInAnyOrderEntriesOf(Map.ofEntries(
+        assertThat(detail(transaction)).containsExactlyInAnyOrderEntriesOf(Map.ofEntries(
                 Map.entry("paymentType", "WITHDRAWAL"),
                 Map.entry("paymentInOut", "2"),
                 Map.entry("status", "3"),
@@ -68,70 +68,70 @@ class DeltaRowDecoderTest extends PostgresTestBase {
                 Map.entry("workflowStatus", "IN_REVIEW"),
                 Map.entry("reviewHandling", "NONE"),
                 Map.entry("approved", "2026-10-30T09:18:00Z")));
-        assertThat(item.detailJson()).doesNotContain("ENC:", "payCardNumber", "payEmail", "xmlData", "acme");
+        assertThat(transaction.detailJson()).doesNotContain("ENC:", "payCardNumber", "payEmail", "xmlData", "acme");
     }
 
     @Test
     void payment_in_is_positive() {
         ObjectNode json = fixture("payment");
         json.put("paymentInOut", 1);
-        assertThat(decoder.decode(json, txTypes()).item().amount()).isEqualByComparingTo("25.500");
+        assertThat(decoder.decode(json).transaction().amount()).isEqualByComparingTo("25.500");
     }
 
     @Test
     void payment_direction_other_than_in_or_out_is_poison() {
         ObjectNode json = fixture("payment");
         json.put("paymentInOut", 3);
-        assertThatThrownBy(() -> decoder.decode(json, txTypes()))
+        assertThatThrownBy(() -> decoder.decode(json))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("paymentInOut");
     }
 
     @Test
     void claimable_prize_maps_per_D3_with_synthetic_type_and_product_and_batch_fields() {
         DeltaRow row = decode("claimable-prize");
-        ProjectionItem item = row.item();
+        ProjectionTransaction transaction = row.transaction();
 
         assertThat(row.source()).isEqualTo(SourceKind.CLAIMABLE_PRIZE);
         assertThat(row.ownerType()).isEqualTo(1);       // playerId: a player by definition
         assertThat(row.userId()).isEqualTo(123456L);
         assertThat(row.version()).isEqualTo(Instant.parse("2026-10-29T18:05:00Z"));
-        assertThat(item.sourceId()).isEqualTo("700001");
-        assertThat(item.occurredAt()).isEqualTo(Instant.parse("2026-10-29T18:00:00Z"));
-        assertThat(item.amount()).isEqualByComparingTo("150.000");
-        assertThat(item.currency()).isEqualTo("EUR");
-        assertThat(txTypes().codeOf(item.type())).isEqualTo("CLAIMABLE_PRIZE");
-        assertThat(item.productId()).isEqualTo("LOTTO6");
-        assertThat(item.productType()).isEqualTo("lotto");
-        assertThat(item.batchId()).isEqualTo("5f0e8a2c-1b3d-4e6f-9a7b-0c1d2e3f4a5b");
-        assertThat(item.subBatchId()).isNull();          // "" -> null
-        assertThat(item.cancels()).isNull();
+        assertThat(transaction.sourceId()).isEqualTo("700001");
+        assertThat(transaction.occurredAt()).isEqualTo(Instant.parse("2026-10-29T18:00:00Z"));
+        assertThat(transaction.amount()).isEqualByComparingTo("150.000");
+        assertThat(transaction.currency()).isEqualTo("EUR");
+        assertThat(transaction.type()).isEqualTo("CLAIMABLE_PRIZE");
+        assertThat(transaction.productId()).isEqualTo("LOTTO6");
+        assertThat(transaction.productType()).isEqualTo("lotto");
+        assertThat(transaction.batchId()).isEqualTo("5f0e8a2c-1b3d-4e6f-9a7b-0c1d2e3f4a5b");
+        assertThat(transaction.subBatchId()).isNull();          // "" -> null
+        assertThat(transaction.cancels()).isNull();
         // workflowStatus "" is dropped; account and xml data never reach detail.
-        assertThat(detail(item)).containsExactlyInAnyOrderEntriesOf(Map.of(
+        assertThat(detail(transaction)).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "status", "UNCLAIMED",
                 "prizeLevel", "3",
                 "wagerAmount", "2.000",
                 "onHold", "false",
                 "claimExpiryTimestamp", "2026-11-28T18:00:00Z"));
-        assertThat(item.detailJson()).doesNotContain("10001234", "xmlData", "T-1");
+        assertThat(transaction.detailJson()).doesNotContain("10001234", "xmlData", "T-1");
     }
 
     @Test
     void manual_adjustment_withdrawal_maps_per_D3() {
         DeltaRow row = decode("manual-adjustment");
-        ProjectionItem item = row.item();
+        ProjectionTransaction transaction = row.transaction();
 
         assertThat(row.source()).isEqualTo(SourceKind.MANUAL_ADJUSTMENT);
         assertThat(row.ownerType()).isEqualTo(1);
         assertThat(row.userId()).isEqualTo(123456L);
-        assertThat(item.sourceId()).isEqualTo("500001");
+        assertThat(transaction.sourceId()).isEqualTo("500001");
         // No "created" column: the request's "issued" is its creation time.
-        assertThat(item.occurredAt()).isEqualTo(Instant.parse("2026-10-28T12:00:00Z"));
-        assertThat(item.amount()).isEqualByComparingTo("-10.000");     // WITHDRAWAL
-        assertThat(item.currency()).isEqualTo("EUR");
-        assertThat(txTypes().codeOf(item.type())).isEqualTo("TT_MANUAL_ADJUSTMENT");
-        assertThat(item.productId()).isNull();
-        assertThat(item.batchId()).isNull();
-        assertThat(detail(item)).containsExactlyInAnyOrderEntriesOf(Map.of(
+        assertThat(transaction.occurredAt()).isEqualTo(Instant.parse("2026-10-28T12:00:00Z"));
+        assertThat(transaction.amount()).isEqualByComparingTo("-10.000");     // WITHDRAWAL
+        assertThat(transaction.currency()).isEqualTo("EUR");
+        assertThat(transaction.type()).isEqualTo("TT_MANUAL_ADJUSTMENT");
+        assertThat(transaction.productId()).isNull();
+        assertThat(transaction.batchId()).isNull();
+        assertThat(detail(transaction)).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "operation", "WITHDRAWAL",
                 "transactionType", "TT_MANUAL_ADJUSTMENT",
                 "transactionSubtype", "CORRECTION",
@@ -139,38 +139,38 @@ class DeltaRowDecoderTest extends PostgresTestBase {
                 "statusDate", "2026-10-28T14:30:00Z",
                 "reason", "Duplicate deposit reversed",
                 "approved", "2026-10-28T14:30:00Z"));
-        assertThat(item.detailJson()).doesNotContain("10001234");
+        assertThat(transaction.detailJson()).doesNotContain("10001234");
     }
 
     @Test
     void manual_adjustment_deposit_is_positive() {
         ObjectNode json = fixture("manual-adjustment");
         json.put("operation", "DEPOSIT");
-        assertThat(decoder.decode(json, txTypes()).item().amount()).isEqualByComparingTo("10.000");
+        assertThat(decoder.decode(json).transaction().amount()).isEqualByComparingTo("10.000");
     }
 
     @Test
     void adjustment_version_is_statusDate() {
         ObjectNode json = fixture("manual-adjustment");
         json.put("updated", "2030-01-01T00:00:00Z");   // not a column of the table: ignored
-        assertThat(decoder.decode(json, txTypes()).version()).isEqualTo(Instant.parse("2026-10-28T14:30:00Z"));
+        assertThat(decoder.decode(json).version()).isEqualTo(Instant.parse("2026-10-28T14:30:00Z"));
     }
 
     @Test
     void limit_with_no_amount_or_currency_maps_to_zero_and_XXX() {
         DeltaRow row = decode("limit");
-        ProjectionItem item = row.item();
+        ProjectionTransaction transaction = row.transaction();
 
         assertThat(row.source()).isEqualTo(SourceKind.LIMIT);
         assertThat(row.ownerType()).isEqualTo(1);
         assertThat(row.version()).isEqualTo(Instant.parse("2026-10-27T08:00:05Z"));
-        assertThat(item.sourceId()).isEqualTo("300001");
-        assertThat(item.occurredAt()).isEqualTo(Instant.parse("2026-10-27T08:00:00Z"));
-        assertThat(item.amount()).isEqualByComparingTo(BigDecimal.ZERO);
-        assertThat(item.currency()).isEqualTo("XXX");
-        assertThat(txTypes().codeOf(item.type())).isEqualTo("PLAY_COUNT");
+        assertThat(transaction.sourceId()).isEqualTo("300001");
+        assertThat(transaction.occurredAt()).isEqualTo(Instant.parse("2026-10-27T08:00:00Z"));
+        assertThat(transaction.amount()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(transaction.currency()).isEqualTo("XXX");
+        assertThat(transaction.type()).isEqualTo("PLAY_COUNT");
         // gameGroup "" is dropped.
-        assertThat(detail(item)).containsExactlyInAnyOrderEntriesOf(Map.of(
+        assertThat(detail(transaction)).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "quantityType", "COUNT",
                 "limitType", "PLAY_COUNT",
                 "period", "DAILY",
@@ -184,7 +184,7 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     void a_page_mixes_all_four_sources() throws IOException {
         JsonNode page = read("page");
         List<SourceKind> sources = new ArrayList<>();
-        page.forEach(row -> sources.add(decoder.decode(row, txTypes()).source()));
+        page.forEach(row -> sources.add(decoder.decode(row).source()));
         assertThat(sources).containsExactly(
                 SourceKind.PAYMENT, SourceKind.CLAIMABLE_PRIZE, SourceKind.MANUAL_ADJUSTMENT, SourceKind.LIMIT);
     }
@@ -193,30 +193,30 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     void source_matching_is_case_insensitive() {
         ObjectNode json = fixture("payment");
         json.put("source", "WALPAYMENTS");
-        assertThat(decoder.decode(json, txTypes()).source()).isEqualTo(SourceKind.PAYMENT);
+        assertThat(decoder.decode(json).source()).isEqualTo(SourceKind.PAYMENT);
     }
 
     @Test
     void unknown_source_is_poison() {
         ObjectNode json = fixture("payment");
         json.put("source", "walAccountTransactions");
-        assertThatThrownBy(() -> decoder.decode(json, txTypes()))
+        assertThatThrownBy(() -> decoder.decode(json))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("source");
         json.remove("source");
-        assertThatThrownBy(() -> decoder.decode(json, txTypes())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(json)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void non_player_owner_decodes_with_its_type() {
         ObjectNode payment = fixture("payment");
         payment.put("ownerType", 2);
-        DeltaRow row = decoder.decode(payment, txTypes());
+        DeltaRow row = decoder.decode(payment);
         assertThat(row.ownerType()).isEqualTo(2);
         assertThat(row.userId()).isEqualTo(123456L);
 
         ObjectNode limit = fixture("limit");
         limit.put("userType", 3);
-        assertThat(decoder.decode(limit, txTypes()).ownerType()).isEqualTo(3);
+        assertThat(decoder.decode(limit).ownerType()).isEqualTo(3);
     }
 
     @Test
@@ -224,15 +224,15 @@ class DeltaRowDecoderTest extends PostgresTestBase {
         for (String bad : new String[] {"", "-1", "12a", " 1", "1.5"}) {
             ObjectNode json = fixture("payment");
             json.put("ownerId", bad);
-            assertThatThrownBy(() -> decoder.decode(json, txTypes()))
+            assertThatThrownBy(() -> decoder.decode(json))
                     .as(bad).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("ownerId");
         }
         ObjectNode type = fixture("payment");
         type.put("ownerType", "one");
-        assertThatThrownBy(() -> decoder.decode(type, txTypes())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(type)).isInstanceOf(IllegalArgumentException.class);
         ObjectNode prize = fixture("claimable-prize");
         prize.put("playerId", "p-1");
-        assertThatThrownBy(() -> decoder.decode(prize, txTypes()))
+        assertThatThrownBy(() -> decoder.decode(prize))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("playerId");
     }
 
@@ -245,7 +245,7 @@ class DeltaRowDecoderTest extends PostgresTestBase {
                 {"manual-adjustment", "operation"}, {"limit", "limitType"}, {"limit", "userId"}}) {
             ObjectNode json = fixture(c[0]);
             json.putNull(c[1]);
-            assertThatThrownBy(() -> decoder.decode(json, txTypes()))
+            assertThatThrownBy(() -> decoder.decode(json))
                     .as(c[0] + "." + c[1]).isInstanceOf(IllegalArgumentException.class).hasMessageContaining(c[1]);
         }
     }
@@ -254,20 +254,20 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     void bad_number_or_timestamp_is_poison() {
         ObjectNode amount = fixture("payment");
         amount.put("amount", "lots");
-        assertThatThrownBy(() -> decoder.decode(amount, txTypes())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(amount)).isInstanceOf(IllegalArgumentException.class);
         ObjectNode tooBig = fixture("claimable-prize");
         tooBig.put("prizeAmount", new BigDecimal("1e30"));
-        assertThatThrownBy(() -> decoder.decode(tooBig, txTypes())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(tooBig)).isInstanceOf(IllegalArgumentException.class);
         ObjectNode when = fixture("limit");
         when.put("updated", "yesterday");
-        assertThatThrownBy(() -> decoder.decode(when, txTypes()))
+        assertThatThrownBy(() -> decoder.decode(when))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("updated");
         ObjectNode id = fixture("limit");
         id.put("id", 1.5);
-        assertThatThrownBy(() -> decoder.decode(id, txTypes())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(id)).isInstanceOf(IllegalArgumentException.class);
         ObjectNode type = fixture("limit");
         type.put("limitType", "play count");
-        assertThatThrownBy(() -> decoder.decode(type, txTypes())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(type)).isInstanceOf(IllegalArgumentException.class);
     }
 
     /** Ruling R-a: adjustment requests have no "created"; "issued" is the occurredAt. */
@@ -275,7 +275,7 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     void adjustment_occurredAt_is_issued() {
         ObjectNode json = fixture("manual-adjustment");
         json.put("created", "2030-01-01T00:00:00Z");   // not a column of the table: ignored
-        assertThat(decoder.decode(json, txTypes()).item().occurredAt()).isEqualTo(Instant.parse("2026-10-28T12:00:00Z"));
+        assertThat(decoder.decode(json).transaction().occurredAt()).isEqualTo(Instant.parse("2026-10-28T12:00:00Z"));
     }
 
     /** Ruling R-b: a null or blank paymentType is the synthetic PAYMENT type, not poison. */
@@ -283,13 +283,13 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     void null_or_blank_payment_type_is_PAYMENT() {
         ObjectNode none = fixture("payment");
         none.putNull("paymentType");
-        assertThat(txTypes().codeOf(decoder.decode(none, txTypes()).item().type())).isEqualTo("PAYMENT");
+        assertThat(decoder.decode(none).transaction().type()).isEqualTo("PAYMENT");
         ObjectNode blank = fixture("payment");
         blank.put("paymentType", "  ");
-        assertThat(txTypes().codeOf(decoder.decode(blank, txTypes()).item().type())).isEqualTo("PAYMENT");
+        assertThat(decoder.decode(blank).transaction().type()).isEqualTo("PAYMENT");
         ObjectNode absent = fixture("payment");
         absent.remove("paymentType");
-        assertThat(txTypes().codeOf(decoder.decode(absent, txTypes()).item().type())).isEqualTo("PAYMENT");
+        assertThat(decoder.decode(absent).transaction().type()).isEqualTo("PAYMENT");
     }
 
     /** Ruling R-c: zoneless source timestamps are UTC; zoned ones keep working; garbage is poison. */
@@ -299,18 +299,18 @@ class DeltaRowDecoderTest extends PostgresTestBase {
         ObjectNode t = fixture("claimable-prize");
         t.put("created", "2026-10-29T11:22:04.465648");
         t.put("updated", "2026-10-29 11:22:04.465");
-        DeltaRow row = decoder.decode(t, txTypes());
-        assertThat(row.item().occurredAt()).isEqualTo(expected);
+        DeltaRow row = decoder.decode(t);
+        assertThat(row.transaction().occurredAt()).isEqualTo(expected);
         assertThat(row.version()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465Z"));
 
         ObjectNode offset = fixture("claimable-prize");
         offset.put("created", "2026-10-29T13:22:04.465648+02:00");
-        assertThat(decoder.decode(offset, txTypes()).item().occurredAt()).isEqualTo(expected);
+        assertThat(decoder.decode(offset).transaction().occurredAt()).isEqualTo(expected);
 
         for (String bad : new String[] {"2026-10-29", "2026-10-29T25:00:00", "29/10/2026 11:22", "2026-10-29X11:22:04"}) {
             ObjectNode g = fixture("claimable-prize");
             g.put("created", bad);
-            assertThatThrownBy(() -> decoder.decode(g, txTypes()))
+            assertThatThrownBy(() -> decoder.decode(g))
                     .as(bad).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("created");
         }
     }
@@ -321,14 +321,14 @@ class DeltaRowDecoderTest extends PostgresTestBase {
         ObjectNode t = fixture("limit");
         t.put("created", "2026-10-29T11:22:04.465648999Z");
         t.put("updated", "2026-10-29T11:22:04.465648501");
-        DeltaRow row = decoder.decode(t, txTypes());
-        assertThat(row.item().occurredAt()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
+        DeltaRow row = decoder.decode(t);
+        assertThat(row.transaction().occurredAt()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
         assertThat(row.version()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
     }
 
     @Test
     void a_row_that_is_not_an_object_is_poison() {
-        assertThatThrownBy(() -> decoder.decode(MAPPER.createArrayNode(), txTypes()))
+        assertThatThrownBy(() -> decoder.decode(MAPPER.createArrayNode()))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -347,7 +347,7 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     }
 
     private DeltaRow decode(String name) {
-        return decoder.decode(fixture(name), txTypes());
+        return decoder.decode(fixture(name));
     }
 
     private static ObjectNode fixture(String name) {
@@ -364,9 +364,9 @@ class DeltaRowDecoderTest extends PostgresTestBase {
         }
     }
 
-    private static Map<String, String> detail(ProjectionItem item) {
+    private static Map<String, String> detail(ProjectionTransaction transaction) {
         try {
-            return MAPPER.readValue(item.detailJson(), new TypeReference<Map<String, String>>() {});
+            return MAPPER.readValue(transaction.detailJson(), new TypeReference<Map<String, String>>() {});
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }

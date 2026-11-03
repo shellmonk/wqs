@@ -53,7 +53,7 @@ wqs:
     # (a WARN is logged at startup). Any other value fails startup.
     access: deny
   einstant:
-    # Product types that are eInstant (spec 4.1, D3), matched exactly. An eInstant item without a
+    # Product types that are eInstant (spec 4.1, D3), matched exactly. An eInstant transaction without a
     # batchId is dead-lettered at ingest (einstant-unsessioned, D7). A blank entry fails startup.
     product-types: instants
   stream:

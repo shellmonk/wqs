@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
@@ -47,7 +47,6 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     @Autowired HighLevelAssembler assembler;
     @Autowired WebHighLevelAssembly webAssembly;
     @Autowired CcHighLevelAssembly ccAssembly;
-    @Autowired wqs.db.TxTypeRegistry txTypes;
     @Autowired @org.springframework.beans.factory.annotation.Qualifier("readerDataSource")
     javax.sql.DataSource readerDataSource;
 
@@ -55,15 +54,15 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     void seed() {
         reset();
         applyBatches(List.of(
-                item("u0", "2034-02-10T09:00:00Z", null, null, TxTypes.PLAY, "6", "keno"),
-                item("s1-a", "2034-02-10T10:00:00Z", "s1", "p1", TxTypes.PLAY, "10", "instants"),
-                item("s1-b", "2034-02-10T10:01:00Z", "s1", "p1", TxTypes.WIN, "4", "keno"),
-                item("s1-c", "2034-02-10T10:02:00Z", "s1", "p2", TxTypes.PLAY, "5", "keno"),
+                transaction("u0", "2034-02-10T09:00:00Z", null, null, TxTypes.PLAY, "6", "keno"),
+                transaction("s1-a", "2034-02-10T10:00:00Z", "s1", "p1", TxTypes.PLAY, "10", "instants"),
+                transaction("s1-b", "2034-02-10T10:01:00Z", "s1", "p1", TxTypes.WIN, "4", "keno"),
+                transaction("s1-c", "2034-02-10T10:02:00Z", "s1", "p2", TxTypes.PLAY, "5", "keno"),
                 cancel("x-s1-c", "2034-02-10T10:02:30Z", "s1", "s1-c"),
-                item("s1-d", "2034-02-10T10:03:00Z", "s1", null, TxTypes.NEUTRAL, "1", "keno"),
-                item("u1", "2034-02-10T11:00:00Z", null, null, TxTypes.NEUTRAL, "7", null),
-                item("s2-a", "2034-02-10T12:00:00Z", "s2", "q1", TxTypes.PLAY, "2", "keno"),
-                item("s2-b", "2034-02-10T12:30:00Z", "s2", "q1", TxTypes.WIN, "3", "keno")));
+                transaction("s1-d", "2034-02-10T10:03:00Z", "s1", null, TxTypes.NEUTRAL, "1", "keno"),
+                transaction("u1", "2034-02-10T11:00:00Z", null, null, TxTypes.NEUTRAL, "7", null),
+                transaction("s2-a", "2034-02-10T12:00:00Z", "s2", "q1", TxTypes.PLAY, "2", "keno"),
+                transaction("s2-b", "2034-02-10T12:30:00Z", "s2", "q1", TxTypes.WIN, "3", "keno")));
     }
 
     @Test
@@ -78,7 +77,7 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
             assertThat(s1.kind()).isEqualTo("SESSION");
             assertThat(s1.created()).isEqualTo("2034-02-10T10:00:00Z");
             assertThat(s1.endedAt()).isEqualTo("2034-02-10T10:03:00Z");
-            // D6: the first item's product pair, not LEAST
+            // D6: the first transaction's product pair, not LEAST
             assertThat(s1.productId()).isEqualTo("P-instants");
             assertThat(s1.productType()).isEqualTo("instants");
             assertThat(s1.currency()).isEqualTo("EUR");
@@ -117,7 +116,7 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     }
 
     @Test
-    void unsessioned_items_interleave_by_time() {
+    void unsessioned_transactions_interleave_by_time() {
         for (ViewKind v : ViewKind.values()) {
             for (AggregationLevel level : List.of(AggregationLevel.L1, AggregationLevel.L2)) {
                 List<HighLevelEntry> all = new ArrayList<>();
@@ -142,7 +141,7 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
             ProjectionResponse<HighLevelEntry> l1 = read(v, AggregationLevel.L1, false, Set.of("PRIZE"), 1, 10);
             assertThat(l1.totalRowCount()).isEqualTo(4);
             assertThat(l1.pagesAvailable()).isEqualTo(1);
-            // every session and unsessioned item still appears; u0/u1 are not PRIZE
+            // every session and unsessioned transaction still appears; u0/u1 are not PRIZE
             assertThat(ids(l1.data())).containsExactly("s2", "u1", "s1", "u0");
             SessionView s1 = (SessionView) l1.data().get(2);
             assertThat(s1.txs()).extracting(TxView::txId).containsExactly("s1-b");
@@ -200,9 +199,9 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     @Test
     void cancellation_of_an_omitted_play_stays_on_its_session() {
         applyBatches(List.of(
-                item("s3-a", "2034-02-11T08:00:00Z", "s3", "p3", TxTypes.PLAY, "5", "keno"),
+                transaction("s3-a", "2034-02-11T08:00:00Z", "s3", "p3", TxTypes.PLAY, "5", "keno"),
                 cancel("x-s3-a", "2034-02-11T08:02:00Z", "s3", "p3", "s3-a"),
-                item("s3-b", "2034-02-11T08:05:00Z", "s3", null, TxTypes.NEUTRAL, "1", "keno")));
+                transaction("s3-b", "2034-02-11T08:05:00Z", "s3", null, TxTypes.NEUTRAL, "1", "keno")));
         for (ViewKind v : ViewKind.values()) {
             SessionView l1 = session(read(v, AggregationLevel.L1, true, Set.of(), 1, 10), "s3");
             assertThat(l1.txs()).as(v + " L1").extracting(TxView::txId).containsExactly("s3-b", "x-s3-a");
@@ -228,10 +227,10 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     @Test
     void late_cancellation_stays_on_its_session_within_the_range() {
         applyBatches(List.of(
-                item("s4-a", "2034-02-12T08:00:00Z", "s4", null, TxTypes.PLAY, "2", "keno"),
-                item("s4-b", "2034-02-12T08:10:00Z", "s4", null, TxTypes.WIN, "3", "keno"),
+                transaction("s4-a", "2034-02-12T08:00:00Z", "s4", null, TxTypes.PLAY, "2", "keno"),
+                transaction("s4-b", "2034-02-12T08:10:00Z", "s4", null, TxTypes.WIN, "3", "keno"),
                 cancel("x-s4-b", "2034-02-12T09:00:00Z", "s4", null, "s4-b"),
-                item("s5-a", "2034-02-28T23:00:00Z", "s5", null, TxTypes.PLAY, "2", "keno"),
+                transaction("s5-a", "2034-02-28T23:00:00Z", "s5", null, TxTypes.PLAY, "2", "keno"),
                 cancel("x-s5-a", "2034-03-01T00:30:00Z", "s5", null, "s5-a")));
         for (ViewKind v : ViewKind.values()) {
             for (AggregationLevel level : List.of(AggregationLevel.L1, AggregationLevel.L2)) {
@@ -258,8 +257,8 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     @Test
     void session_straddling_the_range_end_lists_all_its_transactions() {
         applyBatches(List.of(
-                item("s6-a", "2034-02-28T23:00:00Z", "s6", null, TxTypes.PLAY, "2", "keno"),
-                item("s6-b", "2034-03-01T00:10:00Z", "s6", null, TxTypes.WIN, "3", "keno"),
+                transaction("s6-a", "2034-02-28T23:00:00Z", "s6", null, TxTypes.PLAY, "2", "keno"),
+                transaction("s6-b", "2034-03-01T00:10:00Z", "s6", null, TxTypes.WIN, "3", "keno"),
                 cancel("x-s6-a", "2034-03-01T00:40:00Z", "s6", null, "s6-a")));
         for (ViewKind v : ViewKind.values()) {
             for (AggregationLevel level : List.of(AggregationLevel.L1, AggregationLevel.L2)) {
@@ -281,42 +280,42 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     }
 
     /**
-     * F1 (final review), spec 7.3 "each bounded by the page size": the item fetch reads only the
-     * page's sessions' own rows, not every item in the time span the page's sessions cover. A
+     * F1 (final review), spec 7.3 "each bounded by the page size": the transaction fetch reads only the
+     * page's sessions' own rows, not every transaction in the time span the page's sessions cover. A
      * long-lived session (Feb 1 .. Feb 27) is on the last page with four newer entries; 3000
-     * unrelated rows lie inside its window (1500 unsessioned items, 1500 one-play sessions). Signal: EXPLAIN (ANALYZE, FORMAT
+     * unrelated rows lie inside its window (1500 unsessioned transactions, 1500 one-play sessions). Signal: EXPLAIN (ANALYZE, FORMAT
      * JSON) of every statement the assembler ran, after VACUUM ANALYZE with planner settings
-     * unchanged; over every item-table scan node, (actual rows + rows removed by filter / index
+     * unchanged; over every transaction-table scan node, (actual rows + rows removed by filter / index
      * recheck) x loops -- the rows the executor examined.
      */
     @Test
-    void item_fetch_examines_only_the_page_rows() throws Exception {
+    void transaction_fetch_examines_only_the_page_rows() throws Exception {
         reset();
-        List<ProjectionItem> data = new ArrayList<>();
-        data.add(item("L-a", "2034-02-01T00:00:00Z", "L", "Lp", TxTypes.PLAY, "1", "keno"));
-        data.add(item("L-b", "2034-02-27T00:00:00Z", "L", "Lp", TxTypes.WIN, "2", "keno"));
+        List<ProjectionTransaction> data = new ArrayList<>();
+        data.add(transaction("L-a", "2034-02-01T00:00:00Z", "L", "Lp", TxTypes.PLAY, "1", "keno"));
+        data.add(transaction("L-b", "2034-02-27T00:00:00Z", "L", "Lp", TxTypes.WIN, "2", "keno"));
         Instant start = Instant.parse("2034-02-02T00:00:00Z");
         for (int i = 0; i < 3000; i++) {
             String at = start.plusSeconds(600L * i).toString();
             data.add(i % 2 == 0 // every other one is a one-play session of its own (id = its batch id)
-                    ? item("n" + i + "-t", at, "n" + i, "np" + i, TxTypes.PLAY, "1", "keno")
-                    : item("n" + i, at, null, null, TxTypes.PLAY, "1", "keno"));
+                    ? transaction("n" + i + "-t", at, "n" + i, "np" + i, TxTypes.PLAY, "1", "keno")
+                    : transaction("n" + i, at, null, null, TxTypes.PLAY, "1", "keno"));
         }
         applyBatches(data);
-        db().execute("vacuum analyze \"wqWebItem\"");
-        db().execute("vacuum analyze \"wqCcItem\"");
-        db().execute("vacuum analyze \"wqSession\"");
-        db().execute("vacuum analyze \"wqPlay\"");
+        db().execute("vacuum analyze \"wqPrjWebTransaction\"");
+        db().execute("vacuum analyze \"wqPrjCcTransaction\"");
+        db().execute("vacuum analyze \"wqPrjSession\"");
+        db().execute("vacuum analyze \"wqPrjPlay\"");
         com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper();
         for (ViewKind v : ViewKind.values()) {
-            HighLevelItemQuery items = v == ViewKind.WEB ? webAssembly : ccAssembly;
+            HighLevelTransactionQuery transactions = v == ViewKind.WEB ? webAssembly : ccAssembly;
             for (AggregationLevel level : List.of(AggregationLevel.L1, AggregationLevel.L2)) {
                 StatementRecorder recording = new StatementRecorder(readerDataSource);
                 HighLevelAssembler.Nesting n = new HighLevelAssembler.Nesting(level, Set.of(), false, TO);
                 // 3001 entries, pageSize 7 -> page 429 holds n3..n0 and L
                 HighLevelPage<HighLevelEntry> page = reader.readHighLevel(
                         new HighLevelRequest(v, level, new HighLevelFilter(USER, false), FROM, TO, 429, 7),
-                        (tx, keys) -> assembler.assemble(recording.client(), items, USER, n, keys));
+                        (tx, keys) -> assembler.assemble(recording.client(), transactions, USER, n, keys));
                 assertThat(ids(page.entries())).containsExactly("n3", "n2", "n1", "n0", "L");
                 assertThat(((SessionView) page.entries().get(4)).endedAt()).isEqualTo("2034-02-27T00:00:00Z");
                 // 3 statements at L1, 4 at L2 (measured in Task 4): an empty recording must not pass.
@@ -325,33 +324,33 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
                 long examined = 0;
                 for (StatementRecorder.Executed q : recording.executed()) {
                     String plan = recording.rerun("explain (analyze, format json)", q).get(0);
-                    examined += examinedItemRows(json.readTree(plan));
+                    examined += examinedTransactionRows(json.readTree(plan));
                 }
-                assertThat(examined).as(v + " " + level + " item and play rows examined").isLessThanOrEqualTo(40);
+                assertThat(examined).as(v + " " + level + " transaction and play rows examined").isLessThanOrEqualTo(40);
             }
         }
     }
 
-    /** (actual rows + rows removed) x loops over every scan node of an item or play table or partition. */
-    private static long examinedItemRows(com.fasterxml.jackson.databind.JsonNode node) {
+    /** (actual rows + rows removed) x loops over every scan node of a transaction or play table or partition. */
+    private static long examinedTransactionRows(com.fasterxml.jackson.databind.JsonNode node) {
         long sum = 0;
         if (node.isArray()) {
             for (com.fasterxml.jackson.databind.JsonNode c : node) {
-                sum += examinedItemRows(c);
+                sum += examinedTransactionRows(c);
             }
             return sum;
         }
         if (node.has("Plan")) {
-            return examinedItemRows(node.get("Plan"));
+            return examinedTransactionRows(node.get("Plan"));
         }
         String rel = node.path("Relation Name").asText("");
-        if (rel.startsWith("wqWebItem") || rel.startsWith("wqCcItem") || rel.startsWith("wqPlay")) {
+        if (rel.startsWith("wqPrjWebTransaction") || rel.startsWith("wqPrjCcTransaction") || rel.startsWith("wqPrjPlay")) {
             long perLoop = node.path("Actual Rows").asLong() + node.path("Rows Removed by Filter").asLong()
                     + node.path("Rows Removed by Index Recheck").asLong();
             sum += perLoop * Math.max(1, node.path("Actual Loops").asLong());
         }
         for (com.fasterxml.jackson.databind.JsonNode c : node.path("Plans")) {
-            sum += examinedItemRows(c);
+            sum += examinedTransactionRows(c);
         }
         return sum;
     }
@@ -364,60 +363,42 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     /** Spec 7.3: at most four queries per page, whatever its size; page 5 and page 50 cost the same. */
     @Test
     void assembly_query_count_is_bounded() {
-        List<ProjectionItem> more = new ArrayList<>();
+        List<ProjectionTransaction> more = new ArrayList<>();
         for (int i = 0; i < 60; i++) {
             String at = "2034-02-20T%02d:%02d:00Z".formatted(i / 4, (i % 4) * 10);
             String at2 = "2034-02-20T%02d:%02d:05Z".formatted(i / 4, (i % 4) * 10);
             if (i % 2 == 0) {
-                more.add(item("m" + i + "-a", at, "ms" + i, "mp" + i, TxTypes.PLAY, "1", "keno"));
-                more.add(item("m" + i + "-b", at2, "ms" + i, "mp" + i, TxTypes.WIN, "2", "keno"));
+                more.add(transaction("m" + i + "-a", at, "ms" + i, "mp" + i, TxTypes.PLAY, "1", "keno"));
+                more.add(transaction("m" + i + "-b", at2, "ms" + i, "mp" + i, TxTypes.WIN, "2", "keno"));
             } else {
-                more.add(item("mu" + i, at, null, null, TxTypes.PLAY, "1", "keno"));
+                more.add(transaction("mu" + i, at, null, null, TxTypes.PLAY, "1", "keno"));
             }
         }
         applyBatches(more);
         for (ViewKind v : ViewKind.values()) {
-            HighLevelItemQuery items = v == ViewKind.WEB ? webAssembly : ccAssembly;
+            HighLevelTransactionQuery transactions = v == ViewKind.WEB ? webAssembly : ccAssembly;
             for (AggregationLevel level : List.of(AggregationLevel.L1, AggregationLevel.L2)) {
                 for (Set<String> types : List.of(Set.<String>of(), Set.of("PRIZE"))) {
-                    for (boolean cold : List.of(false, true)) {
-                        if (!cold) {
-                            read(v, level, false, types, 1, 50); // warm the type registry's cache
-                        } else {
-                            coolTypeRegistry();
-                        }
-                        int small = assemblyStatements(v, items, level, types, 5);
-                        if (cold) {
-                            coolTypeRegistry();
-                        }
-                        int large = assemblyStatements(v, items, level, types, 50);
-                        String as = v + " " + level + " " + types + (cold ? " cold" : " warm");
-                        assertThat(small).as(as).isEqualTo(large)
-                                .isLessThanOrEqualTo(level == AggregationLevel.L2 ? 4 : 3)
-                                .isGreaterThanOrEqualTo(3);
-                    }
+                    int small = assemblyStatements(v, transactions, level, types, 5);
+                    int large = assemblyStatements(v, transactions, level, types, 50);
+                    String as = v + " " + level + " " + types;
+                    assertThat(small).as(as).isEqualTo(large)
+                            .isLessThanOrEqualTo(level == AggregationLevel.L2 ? 4 : 3)
+                            .isGreaterThanOrEqualTo(3);
                 }
             }
         }
     }
 
-    /** Empties the shared type registry's caches, so the next lookup of any type reads the table. */
-    @SuppressWarnings("unchecked")
-    private void coolTypeRegistry() {
-        for (String cache : List.of("idsByCode", "byId")) {
-            ((java.util.Map<?, ?>) org.springframework.test.util.ReflectionTestUtils.getField(txTypes, cache)).clear();
-        }
-    }
-
     /** Statements the assembler ran for page 1 of {@code pageSize}, which must hold both kinds of entry. */
-    private int assemblyStatements(ViewKind v, HighLevelItemQuery items, AggregationLevel level,
+    private int assemblyStatements(ViewKind v, HighLevelTransactionQuery transactions, AggregationLevel level,
                                    Set<String> types, int pageSize) {
         // JDBC-level: every statement the assembler sends, joined to the reader transaction.
         StatementRecorder counting = new StatementRecorder(readerDataSource);
         HighLevelAssembler.Nesting n = new HighLevelAssembler.Nesting(level, types, false, TO);
         HighLevelPage<HighLevelEntry> page = reader.readHighLevel(
                 new HighLevelRequest(v, level, new HighLevelFilter(USER, false), FROM, TO, 1, pageSize),
-                (tx, keys) -> assembler.assemble(counting.client(), items, USER, n, keys));
+                (tx, keys) -> assembler.assemble(counting.client(), transactions, USER, n, keys));
         assertThat(page.entries()).hasSize(pageSize);
         assertThat(page.entries()).hasAtLeastOneElementOfType(SessionView.class).hasAtLeastOneElementOfType(TxView.class);
         return counting.count();
@@ -443,19 +424,19 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
         }).toList();
     }
 
-    private static ProjectionItem item(String id, String at, String batchId, String subBatchId, short type,
+    private static ProjectionTransaction transaction(String id, String at, String batchId, String subBatchId, String type,
                                        String amount, String productType) {
-        return new ProjectionItem(USER, SourceKind.TRANSACTION, id, Instant.parse(at),
+        return new ProjectionTransaction(USER, SourceKind.TRANSACTION, id, Instant.parse(at),
                 productType == null ? null : "P-" + productType, productType, batchId, subBatchId, type,
                 new BigDecimal(amount), "EUR", null, null, null);
     }
 
-    private static ProjectionItem cancel(String id, String at, String batchId, String target) {
+    private static ProjectionTransaction cancel(String id, String at, String batchId, String target) {
         return cancel(id, at, batchId, null, target);
     }
 
-    private static ProjectionItem cancel(String id, String at, String batchId, String subBatchId, String target) {
-        return new ProjectionItem(USER, SourceKind.TRANSACTION, id, Instant.parse(at), null, null, batchId, subBatchId,
+    private static ProjectionTransaction cancel(String id, String at, String batchId, String subBatchId, String target) {
+        return new ProjectionTransaction(USER, SourceKind.TRANSACTION, id, Instant.parse(at), null, null, batchId, subBatchId,
                 TxTypes.CANCEL, new BigDecimal("-5"), "EUR", null, target, null);
     }
 }

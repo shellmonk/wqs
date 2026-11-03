@@ -3,7 +3,7 @@ package wqs.projection;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 
 /**
  * Applies one drained cancel inside a SAVEPOINT of the projection transaction (NESTED). If it
@@ -21,7 +21,7 @@ public class DrainedCancelApplier {
     }
 
     @Transactional(propagation = Propagation.NESTED)
-    public void apply(ProjectionItem drainedCancel) {
+    public void apply(ProjectionTransaction drainedCancel) {
         cancellationApplier.apply(drainedCancel);
     }
 }

@@ -32,13 +32,13 @@ final class RecordingLevel0Query implements Level0Query {
     }
 
     @Override
-    public List<ItemKey> keys(JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
+    public List<TransactionKey> keys(JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
         keysCalls.add(new KeysCall(lo, hi, offset, limit));
         return delegate.keys(tx, f, lo, hi, offset, limit);
     }
 
     @Override
-    public List<ItemEntry> fetch(JdbcClient tx, long userId, List<ItemKey> keys) {
+    public List<TransactionEntry> fetch(JdbcClient tx, long userId, List<TransactionKey> keys) {
         fetchCalls++;
         return delegate.fetch(tx, userId, keys);
     }

@@ -8,7 +8,6 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-import wqs.db.TxTypeRegistry;
 import wqs.ingest.DeadLetterStore;
 import wqs.ingest.TransientFailures;
 import wqs.projection.DeltaBatch;
@@ -53,19 +52,17 @@ public class DeltaPoller {
 
     private final DeltaClient client;
     private final DeltaRowDecoder decoder;
-    private final TxTypeRegistry txTypes;
     private final ProjectionWriter writer;
     private final DeltaWatermarkStore watermarks;
     private final DeadLetterStore deadLetters;
     private final DeltaProperties properties;
     private final DeltaPollMetrics metrics;
 
-    public DeltaPoller(DeltaClient client, DeltaRowDecoder decoder, TxTypeRegistry txTypes, ProjectionWriter writer,
+    public DeltaPoller(DeltaClient client, DeltaRowDecoder decoder, ProjectionWriter writer,
             DeltaWatermarkStore watermarks, DeadLetterStore deadLetters, DeltaProperties properties,
             DeltaPollMetrics metrics) {
         this.client = client;
         this.decoder = decoder;
-        this.txTypes = txTypes;
         this.writer = writer;
         this.watermarks = watermarks;
         this.deadLetters = deadLetters;
@@ -180,15 +177,14 @@ public class DeltaPoller {
         for (JsonNode node : page) {
             Instant version;
             try {
-                DeltaRow row = decoder.decode(node, txTypes);
+                DeltaRow row = decoder.decode(node);
                 rows.add(row);
                 version = row.version();
             } catch (RuntimeException e) {
                 if (TransientFailures.isTransient(e)) {
-                    throw e; // infrastructure (e.g. the type registry's insert): fails the run
+                    throw e; // infrastructure: fails the run
                 }
-                // Poison (as on the stream, one rule: TransientFailures): bad data, a data-integrity
-                // rejection from the type registry's first-sighting insert, or a bug.
+                // Poison (as on the stream, one rule: TransientFailures): bad data or a bug.
                 DeltaRowDecoder.Identity identity = decoder.identify(node);
                 log.error("Cannot decode delta row {} (source {}); dead-lettering it",
                         identity.sourceId(), identity.source(), e);
@@ -240,9 +236,9 @@ public class DeltaPoller {
             if (TransientFailures.isTransient(e)) {
                 throw e;
             }
-            deadLetters.record(STREAM, null, row.item(), e, 1);
+            deadLetters.record(STREAM, null, row.transaction(), e, 1);
             metrics.deadLettered();
-            log.error("Dead-lettered delta row {} (source {})", row.item().sourceId(), row.source(), e);
+            log.error("Dead-lettered delta row {} (source {})", row.transaction().sourceId(), row.source(), e);
         }
     }
 }

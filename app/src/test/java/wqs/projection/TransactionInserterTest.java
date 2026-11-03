@@ -8,43 +8,43 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 
-class ItemInserterTest extends PostgresTestBase {
+class TransactionInserterTest extends PostgresTestBase {
 
     private static final Instant WHEN = Instant.parse("2033-04-10T08:30:00Z");
 
-    private ItemInserter inserter;
+    private TransactionInserter inserter;
 
     @BeforeEach
     void setUp() {
         new PartitionManager(jdbc()).ensurePartitionsAhead(java.time.YearMonth.of(2033, 4), 0);
-        inserter = new ItemInserter(jdbc());
-        db().execute("delete from \"wqItemLocator\"");
-        db().execute("delete from \"wqWebItem\"");
-        db().execute("delete from \"wqCcItem\"");
+        inserter = new TransactionInserter(jdbc());
+        db().execute("delete from \"wqPrjTransactionLocator\"");
+        db().execute("delete from \"wqPrjWebTransaction\"");
+        db().execute("delete from \"wqPrjCcTransaction\"");
     }
 
     @Test
     void a_transaction_lands_in_both_view_tables() {
         assertThat(inserter.insertIfAbsent(transaction("tx-1"))).isTrue();
 
-        assertThat(count("wqWebItem")).isEqualTo(1);
-        assertThat(count("wqCcItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
     }
 
     @Test
     void a_payment_lands_only_in_the_operator_table() {
-        ProjectionItem payment = new ProjectionItem(
+        ProjectionTransaction payment = new ProjectionTransaction(
                 7L, SourceKind.PAYMENT, "pay-1", WHEN, null, null, null, null,
                 TxTypes.NEUTRAL, new BigDecimal("100.0000"), "EUR", null, null, null);
 
         assertThat(inserter.insertIfAbsent(payment)).isTrue();
 
-        assertThat(count("wqWebItem")).isZero();
-        assertThat(count("wqCcItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
     }
 
     @Test
@@ -54,16 +54,16 @@ class ItemInserterTest extends PostgresTestBase {
         boolean secondInsert = inserter.insertIfAbsent(transaction("tx-1"));
 
         assertThat(secondInsert).isFalse();
-        assertThat(count("wqWebItem")).isEqualTo(1);
-        assertThat(count("wqCcItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
     }
 
     @Test
-    void the_locator_records_where_the_item_landed() {
+    void the_locator_records_where_the_transaction_landed() {
         inserter.insertIfAbsent(transaction("tx-1"));
 
         var row = db().row("""
-                select "userId", "occurredAt" from "wqItemLocator"
+                select "userId", "occurredAt" from "wqPrjTransactionLocator"
                 where "source" = ? and "sourceId" = ?
                 """, SourceKind.TRANSACTION.code(), "tx-1");
 
@@ -73,7 +73,7 @@ class ItemInserterTest extends PostgresTestBase {
 
     @Test
     void detail_json_is_stored_as_jsonb() {
-        ProjectionItem withDetail = new ProjectionItem(
+        ProjectionTransaction withDetail = new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, "tx-detail", WHEN, "P11", "instants", "b-1", "p-1",
                 TxTypes.PLAY, new BigDecimal("2.5000"), "EUR", null, null,
                 "{\"gameCode\":\"CRZ8\"}");
@@ -81,51 +81,51 @@ class ItemInserterTest extends PostgresTestBase {
         inserter.insertIfAbsent(withDetail);
 
         String gameCode = db().value("""
-                          select "detail" ->> 'gameCode' from "wqWebItem" where "sourceId" = ?
+                          select "detail" ->> 'gameCode' from "wqPrjWebTransaction" where "sourceId" = ?
                           """, String.class, "tx-detail");
         assertThat(gameCode).isEqualTo("CRZ8");
     }
 
     @Test
-    void every_field_is_written_to_both_views_with_the_locator_item_id() {
-        ProjectionItem item = new ProjectionItem(
+    void every_field_is_written_to_both_views_with_the_locator_transaction_id() {
+        ProjectionTransaction transaction = new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, "tx-full", WHEN, "P11", "instants", "batch-A", "sub-B",
                 TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"),
                 "tx-cancelled", "{\"gameCode\":\"CRZ8\"}");
-        assertThat(inserter.insertIfAbsent(item)).isTrue();
+        assertThat(inserter.insertIfAbsent(transaction)).isTrue();
 
         long locatorId = db().value(
-                "select \"itemId\" from \"wqItemLocator\" where \"source\" = ? and \"sourceId\" = ?", Long.class,
+                "select \"transactionId\" from \"wqPrjTransactionLocator\" where \"source\" = ? and \"sourceId\" = ?", Long.class,
                 SourceKind.TRANSACTION.code(), "tx-full");
 
-        for (String table : new String[] {"wqWebItem", "wqCcItem"}) {
+        for (String table : new String[] {"wqPrjWebTransaction", "wqPrjCcTransaction"}) {
             var row = db().row(
-                    "select \"userId\", \"itemId\", \"source\", \"sourceId\", \"occurredAt\", "
+                    "select \"userId\", \"transactionId\", \"source\", \"sourceId\", \"occurredAt\", "
                             + "\"productId\", \"productType\", \"batchId\", \"subBatchId\", \"type\", \"amount\", "
                             + "\"currency\", \"balanceAfter\", \"cancels\", \"cancelled\", "
                             + "\"detail\" ->> 'gameCode' as game from \"" + table + "\" where \"sourceId\" = ?",
                     "tx-full");
             assertThat(row.get("userId", Long.class)).as(table).isEqualTo(7L);
-            assertThat(row.get("itemId", Long.class)).as(table).isEqualTo(locatorId);
+            assertThat(row.get("transactionId", Long.class)).as(table).isEqualTo(locatorId);
             assertThat(row.get("source", Integer.class)).as(table).isEqualTo(SourceKind.TRANSACTION.code());
             assertThat(row.get("occurredAt", Instant.class)).as(table).isEqualTo(WHEN);
             assertThat(row.get("productId", String.class)).as(table).isEqualTo("P11");
             assertThat(row.get("productType", String.class)).as(table).isEqualTo("instants");
-            assertThat(row.get("batchId", String.class)).as(table).isEqualTo(item.batchId());
-            assertThat(row.get("subBatchId", String.class)).as(table).isEqualTo(item.subBatchId());
-            assertThat(row.get("type", Integer.class)).as(table).isEqualTo((int) item.type());
-            assertThat(row.get("amount", BigDecimal.class)).as(table).isEqualByComparingTo(item.amount());
+            assertThat(row.get("batchId", String.class)).as(table).isEqualTo(transaction.batchId());
+            assertThat(row.get("subBatchId", String.class)).as(table).isEqualTo(transaction.subBatchId());
+            assertThat(row.get("type", String.class)).as(table).isEqualTo(transaction.type());
+            assertThat(row.get("amount", BigDecimal.class)).as(table).isEqualByComparingTo(transaction.amount());
             assertThat(row.get("currency", String.class)).as(table).isEqualTo("EUR");
             assertThat(row.get("balanceAfter", BigDecimal.class)).as(table)
-                    .isEqualByComparingTo(item.balanceAfter());
-            assertThat(row.get("cancels", String.class)).as(table).isEqualTo(item.cancels());
+                    .isEqualByComparingTo(transaction.balanceAfter());
+            assertThat(row.get("cancels", String.class)).as(table).isEqualTo(transaction.cancels());
             assertThat(row.get("cancelled", Boolean.class)).as(table).isFalse();
             assertThat(row.get("game", String.class)).as(table).isEqualTo("CRZ8");
         }
     }
 
-    private ProjectionItem transaction(String sourceId) {
-        return new ProjectionItem(
+    private ProjectionTransaction transaction(String sourceId) {
+        return new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, sourceId, WHEN, "P11", "instants", "b-1", "p-1",
                 TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"), null, null);
     }

@@ -11,8 +11,8 @@ import java.util.Map;
  * <p>{@code userType} and {@code userId} come from {@code userContext.ownerId} =
  * {@code "{userType}-{userId}"}; deciding what to do with a non-player owner is not the decoder's
  * job: {@code StreamConsumer} skips it before mapping (spec 4.1, D8), so it never reaches the
- * mapper or the writer. {@code type} is the wire code ({@code TT_BUY}); the mapper turns it
- * into a "wqTxType" id. {@code transactionReference} is the raw {@code references.transactionReference}
+ * mapper or the writer. {@code type} is the wire code ({@code TT_BUY}); the mapper keeps it
+ * as-is (plan D1). {@code transactionReference} is the raw {@code references.transactionReference}
  * -- the producer self-references when there is no link, so it is only a cancel target per the
  * mapper's rule.
  *

@@ -14,23 +14,23 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import wqs.domain.CounterSentinels;
 import wqs.domain.PageUnit;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.ViewKind;
 
 /**
- * Maintains the two-tier pagination counters (spec 5.7): "wqCountMonth" for whole months and
- * "wqCountDay" for the partial months at each end of a range. Periods are UTC.
+ * Maintains the two-tier pagination counters (spec 5.7): "wqPrjCountMonth" for whole months and
+ * "wqPrjCountDay" for the partial months at each end of a range. Periods are UTC.
  *
- * Keys are (productType, typeId) per tier. productType = '' is the ALL-product-types
- * sentinel and typeId = 0 the ALL-transaction-types sentinel ({@link CounterSentinels}), so the
+ * Keys are (productType, type) per tier. productType = '' is the ALL-product-types
+ * sentinel and type = '' the ALL-transaction-types sentinel ({@link CounterSentinels}), so the
  * common unfiltered query reads one row rather than summing across values.
  *
- * ITEM counters fan out to four keys per tier (plan D4): (pt,t), (pt,ALL), (ALL,t), (ALL,ALL),
- * where t is the item's type. An item with no product type writes only the two ALL-product keys.
+ * TRANSACTION counters fan out to four keys per tier (plan D4): (pt,t), (pt,ALL), (ALL,t), (ALL,ALL),
+ * where t is the transaction's type. A transaction with no product type writes only the two ALL-product keys.
  * HIGH_LEVEL counters never carry a type: (pt,ALL) and (ALL,ALL), or (ALL,ALL) alone without a
  * product type.
  *
- * ITEM counters are per item, in each view the item's source feeds. HIGH_LEVEL counters mirror
+ * TRANSACTION counters are per transaction, in each view the transaction's source feeds. HIGH_LEVEL counters mirror
  * the page index per view, so they are driven per view from {@link HighLevelResult}:
  * {@link #countHighLevel} for each view in {@code inserted()} at the current key, and
  * {@link #moveHighLevel} for each view in {@code moved()} from
@@ -44,7 +44,7 @@ import wqs.domain.ViewKind;
  * per-view page-index mirror guarantee it), so a decrement that does not affect exactly one row
  * is a bug and throws {@link IllegalStateException} naming the full key. The table CHECK
  * constraints (non-negative, excl <= all) reject a decrement that would go below zero. Either
- * failure aborts the projection transaction, which the consumer turns into per-item fallback
+ * failure aborts the projection transaction, which the consumer turns into per-transaction fallback
  * and dead-letter: loud and replayable instead of silent counter drift (spec P-2).
  *
  * All mutators require a surrounding transaction (callers supply it).
@@ -52,8 +52,8 @@ import wqs.domain.ViewKind;
 @Component
 public class CounterUpdater {
 
-    private static final Tier MONTH = Tier.of("wqCountMonth");
-    private static final Tier DAY = Tier.of("wqCountDay");
+    private static final Tier MONTH = Tier.of("wqPrjCountMonth");
+    private static final Tier DAY = Tier.of("wqPrjCountDay");
 
     private final JdbcClient jdbc;
 
@@ -61,12 +61,12 @@ public class CounterUpdater {
         this.jdbc = jdbc;
     }
 
-    /** Counts one level-0 row in each view this item's source feeds. */
+    /** Counts one level-0 row in each view this transaction's source feeds. */
     @Transactional(propagation = Propagation.MANDATORY)
-    public void countItem(ProjectionItem item) {
-        for (ViewKind view : item.source().views()) {
-            apply(keys(PageUnit.ITEM, item.productType(), item.type(), item.occurredAt()), item.userId(),
-                    view, PageUnit.ITEM, +1, true);
+    public void countTransaction(ProjectionTransaction transaction) {
+        for (ViewKind view : transaction.source().views()) {
+            apply(keys(PageUnit.TRANSACTION, transaction.productType(), transaction.type(), transaction.occurredAt()), transaction.userId(),
+                    view, PageUnit.TRANSACTION, +1, true);
         }
     }
 
@@ -105,30 +105,30 @@ public class CounterUpdater {
     }
 
     /**
-     * Removes one row from the excl-cancelled tally, leaving cntAll untouched: a cancelled item
+     * Removes one row from the excl-cancelled tally, leaving cntAll untouched: a cancelled transaction
      * still exists and is still returned when the filter is off.
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void uncountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, String productType, short typeId,
+            long userId, ViewKind view, PageUnit unit, String productType, String type,
             Instant at) {
-        for (Key key : keys(unit, productType, typeId, at)) {
+        for (Key key : keys(unit, productType, type, at)) {
             decrementExcl(tier(key.month()), userId, view, unit, key);
         }
     }
 
     /**
      * Returns one row to the excl-cancelled tally, leaving cntAll untouched: the inverse of
-     * {@link #uncountExclCancelled}, for a page-index row revived by a live item joining a
+     * {@link #uncountExclCancelled}, for a page-index row revived by a live transaction joining a
      * session whose row in that view had been hidden by cancels. Strict like every other
      * decrement-side operation: the row must exist (it was counted when the page unit was
      * inserted), and the CHECK rejects excl &gt; all.
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void recountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, String productType, short typeId,
+            long userId, ViewKind view, PageUnit unit, String productType, String type,
             Instant at) {
-        for (Key key : keys(unit, productType, typeId, at)) {
+        for (Key key : keys(unit, productType, type, at)) {
             incrementExcl(tier(key.month()), userId, view, unit, key);
         }
     }
@@ -136,13 +136,13 @@ public class CounterUpdater {
     // --- internals -----------------------------------------------------------------------
 
     /** One counter row address within a tier. */
-    private record Key(boolean month, String productType, short typeId, LocalDate period) {}
+    private record Key(boolean month, String productType, String type, LocalDate period) {}
 
     /**
-     * The key set of one page unit: {own product type, ALL} x {own type, ALL} for ITEM,
-     * {own product type, ALL} x {ALL} for HIGH_LEVEL (its {@code typeId} is ignored), in both tiers.
+     * The key set of one page unit: {own product type, ALL} x {own type, ALL} for TRANSACTION,
+     * {own product type, ALL} x {ALL} for HIGH_LEVEL (its {@code type} is ignored), in both tiers.
      */
-    private static Set<Key> keys(PageUnit unit, String productType, short typeId, Instant at) {
+    private static Set<Key> keys(PageUnit unit, String productType, String type, Instant at) {
         LocalDate day = LocalDate.ofInstant(at, ZoneOffset.UTC);
         LocalDate monthStart = day.withDayOfMonth(1);
         Set<String> products = new LinkedHashSet<>();
@@ -150,14 +150,14 @@ public class CounterUpdater {
             products.add(productType);
         }
         products.add(ALL_PRODUCT_TYPES);
-        Set<Short> types = new LinkedHashSet<>();
-        if (unit == PageUnit.ITEM) {
-            types.add(typeId);
+        Set<String> types = new LinkedHashSet<>();
+        if (unit == PageUnit.TRANSACTION) {
+            types.add(type);
         }
         types.add(ALL_TYPES);
         Set<Key> keys = new LinkedHashSet<>();
         for (String p : products) {
-            for (Short t : types) {
+            for (String t : types) {
                 keys.add(new Key(false, p, t, day));
                 keys.add(new Key(true, p, t, monthStart));
             }
@@ -184,7 +184,7 @@ public class CounterUpdater {
     /** The row key every statement below addresses, appended after its SET values. */
     private static final String ROW_IS = """
             where "userId" = ? and "viewKind" = ? and "pageUnit" = ? and "productType" = ?
-              and "typeId" = ? and "period" = ?
+              and "type" = ? and "period" = ?
             """;
 
     /** The two counter tables share one column shape; this carries a table's statements. */
@@ -202,10 +202,10 @@ public class CounterUpdater {
             return new Tier(
                     table,
                     """
-                    insert into %1$s ("userId", "viewKind", "pageUnit", "productType", "typeId", "period",
+                    insert into %1$s ("userId", "viewKind", "pageUnit", "productType", "type", "period",
                             "cntAll", "cntExclCancelled")
                     values (?, ?, ?, ?, ?, ?, ?, ?)
-                    on conflict ("userId", "viewKind", "pageUnit", "productType", "typeId", "period")
+                    on conflict ("userId", "viewKind", "pageUnit", "productType", "type", "period")
                     do update set "cntAll" = %1$s."cntAll" + ?,
                                   "cntExclCancelled" = %1$s."cntExclCancelled" + ?
                     """.formatted(t),
@@ -225,7 +225,7 @@ public class CounterUpdater {
     private void increment(Tier t, long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
         long exclDelta = excl ? 1L : 0L;
         jdbc.sql(t.increment())
-                .params(userId, (short) view.code(), unit.code(), key.productType(), key.typeId(),
+                .params(userId, (short) view.code(), unit.code(), key.productType(), key.type(),
                         key.period(), 1L, exclDelta, 1L, exclDelta)
                 .update();
     }
@@ -241,7 +241,7 @@ public class CounterUpdater {
                 ? jdbc.sql(t.decrementWithExcl()).params(1L, 1L)
                 : jdbc.sql(t.decrement()).param(1L);
         Long remaining = statement
-                .params(userId, (short) view.code(), unit.code(), key.productType(), key.typeId(),
+                .params(userId, (short) view.code(), unit.code(), key.productType(), key.type(),
                         key.period())
                 .query(Long.class)
                 .optional()
@@ -277,7 +277,7 @@ public class CounterUpdater {
                     "counter update hit " + rows + " rows, expected 1: table="
                             + t.table() + " userId=" + userId + " view=" + view
                             + " unit=" + unit + " productType='" + key.productType() + "'"
-                            + " typeId=" + key.typeId()
+                            + " type='" + key.type() + "'"
                             + " period=" + key.period());
         }
     }
@@ -285,6 +285,6 @@ public class CounterUpdater {
     /** The bind values of {@link #ROW_IS}, in order. */
     private static Object[] rowIs(long userId, ViewKind view, PageUnit unit, Key key) {
         return new Object[] {
-                userId, (short) view.code(), unit.code(), key.productType(), key.typeId(), key.period()};
+                userId, (short) view.code(), unit.code(), key.productType(), key.type(), key.period()};
     }
 }

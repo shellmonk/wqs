@@ -117,7 +117,7 @@ class StreamEndToEndTest extends PostgresTestBase {
 
     /**
      * A real-format TT_BUY event (nested walAccountTransactions shape), optionally in a session.
-     * An unsessioned one is a lottery ticket: an unsessioned eInstant item is dead-lettered (P-7).
+     * An unsessioned one is a lottery ticket: an unsessioned eInstant transaction is dead-lettered (P-7).
      */
     private static String event(String id, String at, String type, String amount, String batch) {
         return "{\"id\":\"" + id + "\",\"type\":\"" + type + "\","
@@ -129,7 +129,7 @@ class StreamEndToEndTest extends PostgresTestBase {
                 + "\"createdContext\":{\"created\":\"" + at + "\"}}";
     }
 
-    /** The recorded PRIZE sample, with a non-zero amount (a zero-amount item is not projected), our user and an in-range date. */
+    /** The recorded PRIZE sample, with a non-zero amount (a zero-amount transaction is not projected), our user and an in-range date. */
     private static String prizeSample(String id, String batch, String amount) throws java.io.IOException {
         try (var in = StreamEndToEndTest.class.getResourceAsStream("/stream/prize-zero.json")) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8)
@@ -139,10 +139,6 @@ class StreamEndToEndTest extends PostgresTestBase {
                     .replace("GS-ur5z5sgfr5de5flhjd6ycryf6u", batch)
                     .replace("\"created\": \"2026-10-26T11:36:23.049062Z\"", "\"created\": \"2033-09-02T12:05:00Z\"");
         }
-    }
-
-    private static short typeId(String code) {
-        return db().value("select \"typeId\" from \"wqTxType\" where \"code\" = '" + code + "'", Short.class);
     }
 
     private static long count(String sql) {
@@ -158,19 +154,19 @@ class StreamEndToEndTest extends PostgresTestBase {
         publish(event("e2e-3", "2033-09-03T09:00:00Z", "TT_BUY", "2.0000", null));
 
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
-            assertThat(count("select count(*) from \"wqWebItem\" where \"userId\" = " + USER))
+            assertThat(count("select count(*) from \"wqPrjWebTransaction\" where \"userId\" = " + USER))
                     .isEqualTo(3);
-            assertThat(count("select count(*) from \"wqSession\" where \"userId\" = " + USER))
+            assertThat(count("select count(*) from \"wqPrjSession\" where \"userId\" = " + USER))
                     .isEqualTo(1);
             assertThat(count("select count(*) from \"wqDeadLetter\"")).isEqualTo(1);
-            assertThat(count("select \"offsetVal\" from \"wqStreamOffset\" where \"stream\" = '"
+            assertThat(count("select \"streamOffset\" from \"wqIngestCursor\" where \"feed\" = '"
                     + STREAM + "'")).isEqualTo(3);
         });
 
         // The real PRIZE sample landed as a row of the right type, product and session.
         var prize = db().row("select \"type\", \"productId\", \"productType\", \"batchId\", \"amount\""
-                + " from \"wqWebItem\" where \"sourceId\" = 'e2e-2'");
-        assertThat(prize.get("type", Short.class)).isEqualTo(typeId("PRIZE"));
+                + " from \"wqPrjWebTransaction\" where \"sourceId\" = 'e2e-2'");
+        assertThat(prize.get("type", String.class)).isEqualTo("PRIZE");
         assertThat(prize.get("productId", String.class)).isEqualTo("TIKIKALACABANA");
         assertThat(prize.get("productType", String.class)).isEqualTo("instants");
         assertThat(prize.get("batchId", String.class)).isEqualTo("e2e-s1");
@@ -193,16 +189,16 @@ class StreamEndToEndTest extends PostgresTestBase {
         lifecycle.start();
 
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
-                assertThat(count("select count(*) from \"wqWebItem\" where \"userId\" = " + USER))
+                assertThat(count("select count(*) from \"wqPrjWebTransaction\" where \"userId\" = " + USER))
                         .isEqualTo(4));
         // No replay duplicates: every sourceId appears exactly once; dead letters unchanged.
-        assertThat(count("select count(distinct \"sourceId\") from \"wqWebItem\" where \"userId\" = "
+        assertThat(count("select count(distinct \"sourceId\") from \"wqPrjWebTransaction\" where \"userId\" = "
                 + USER)).isEqualTo(4);
         assertThat(count("select count(*) from \"wqDeadLetter\"")).isEqualTo(1);
         // The 5th message is offset 4. Resuming AT the stored offset (3) instead of after it would
         // replay offset 3 as an idempotent duplicate: rows and offset alone cannot see that.
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
-                assertThat(count("select \"offsetVal\" from \"wqStreamOffset\" where \"stream\" = '"
+                assertThat(count("select \"streamOffset\" from \"wqIngestCursor\" where \"feed\" = '"
                         + STREAM + "'")).isEqualTo(4));
         assertThat(duplicates()).as("replayed duplicates across the restart").isEqualTo(duplicatesBefore);
     }

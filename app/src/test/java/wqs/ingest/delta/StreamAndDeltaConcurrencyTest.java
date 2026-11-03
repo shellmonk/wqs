@@ -25,7 +25,6 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.db.TxTypeRegistry;
 import wqs.ingest.DeadLetterStore;
 import wqs.ingest.stream.FakeStreamSource;
 import wqs.ingest.stream.StreamConsumer;
@@ -39,11 +38,11 @@ import wqs.projection.source.StreamPayload;
 
 /**
  * Plan D8, ruling I2: the stream consumer and the poller run concurrently and meet on the shared
- * rollups when a sessioned prize joins a stream session. Crossed plays: the stream applies items
+ * rollups when a sessioned prize joins a stream session. Crossed plays: the stream applies transactions
  * in play-1 then play-2 of session S (locks play-1, S, play-2), the poller a prize in play-2 of S
  * (locks play-2, S) -- opposite orders, so Postgres may abort one side with 40P01. The lock order is
  * deliberately not changed; correctness rests on both paths retrying, each through its REAL path:
- * the stream through {@link StreamConsumer} (batch retries, items alone, and for a lock conflict
+ * the stream through {@link StreamConsumer} (batch retries, transactions alone, and for a lock conflict
  * recovery plus re-delivery from the stored offset -- final review I-C), the delta side through
  * {@link DeltaPoller#runOnce} (a failed run is retried like the next job fire). Asserted: eventual
  * convergence -- nothing dead-lettered, the P-4/P-8 oracles hold.
@@ -77,7 +76,6 @@ class StreamAndDeltaConcurrencyTest extends PostgresTestBase {
     @Autowired private DeltaPoller poller;
     @Autowired private DeltaWatermarkStore watermarks;
     @Autowired private StreamPayloadMapper payloadMapper;
-    @Autowired private TxTypeRegistry txTypes;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private DeadLetterStore deadLetterStore;
     @Autowired private PartitionManager partitionManager;
@@ -95,7 +93,7 @@ class StreamAndDeltaConcurrencyTest extends PostgresTestBase {
         FakeStreamSource source = new FakeStreamSource();
         StreamConsumer consumer = new StreamConsumer(source,
                 new StreamProperties(true, STREAM, 2, Duration.ofSeconds(5), 3, Duration.ofMillis(50), null),
-                payloadMapper, txTypes, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
+                payloadMapper, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
                 deadLetterStore);
         consumer.start();
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -151,9 +149,9 @@ class StreamAndDeltaConcurrencyTest extends PostgresTestBase {
                 source.subscribeCount() - 1);
 
         assertThat(db().count("\"wqDeadLetter\"")).isZero();
-        assertThat(db().count("\"wqSession\"")).isEqualTo(ITERATIONS);
-        assertThat(db().count("\"wqPlay\"")).isEqualTo(2 * ITERATIONS);
-        assertThat(db().count("\"wqWebItem\"")).isEqualTo(3 * ITERATIONS);
+        assertThat(db().count("\"wqPrjSession\"")).isEqualTo(ITERATIONS);
+        assertThat(db().count("\"wqPrjPlay\"")).isEqualTo(2 * ITERATIONS);
+        assertThat(db().count("\"wqPrjWebTransaction\"")).isEqualTo(3 * ITERATIONS);
         ProjectionInvariants invariants = new ProjectionInvariants(jdbc());
         assertThat(invariants.aggregationDrift()).as("P-4").isEmpty();
         assertThat(invariants.highLevelDrift()).as("P-8").isEmpty();

@@ -11,55 +11,53 @@ import java.util.Set;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import wqs.domain.ViewKind;
-import wqs.read.HighLevelItemQuery;
+import wqs.read.HighLevelTransactionQuery;
 import wqs.read.HighLevelKey;
-import wqs.read.ItemEntry;
+import wqs.read.TransactionEntry;
 
-/** Level-1/2 assembly reads of the web view's items; of the item tables, touches only "wqWebItem". */
+/** Level-1/2 assembly reads of the web view's transactions; of the transaction tables, touches only "wqPrjWebTransaction". */
 @Component
-public class WebHighLevelAssembly implements HighLevelItemQuery {
+public class WebHighLevelAssembly implements HighLevelTransactionQuery {
 
-    private static final String ITEM_COLUMNS = """
-            "wqWebItem"."userId", "wqWebItem"."itemId", "wqWebItem"."source", "wqWebItem"."sourceId",
-            "wqWebItem"."occurredAt", "wqWebItem"."productId", "wqWebItem"."batchId", "wqWebItem"."subBatchId",
-            "wqWebItem"."type", "wqWebItem"."amount", "wqWebItem"."currency", "wqWebItem"."balanceAfter",
-            "wqWebItem"."cancelled", "wqWebItem"."cancelledBy", "wqWebItem"."cancels", "wqWebItem"."detail",
-            "wqWebItem"."ingestedAt", "wqWebItem"."productType", "wqTxType"."code"
+    private static final String TRANSACTION_COLUMNS = """
+            "wqPrjWebTransaction"."userId", "wqPrjWebTransaction"."transactionId", "wqPrjWebTransaction"."source", "wqPrjWebTransaction"."sourceId",
+            "wqPrjWebTransaction"."occurredAt", "wqPrjWebTransaction"."productId", "wqPrjWebTransaction"."batchId", "wqPrjWebTransaction"."subBatchId",
+            "wqPrjWebTransaction"."type", "wqPrjWebTransaction"."amount", "wqPrjWebTransaction"."currency", "wqPrjWebTransaction"."balanceAfter",
+            "wqPrjWebTransaction"."cancelled", "wqPrjWebTransaction"."cancelledBy", "wqPrjWebTransaction"."cancels", "wqPrjWebTransaction"."detail",
+            "wqPrjWebTransaction"."ingestedAt", "wqPrjWebTransaction"."productType"
             """;
 
-    // Per session: ("userId", "batchId", "occurredAt") probes of "wqWebItem_batch", each from the
+    // Per session: ("userId", "batchId", "occurredAt") probes of "wqPrjWebTransaction_batch", each from the
     // session's own start; the OR keeps its whole window (even past the range end, as its totals
     // count it) plus its late cancellations before the range end. %1$s: the excl predicate, %2$s:
     // the type-code predicate -- fixed fragments, never values.
-    private static final String SESSION_ITEMS = "select " + ITEM_COLUMNS + """
+    private static final String SESSION_TRANSACTIONS = "select " + TRANSACTION_COLUMNS + """
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqSession" on ("wqSession"."userId" = :userId and "wqSession"."batchId" = "wanted"."id"
-                   and "wqSession"."startedAt" between cast(:startedFrom as timestamptz)
+            join "wqPrjSession" on ("wqPrjSession"."userId" = :userId and "wqPrjSession"."batchId" = "wanted"."id"
+                   and "wqPrjSession"."startedAt" between cast(:startedFrom as timestamptz)
                                                and cast(:startedTo as timestamptz))
-            join "wqWebItem" on ("wqWebItem"."userId" = :userId and "wqWebItem"."batchId" = "wqSession"."batchId"
-                   and "wqWebItem"."occurredAt" >= "wqSession"."startedAt"
-                   and ("wqWebItem"."occurredAt" <= "wqSession"."endedAt"
-                        or ("wqWebItem"."cancels" is not null and "wqWebItem"."occurredAt" < cast(:to as timestamptz)))%1$s)
-            join "wqTxType" on ("wqTxType"."typeId" = "wqWebItem"."type"%2$s)
-            order by "wqWebItem"."occurredAt" desc, "wqWebItem"."itemId" desc
+            join "wqPrjWebTransaction" on ("wqPrjWebTransaction"."userId" = :userId and "wqPrjWebTransaction"."batchId" = "wqPrjSession"."batchId"
+                   and "wqPrjWebTransaction"."occurredAt" >= "wqPrjSession"."startedAt"
+                   and ("wqPrjWebTransaction"."occurredAt" <= "wqPrjSession"."endedAt"
+                        or ("wqPrjWebTransaction"."cancels" is not null and "wqPrjWebTransaction"."occurredAt" < cast(:to as timestamptz)))%1$s%2$s)
+            order by "wqPrjWebTransaction"."occurredAt" desc, "wqPrjWebTransaction"."transactionId" desc
             """;
-    private static final String NOT_CANCELLED = " and not (\"wqWebItem\".\"cancelled\")";
-    private static final String TYPE_CODES = " and \"wqTxType\".\"code\" = any (cast(:typeCodes as text[]))";
+    private static final String NOT_CANCELLED = " and not (\"wqPrjWebTransaction\".\"cancelled\")";
+    private static final String TYPE_CODES = " and \"wqPrjWebTransaction\".\"type\" = any (cast(:typeCodes as text[]))";
 
     // Point lookups: the keys' exact "occurredAt" values probe the ("userId", "occurredAt")
     // indexes; sourceId and the full key in Java narrow to the page's rows (final review F1).
-    private static final String UNSESSIONED = "select " + ITEM_COLUMNS + """
-            from "wqWebItem"
-            join "wqTxType" on "wqTxType"."typeId" = "wqWebItem"."type"
-            where ("wqWebItem"."userId" = :userId
-                   and "wqWebItem"."occurredAt" = any (cast(:ats as timestamp with time zone[]))
-                   and "wqWebItem"."sourceId" = any (cast(:sourceIds as text[]))
-                   and "wqWebItem"."batchId" is null)
+    private static final String UNSESSIONED = "select " + TRANSACTION_COLUMNS + """
+            from "wqPrjWebTransaction"
+            where ("wqPrjWebTransaction"."userId" = :userId
+                   and "wqPrjWebTransaction"."occurredAt" = any (cast(:ats as timestamp with time zone[]))
+                   and "wqPrjWebTransaction"."sourceId" = any (cast(:sourceIds as text[]))
+                   and "wqPrjWebTransaction"."batchId" is null)
             """;
 
-    private final WebItemMapper mapper;
+    private final WebTransactionMapper mapper;
 
-    public WebHighLevelAssembly(WebItemMapper mapper) {
+    public WebHighLevelAssembly(WebTransactionMapper mapper) {
         this.mapper = mapper;
     }
 
@@ -69,13 +67,13 @@ public class WebHighLevelAssembly implements HighLevelItemQuery {
     }
 
     @Override
-    public List<ItemEntry> sessionItems(JdbcClient tx, long userId, Set<String> batchIds, Instant startedFrom,
+    public List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds, Instant startedFrom,
                                         Instant startedTo, Instant to, Set<String> typeCodes,
                                         boolean excludeCancelled) {
         if (batchIds.isEmpty()) {
             return List.of();
         }
-        JdbcClient.StatementSpec spec = tx.sql(SESSION_ITEMS.formatted(
+        JdbcClient.StatementSpec spec = tx.sql(SESSION_TRANSACTIONS.formatted(
                         excludeCancelled ? NOT_CANCELLED : "", typeCodes.isEmpty() ? "" : TYPE_CODES))
                 .param("ids", array(batchIds))
                 .param("userId", userId)
@@ -85,14 +83,11 @@ public class WebHighLevelAssembly implements HighLevelItemQuery {
         if (!typeCodes.isEmpty()) {
             spec = spec.param("typeCodes", array(typeCodes));
         }
-        return spec.query((rs, n) -> {
-            String code = rs.getString("code");
-            return mapper.toEntry(rs, id -> code);
-        }).list();
+        return spec.query((rs, n) -> mapper.toEntry(rs)).list();
     }
 
     @Override
-    public Map<HighLevelKey, ItemEntry> unsessioned(JdbcClient tx, long userId, List<HighLevelKey> keys) {
+    public Map<HighLevelKey, TransactionEntry> unsessioned(JdbcClient tx, long userId, List<HighLevelKey> keys) {
         if (keys.isEmpty()) {
             return Map.of();
         }
@@ -102,7 +97,7 @@ public class WebHighLevelAssembly implements HighLevelItemQuery {
                 .map(OffsetDateTime::toString).toArray(String[]::new);
         Set<String> sourceIds = new LinkedHashSet<>();
         keys.forEach(k -> sourceIds.add(k.refId()));
-        Map<HighLevelKey, ItemEntry> out = new HashMap<>();
+        Map<HighLevelKey, TransactionEntry> out = new HashMap<>();
         tx.sql(UNSESSIONED)
                 .param("userId", userId)
                 .param("ats", ats)
@@ -112,8 +107,7 @@ public class WebHighLevelAssembly implements HighLevelItemQuery {
                     HighLevelKey k = new HighLevelKey(rs.getObject("occurredAt", OffsetDateTime.class).toInstant(),
                             rs.getShort("source"), rs.getString("sourceId"));
                     if (want.contains(k)) {
-                        String code = rs.getString("code");
-                        out.put(k, mapper.toEntry(rs, id -> code));
+                        out.put(k, mapper.toEntry(rs));
                     }
                 });
         return out;

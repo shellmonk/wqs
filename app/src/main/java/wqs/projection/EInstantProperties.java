@@ -6,7 +6,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
  * Which product types are eInstant (spec 4.1, plan D3). The eInstant view is selected by product
- * type, and an eInstant item is always sessioned (spec 7.4, P-7): one without a batchId is
+ * type, and an eInstant transaction is always sessioned (spec 7.4, P-7): one without a batchId is
  * dead-lettered at ingest ({@code einstant-unsessioned}, plan D7).
  *
  * <p>Matched exactly, like the API's {@code productTypes}. A blank entry fails startup: it could

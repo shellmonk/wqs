@@ -8,14 +8,14 @@ import java.util.Set;
 import wqs.domain.ViewKind;
 
 /**
- * Which views one {@link HighLevelUpdater#applyItem} call changed, so per-view HIGH_LEVEL
+ * Which views one {@link HighLevelUpdater#applyTransaction} call changed, so per-view HIGH_LEVEL
  * counters can follow.
  *
  * @param inserted            views where a row was actually inserted this call: a new session, a
  *                            session row materialised in a view for the first time, or an
- *                            unsessioned item's own row. Counters increment by one in each view,
+ *                            unsessioned transaction's own row. Counters increment by one in each view,
  *                            at the CURRENT key (the session's start and productType, or the
- *                            item's occurredAt and productType).
+ *                            transaction's occurredAt and productType).
  * @param moved               views where an existing session row changed start and/or product
  *                            this call. Counters shift those views from the previous key to the
  *                            current one. A product-only change is included, because the counter
@@ -28,8 +28,8 @@ import wqs.domain.ViewKind;
  *                            "visibleExclCancelled" -- whether the row is in the excl-cancelled
  *                            tally, which decides whether the counter move also shifts
  *                            cntExclCancelled. Its key set equals {@code moved}.
- * @param revived             views where an existing session row was hidden (every item of the
- *                            session in that view cancelled) and this live item made it visible
+ * @param revived             views where an existing session row was hidden (every transaction of the
+ *                            session in that view cancelled) and this live transaction made it visible
  *                            again. Counters return one row to cntExclCancelled only (cntAll
  *                            already counts it), at the CURRENT key, after any move. Disjoint
  *                            from {@code inserted}.

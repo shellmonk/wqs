@@ -4,22 +4,20 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 import java.util.Set;
-import org.mapstruct.Context;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Named;
 import org.mapstruct.ReportingPolicy;
-import wqs.db.TxTypeRegistry;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.projection.source.StreamPayload;
 
 /**
  * Lives in the projection package, never api -- a mapper touches both wire and persistence
  * shapes by definition and belongs on the inside of the boundary (spec 2.3 rule 1).
  *
- * unmappedTargetPolicy = ERROR means adding a field to ProjectionItem without mapping it
- * fails the build. The registry is a {@code @Context}: it resolves the type code to its stored
- * id and is not a mapped source.
+ * unmappedTargetPolicy = ERROR means adding a field to ProjectionTransaction without mapping it
+ * fails the build. The type code is mapped as-is (plan D1): no lookup, so mapping never touches
+ * the database.
  */
 @Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.ERROR)
 public interface StreamPayloadMapper {
@@ -29,22 +27,16 @@ public interface StreamPayloadMapper {
 
     @Mapping(target = "sourceId", source = "id")
     @Mapping(target = "occurredAt", source = "created")
-    @Mapping(target = "type", source = "type", qualifiedByName = "typeId")
     @Mapping(target = "balanceAfter", source = "totalPostBalance")
     @Mapping(target = "cancels", expression = "java(cancelsOf(payload))")
     @Mapping(target = "source", expression = "java(wqs.domain.SourceKind.TRANSACTION)")
     @Mapping(target = "detailJson", source = "detail", qualifiedByName = "detailToJson")
-    ProjectionItem toItem(StreamPayload payload, @Context TxTypeRegistry registry);
-
-    @Named("typeId")
-    default short typeId(String code, @Context TxTypeRegistry registry) {
-        return registry.idOf(code);
-    }
+    ProjectionTransaction toTransaction(StreamPayload payload);
 
     /**
      * The cancelled transaction's id, only for a cancel type whose reference differs from the
-     * item's own id: the producer self-references when there is no link. {@code *_UNDO} and
-     * {@code *_ROLLBACK} are ordinary items.
+     * projected transaction's own id: the producer self-references when there is no link. {@code *_UNDO} and
+     * {@code *_ROLLBACK} are ordinary projected transactions.
      */
     default String cancelsOf(StreamPayload payload) {
         String reference = payload.transactionReference();

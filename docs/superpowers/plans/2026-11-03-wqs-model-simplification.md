@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
 
+**Naming (user, 2026-11-03):** "transaction" replaces "item" everywhere: tables `wqPrjTransaction` (views `wqPrjWebTransaction` / `wqPrjCcTransaction`), `wqPrjTransactionLocator`, column `"transactionId"`, Java `ProjectionTransaction`, `PageUnit.TRANSACTION`. Below, read every `wqPrjItem*` / `itemId` / item as the transaction name.
+
 **Goal:** Simplify the schema from 15 tables to 9 with no change to the API or to any response: one item table (views per endpoint), one timeline table, unpartitioned sessions/plays without a group locator, one per-day counter table, one ingest cursor, a Java enum instead of `wqTxType`, the `wqPrj` prefix on projection tables, and a key query bounded by the page's own day range.
 
 **Architecture:** WQS is not live, so `db/src/main/resources/db/migration/V1__baseline.sql` is edited in place (no new migration). Each task changes schema and code together and ends green. SQL is text, so a schema change breaks tests, not compilation — every task runs the full suite.

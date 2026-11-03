@@ -22,7 +22,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.ingest.stream.FakeStreamSource;
 import wqs.ingest.stream.StreamConsumer;
@@ -52,7 +52,6 @@ class DeadLetterTest extends PostgresTestBase {
     @Autowired private DeadLetterStore deadLetterStore;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private StreamPayloadMapper payloadMapper;
-    @Autowired private wqs.db.TxTypeRegistry txTypes;
     @Autowired private ProjectionWriter writer;
     @Autowired private PartitionManager partitionManager;
     @Autowired private PlatformTransactionManager transactionManager;
@@ -64,7 +63,7 @@ class DeadLetterTest extends PostgresTestBase {
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 9), 0);
         db().execute("delete from \"wqDeadLetter\"");
-        db().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqIngestCursor\"");
         clearProjection();
         source = new FakeStreamSource();
         registry = new SimpleMeterRegistry();
@@ -86,7 +85,7 @@ class DeadLetterTest extends PostgresTestBase {
     }
 
     @Test
-    void only_the_poison_item_in_a_batch_is_dead_lettered_and_its_neighbours_are_projected() {
+    void only_the_poison_transaction_in_a_batch_is_dead_lettered_and_its_neighbours_are_projected() {
         StreamConsumer consumer = consumer(3, writer, deadLetterStore, fixedClock());
         consumer.start();
 
@@ -95,14 +94,14 @@ class DeadLetterTest extends PostgresTestBase {
         source.queue(payload("tx-3", WHEN), 3);
         source.deliverAll();
 
-        assertThat(count("wqWebItem")).isEqualTo(2);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
         assertThat(count()).isEqualTo(1);
         var row = db().row(
                 "select \"sourceId\", \"streamOffset\", \"stream\", \"source\", \"attempts\", "
                         + "\"payload\"->>'occurredAt' as at, \"payload\"->>'amount' as amount "
                         + "from \"wqDeadLetter\"");
         assertThat(row.get("sourceId", String.class)).isEqualTo("tx-poison");
-        // The item's OWN offset, not the batch's highest.
+        // The transaction's OWN offset, not the batch's highest.
         assertThat(row.get("streamOffset", Long.class)).isEqualTo(2L);
         assertThat(row.get("stream", String.class)).isEqualTo(STREAM);
         assertThat(row.get("source", Integer.class)).isEqualTo(SourceKind.TRANSACTION.code());
@@ -120,10 +119,10 @@ class DeadLetterTest extends PostgresTestBase {
 
     @Test
     void the_dead_letter_row_survives_the_rolled_back_projection_transaction() {
-        ProjectionItem item = payloadMapper.toItem(payload("tx-x", WHEN), txTypes);
+        ProjectionTransaction transaction = payloadMapper.toTransaction(payload("tx-x", WHEN));
 
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
-            deadLetterStore.record(STREAM, 9L, item, new IllegalStateException("boom"), 3);
+            deadLetterStore.record(STREAM, 9L, transaction, new IllegalStateException("boom"), 3);
             // The enclosing (projection) transaction fails after the dead letter was written.
             status.setRollbackOnly();
         });
@@ -138,7 +137,7 @@ class DeadLetterTest extends PostgresTestBase {
         StreamConsumer consumer = consumer(1, writer, deadLetterStore, fixedClock());
         consumer.start();
 
-        // A null amount cannot be mapped to a ProjectionItem.
+        // A null amount cannot be mapped to a ProjectionTransaction.
         StreamPayload unmappable = new StreamPayload("tx-unmappable", 1, 7L, WHEN, "TT_BUY", "11", null, "b", "p", null, "EUR", null, null, java.util.Map.of());
         source.queue(unmappable, 1);
         source.queue(payload("tx-2", WHEN), 2);
@@ -148,7 +147,7 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(count()).isEqualTo(1);
         assertThat(db().value("select \"sourceId\" from \"wqDeadLetter\"", String.class))
                 .isEqualTo("tx-unmappable");
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(2L);
     }
 
@@ -157,7 +156,7 @@ class DeadLetterTest extends PostgresTestBase {
         FlakyWriter flaky = new FlakyWriter(writer, 2, 5); // calls 2..5 fail: event 11, all attempts
         DeadLetterStore dbDown = new DeadLetterStore(null, null, null) {
             @Override
-            public void record(String s, Long o, ProjectionItem i, Exception e, int a) {
+            public void record(String s, Long o, ProjectionTransaction i, Exception e, int a) {
                 throw new IllegalStateException("database down");
             }
         };
@@ -171,7 +170,7 @@ class DeadLetterTest extends PostgresTestBase {
         source.deliverAll(); // 10 projects; 11 fails everywhere; 12 arrives while recovering
 
         assertThat(offsetStore.read(STREAM)).contains(10L);
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(source.closeCount()).isEqualTo(1);
 
         // Backoff has not elapsed: nothing happens.
@@ -187,7 +186,7 @@ class DeadLetterTest extends PostgresTestBase {
         source.redeliverFromSubscription();
         consumer.poll();
 
-        assertThat(count("wqWebItem")).isEqualTo(3);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(3);
         assertThat(offsetStore.read(STREAM)).contains(12L);
         assertThat(count()).isZero();
     }
@@ -213,12 +212,12 @@ class DeadLetterTest extends PostgresTestBase {
         // Stale handler 0 delivers far ahead; it must be ignored.
         source.deliverVia(0, payload("tx-1000", WHEN), 1000);
         consumer.poll();
-        assertThat(count("wqWebItem")).isZero();
+        assertThat(count("wqPrjWebTransaction")).isZero();
         assertThat(offsetStore.read(STREAM)).isEmpty();
 
         // The live handler (1) feeds normally.
         source.deliverVia(1, payload("tx-1", WHEN), 1);
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(1L);
     }
 
@@ -237,7 +236,7 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(source.subscribeCount()).isEqualTo(2);
 
         source.deliverVia(0, payload("tx-999", WHEN), 999);
-        assertThat(count("wqWebItem")).isZero();
+        assertThat(count("wqPrjWebTransaction")).isZero();
         assertThat(offsetStore.read(STREAM)).isEmpty();
     }
 
@@ -271,23 +270,23 @@ class DeadLetterTest extends PostgresTestBase {
         consumer.poll();
         assertThat(source.subscribedFrom()).isZero();
         source.redeliverFromSubscription();
-        assertThat(count("wqWebItem")).isEqualTo(2);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
         assertThat(offsetStore.read(STREAM)).contains(2L);
     }
 
     @Test
-    void a_failed_dead_letter_write_for_a_later_item_does_not_move_the_offset() {
+    void a_failed_dead_letter_write_for_a_later_transaction_does_not_move_the_offset() {
         DeadLetterStore dbDown = alwaysFailingStore();
         StreamConsumer consumer = consumer(3, writer, dbDown, fixedClock());
         consumer.start();
 
-        // Whole batch fails (poison), item 1 projects alone, poison item 2 cannot be dead-lettered.
+        // Whole batch fails (poison), transaction 1 projects alone, poison transaction 2 cannot be dead-lettered.
         source.queue(payload("tx-1", WHEN), 1);
         source.queue(payload("tx-poison", POISON_WHEN), 2);
         source.queue(payload("tx-3", WHEN), 3);
         source.deliverAll();
 
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(count()).isZero();
         assertThat(offsetStore.read(STREAM)).isEmpty();
     }
@@ -333,7 +332,7 @@ class DeadLetterTest extends PostgresTestBase {
         clock.advance(Duration.ofSeconds(1));
         consumer.poll();                                  // window elapsed: batch covers 1..3
 
-        assertThat(count("wqWebItem")).isEqualTo(2);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
         assertThat(offsetStore.read(STREAM)).contains(3L);
     }
 
@@ -404,16 +403,16 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(source.subscribeCount()).isEqualTo(1);
         // A late delivery through the pre-stop handler is inert as well.
         source.deliverVia(0, payload("tx-2", WHEN), 2);
-        assertThat(count("wqWebItem")).isZero();
+        assertThat(count("wqPrjWebTransaction")).isZero();
     }
 
     /**
-     * C1: a U+0000 in the sourceId makes the item insert fail AND the normal dead-letter row fail
+     * C1: a U+0000 in the sourceId makes the projected transaction insert fail AND the normal dead-letter row fail
      * (Postgres text cannot hold NUL). The store must fall back to a raw row in its own
      * transaction, so the offset advances and ingestion continues -- no recovery loop.
      */
     @Test
-    void an_item_whose_source_id_contains_nul_is_dead_lettered_raw_and_ingestion_continues() {
+    void an_transaction_whose_source_id_contains_nul_is_dead_lettered_raw_and_ingestion_continues() {
         StreamConsumer consumer = consumer(1, writer, deadLetterStore, fixedClock());
         consumer.start();
 
@@ -433,7 +432,7 @@ class DeadLetterTest extends PostgresTestBase {
                 java.nio.charset.StandardCharsets.UTF_8);
         assertThat(raw).contains("\"sourceId\":\"tx\\u0000bad\"");
         // Not stuck: the next event projected and the offset passed the poison.
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(6L);
         assertThat(source.subscribeCount()).isEqualTo(1);
     }
@@ -452,7 +451,7 @@ class DeadLetterTest extends PostgresTestBase {
     private static DeadLetterStore alwaysFailingStore() {
         return new DeadLetterStore(null, null, null) {
             @Override
-            public void record(String s, Long o, ProjectionItem i, Exception e, int a) {
+            public void record(String s, Long o, ProjectionTransaction i, Exception e, int a) {
                 throw new IllegalStateException("database down");
             }
         };
@@ -462,7 +461,7 @@ class DeadLetterTest extends PostgresTestBase {
         return new StreamConsumer(
                 source,
                 new StreamProperties(true, STREAM, batchSize, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
-                payloadMapper, txTypes, w, offsetStore, registry, clock, store);
+                payloadMapper, w, offsetStore, registry, clock, store);
     }
 
     private static Clock fixedClock() {

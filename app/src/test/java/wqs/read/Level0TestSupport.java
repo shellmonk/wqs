@@ -9,7 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.config.ReaderJdbc;
 import wqs.config.ReaderTx;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 import wqs.projection.ProjectionBatch;
@@ -23,14 +23,14 @@ abstract class Level0TestSupport extends ProjectionPropertyBase {
     @Autowired @ReaderJdbc protected JdbcClient readerJdbc;
     @Autowired @ReaderTx protected TransactionTemplate readerTx;
 
-    protected static ProjectionItem item(
+    protected static ProjectionTransaction transaction(
             SourceKind source, String id, String at, String product, String cancels, String detail) {
-        return new ProjectionItem(USER, source, id, Instant.parse(at), product,
+        return new ProjectionTransaction(USER, source, id, Instant.parse(at), product,
                 product == null ? null : "keno", null, null, TxTypes.PLAY,
                 new BigDecimal("1.0000"), "EUR", null, cancels, detail);
     }
 
-    protected void project(ProjectionItem... items) {
-        writer.apply(new ProjectionBatch("wallet-transactions", List.of(items), 1L));
+    protected void project(ProjectionTransaction... transactions) {
+        writer.apply(new ProjectionBatch("wallet-transactions", List.of(transactions), 1L));
     }
 }

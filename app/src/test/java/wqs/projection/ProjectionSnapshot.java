@@ -5,19 +5,19 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.db.TestSql;
 
 /**
- * An order-independent, comparable view of the whole projection: items, the item locator, the
+ * An order-independent, comparable view of the whole projection: transactions, the transaction locator, the
  * group locator, rollups, the page index, both counter tiers and parked cancels. Every table is
  * ordered by its full primary key, so two snapshots are equal exactly when the stored state is.
  *
- * CRITICAL: "itemId" and "ingestedAt" (item tables only) and "parkedAt" (parked cancels) are
- * excluded. itemId comes from a sequence and ingestedAt / parkedAt from now(), so they differ
+ * CRITICAL: "transactionId" and "ingestedAt" (transaction tables only) and "parkedAt" (parked cancels) are
+ * excluded. transactionId comes from a sequence and ingestedAt / parkedAt from now(), so they differ
  * between runs; including any would make every convergence comparison fail for reasons that have
  * nothing to do with correctness. No other projection table has a sequence- or clock-derived
  * column, so every other column is compared.
  */
 public record ProjectionSnapshot(
-        List<String> webItems,
-        List<String> ccItems,
+        List<String> webTransactions,
+        List<String> ccTransactions,
         List<String> locator,
         List<String> groupLocator,
         List<String> sessions,
@@ -31,19 +31,19 @@ public record ProjectionSnapshot(
     public static ProjectionSnapshot of(JdbcClient jdbc) {
         TestSql sql = new TestSql(jdbc);
         return new ProjectionSnapshot(
-                rows(sql, "wqWebItem"), rows(sql, "wqCcItem"), locatorRows(sql),
-                all(sql, "wqGroupLocator", "\"userId\", \"batchId\", \"subBatchId\""),
-                all(sql, "wqSession", "\"userId\", \"startedAt\", \"batchId\""),
-                all(sql, "wqPlay", "\"userId\", \"startedAt\", \"batchId\", \"subBatchId\""),
-                all(sql, "wqWebHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
-                all(sql, "wqCcHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
-                all(sql, "wqCountDay", COUNTER_KEY),
-                all(sql, "wqCountMonth", COUNTER_KEY),
+                rows(sql, "wqPrjWebTransaction"), rows(sql, "wqPrjCcTransaction"), locatorRows(sql),
+                all(sql, "wqPrjGroupLocator", "\"userId\", \"batchId\", \"subBatchId\""),
+                all(sql, "wqPrjSession", "\"userId\", \"startedAt\", \"batchId\""),
+                all(sql, "wqPrjPlay", "\"userId\", \"startedAt\", \"batchId\", \"subBatchId\""),
+                all(sql, "wqPrjWebHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
+                all(sql, "wqPrjCcHighLevel", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
+                all(sql, "wqPrjCountDay", COUNTER_KEY),
+                all(sql, "wqPrjCountMonth", COUNTER_KEY),
                 pendingCancelRows(sql));
     }
 
     private static final String COUNTER_KEY =
-            "\"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"typeId\", \"period\"";
+            "\"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"type\", \"period\"";
 
     private static List<String> rows(TestSql sql, String table) {
         return sql.lines("""
@@ -58,7 +58,7 @@ public record ProjectionSnapshot(
     private static List<String> locatorRows(TestSql sql) {
         return sql.lines("""
                          select "source", "sourceId", "userId", "occurredAt", "zeroAmount", "cancels"
-                         from "wqItemLocator"
+                         from "wqPrjTransactionLocator"
                          order by "source", "sourceId"
                          """);
     }
@@ -69,7 +69,7 @@ public record ProjectionSnapshot(
                          select "source", "cancelSourceId", "cancelsSourceId", "userId",
                                 "occurredAt", "productId", "productType", "batchId", "subBatchId", "type",
                                 "amount", "currency", "balanceAfter", "detail"
-                         from "wqPendingCancel"
+                         from "wqPrjPendingCancel"
                          order by "source", "cancelSourceId"
                          """);
     }

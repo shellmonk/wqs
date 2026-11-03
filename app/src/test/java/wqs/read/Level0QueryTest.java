@@ -10,7 +10,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.gen.TxTypes;
 import wqs.read.cc.CcLevel0Query;
 import wqs.read.web.WebLevel0Query;
@@ -34,34 +34,34 @@ class Level0QueryTest extends Level0TestSupport {
     @Test
     void count_respects_half_open_bounds_and_excl() {
         project(
-                item(TRANSACTION, "a", "2034-02-01T00:00:00Z", "P11", null, null),
-                item(TRANSACTION, "b", "2034-01-31T23:59:59Z", "P13", null, null),
-                item(TRANSACTION, "c", "2034-01-31T12:00:00Z", "P11", null, null),
-                item(TRANSACTION, "x", "2034-01-31T13:00:00Z", "P11", "c", null));
+                transaction(TRANSACTION, "a", "2034-02-01T00:00:00Z", "P11", null, null),
+                transaction(TRANSACTION, "b", "2034-01-31T23:59:59Z", "P13", null, null),
+                transaction(TRANSACTION, "c", "2034-01-31T12:00:00Z", "P11", null, null),
+                transaction(TRANSACTION, "x", "2034-01-31T13:00:00Z", "P11", "c", null));
         Level0Filter all = new Level0Filter(USER, false);
         Level0Filter excl = new Level0Filter(USER, true);
 
         assertThat(web.count(readerJdbc, all, t("2034-02-01T00:00:00Z"), t("2034-02-02T00:00:00Z"))).isEqualTo(1);
-        // the boundary item at 02-01T00:00 is excluded by the exclusive upper bound
+        // the boundary transaction at 02-01T00:00 is excluded by the exclusive upper bound
         assertThat(web.count(readerJdbc, all, t("2034-01-31T00:00:00Z"), t("2034-02-01T00:00:00Z"))).isEqualTo(3);
         assertThat(web.count(readerJdbc, all, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(4);
-        // c is cancelled; the cancellation row x is itself an ITEM row and counts
+        // c is cancelled; the cancellation row x is itself a TRANSACTION row and counts
         assertThat(web.count(readerJdbc, excl, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(3);
         assertThat(web.count(readerJdbc, new Level0Filter(USER + 1, false),
                 t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isZero();
     }
 
     @Test
-    void slice_orders_ties_by_itemId_desc() {
-        // Ascending itemIds, and the plan is forced to seq-scan + sort so index order cannot
+    void slice_orders_ties_by_transactionId_desc() {
+        // Ascending transactionIds, and the plan is forced to seq-scan + sort so index order cannot
         // mask a missing tie-break.
         for (int i = 0; i < 12; i++) {
-            project(item(TRANSACTION, "t" + i, "2034-02-10T10:00:00Z", "P11", null, null));
+            project(transaction(TRANSACTION, "t" + i, "2034-02-10T10:00:00Z", "P11", null, null));
         }
         Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
-        List<ItemKey> all = readerTx.execute(status -> {
+        List<TransactionKey> all = readerTx.execute(status -> {
             var tx = readerJdbc;
             tx.sql("set local enable_indexscan = off").update();
             tx.sql("set local enable_indexonlyscan = off").update();
@@ -69,8 +69,8 @@ class Level0QueryTest extends Level0TestSupport {
             return web.keys(tx, f, lo, hi, 0, 20);
         });
         assertThat(all).hasSize(12);
-        assertThat(all).extracting(ItemKey::itemId).isSortedAccordingTo(java.util.Comparator.reverseOrder());
-        List<ItemKey> page = readerTx.execute(status -> {
+        assertThat(all).extracting(TransactionKey::transactionId).isSortedAccordingTo(java.util.Comparator.reverseOrder());
+        List<TransactionKey> page = readerTx.execute(status -> {
             var tx = readerJdbc;
             tx.sql("set local enable_indexscan = off").update();
             tx.sql("set local enable_indexonlyscan = off").update();
@@ -87,18 +87,18 @@ class Level0QueryTest extends Level0TestSupport {
         try {
             // One set-based statement instead of a 40k-row batchInsert.
             db().execute("""
-                    insert into "wqWebItem" ("userId", "itemId", "source", "sourceId", "occurredAt",
+                    insert into "wqPrjWebTransaction" ("userId", "transactionId", "source", "sourceId", "occurredAt",
                                              "type", "amount", "currency")
                     select ?, 9000000000 + i, 1, 'bulk' || i,
-                           timestamptz '2034-05-01T00:00:00Z' + i * interval '1 second', 1, 1, 'EUR'
+                           timestamptz '2034-05-01T00:00:00Z' + i * interval '1 second', 'TT_BUY', 1, 'EUR'
                     from generate_series(0, 39999) as i
                     """, USER);
             Level0Filter f = new Level0Filter(USER, false);
-            List<ItemKey> keys = web.keys(readerJdbc, f, base, base.plusSeconds(50_000), 0, 50_000);
+            List<TransactionKey> keys = web.keys(readerJdbc, f, base, base.plusSeconds(50_000), 0, 50_000);
             assertThat(keys).hasSize(40_000);
-            List<ItemEntry> entries = web.fetch(readerJdbc, USER, keys);
+            List<TransactionEntry> entries = web.fetch(readerJdbc, USER, keys);
             assertThat(entries).hasSize(40_000);
-            assertThat(entries).extracting(ItemEntry::occurredAt)
+            assertThat(entries).extracting(TransactionEntry::occurredAt)
                     .isSortedAccordingTo(java.util.Comparator.reverseOrder());
             assertThat(entries.get(0).sourceId()).isEqualTo("bulk39999");
         } finally {
@@ -108,21 +108,21 @@ class Level0QueryTest extends Level0TestSupport {
 
     /**
      * F1 (final review): the key array is one bind joined through unnest, which Postgres
-     * evaluates once. "itemId" = any(?) re-evaluated the text-bound array per row (40k keys:
+     * evaluates once. "transactionId" = any(?) re-evaluated the text-bound array per row (40k keys:
      * 44 s). Timing-free: asserts the executed statement's text and its plan.
      */
     @Test
     void fetch_joins_the_key_array_through_unnest_not_a_per_row_any() throws Exception {
         project(
-                item(TRANSACTION, "a", "2034-02-01T01:00:00Z", "P11", null, null),
-                item(PAYMENT, "b", "2034-02-02T01:00:00Z", "P11", null, null));
+                transaction(TRANSACTION, "a", "2034-02-01T01:00:00Z", "P11", null, null),
+                transaction(PAYMENT, "b", "2034-02-02T01:00:00Z", "P11", null, null));
         Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
         for (Level0Query q : List.of(web, cc)) {
             StatementRecorder recording = new StatementRecorder(readerDataSource);
             List<StatementRecorder.Executed> executed = recording.executed();
-            List<ItemKey> keys = q.keys(readerJdbc, f, lo, hi, 0, 10);
+            List<TransactionKey> keys = q.keys(readerJdbc, f, lo, hi, 0, 10);
             assertThat(q.fetch(recording.client(), USER, keys)).hasSameSizeAs(keys).isNotEmpty();
 
             assertThat(executed).as(q.view() + " fetch statements").hasSize(1);
@@ -137,42 +137,42 @@ class Level0QueryTest extends Level0TestSupport {
     @Test
     void fetch_returns_payload_in_key_order_with_raw_detail() throws Exception {
         project(
-                item(TRANSACTION, "jan", "2034-01-31T23:00:00Z", "P11", null, "{\"gameCode\": \"x\"}"),
-                item(TRANSACTION, "feb1", "2034-02-01T01:00:00Z", "P11", null, null),
-                item(TRANSACTION, "feb2", "2034-02-02T01:00:00Z", "P11", null, null));
+                transaction(TRANSACTION, "jan", "2034-01-31T23:00:00Z", "P11", null, "{\"gameCode\": \"x\"}"),
+                transaction(TRANSACTION, "feb1", "2034-02-01T01:00:00Z", "P11", null, null),
+                transaction(TRANSACTION, "feb2", "2034-02-02T01:00:00Z", "P11", null, null));
         Level0Filter f = new Level0Filter(USER, false);
-        List<ItemKey> keys = web.keys(readerJdbc, f, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"), 0, 10);
+        List<TransactionKey> keys = web.keys(readerJdbc, f, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"), 0, 10);
         assertThat(keys).hasSize(3);
 
-        List<ItemEntry> entries = web.fetch(readerJdbc, USER, keys);
-        assertThat(entries).extracting(ItemEntry::sourceId).containsExactly("feb2", "feb1", "jan");
-        ItemEntry jan = entries.get(2);
+        List<TransactionEntry> entries = web.fetch(readerJdbc, USER, keys);
+        assertThat(entries).extracting(TransactionEntry::sourceId).containsExactly("feb2", "feb1", "jan");
+        TransactionEntry jan = entries.get(2);
         assertThat(jan.kind()).isEqualTo("TRANSACTION");
         assertThat(jan.occurredAt()).isEqualTo(t("2034-01-31T23:00:00Z"));
         ObjectMapper om = new ObjectMapper();
         assertThat(om.readTree(jan.detail())).isEqualTo(om.readTree("{\"gameCode\": \"x\"}"));
         assertThat(entries.get(0).detail()).isNull();
 
-        List<ItemKey> reversed = List.of(keys.get(2), keys.get(0));
-        assertThat(web.fetch(readerJdbc, USER, reversed)).extracting(ItemEntry::sourceId)
+        List<TransactionKey> reversed = List.of(keys.get(2), keys.get(0));
+        assertThat(web.fetch(readerJdbc, USER, reversed)).extracting(TransactionEntry::sourceId)
                 .containsExactly("jan", "feb2");
         assertThat(web.fetch(readerJdbc, USER, List.of())).isEmpty();
     }
 
     @Test
     void web_query_never_sees_cc_only_sources() {
-        project(item(PAYMENT, "pay", "2034-02-10T10:00:00Z", "P11", null, null));
+        project(transaction(PAYMENT, "pay", "2034-02-10T10:00:00Z", "P11", null, null));
         Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
         assertThat(web.count(readerJdbc, f, lo, hi)).isZero();
         assertThat(cc.count(readerJdbc, f, lo, hi)).isEqualTo(1);
         assertThat(cc.fetch(readerJdbc, USER, cc.keys(readerJdbc, f, lo, hi, 0, 10)))
-                .extracting(ItemEntry::kind).containsExactly("PAYMENT");
+                .extracting(TransactionEntry::kind).containsExactly("PAYMENT");
     }
 
-    private static ProjectionItem typed(String id, String at, String productType, short type) {
-        return new ProjectionItem(USER, TRANSACTION, id, Instant.parse(at), productType == null ? null : "id-" + id,
+    private static ProjectionTransaction typed(String id, String at, String productType, String type) {
+        return new ProjectionTransaction(USER, TRANSACTION, id, Instant.parse(at), productType == null ? null : "id-" + id,
                 productType, null, null, type, new java.math.BigDecimal("1.0000"), "EUR", null, null, null);
     }
 
@@ -189,14 +189,14 @@ class Level0QueryTest extends Level0TestSupport {
             assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of("keno"), java.util.Set.of(), false), lo, hi))
                     .as(q.view() + " productTypes").isEqualTo(2);
             assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of(), java.util.Set.of(TxTypes.PLAY), false), lo, hi))
-                    .as(q.view() + " typeIds").isEqualTo(3);
+                    .as(q.view() + " typeCodes").isEqualTo(3);
             assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of("keno", "lottery"),
                     java.util.Set.of(TxTypes.PLAY), false), lo, hi)).as(q.view() + " both").isEqualTo(2);
             assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of("nope"), java.util.Set.of(), false), lo, hi))
                     .as(q.view() + " unknown product type matches nothing").isZero();
             Level0Filter f = new Level0Filter(USER, java.util.Set.of("keno"), java.util.Set.of(TxTypes.WIN), false);
-            List<ItemEntry> got = q.fetch(readerJdbc, USER, q.keys(readerJdbc, f, lo, hi, 0, 10));
-            assertThat(got).extracting(ItemEntry::sourceId).containsExactly("b");
+            List<TransactionEntry> got = q.fetch(readerJdbc, USER, q.keys(readerJdbc, f, lo, hi, 0, 10));
+            assertThat(got).extracting(TransactionEntry::sourceId).containsExactly("b");
             assertThat(got.get(0).productType()).isEqualTo("keno");
             assertThat(got.get(0).productId()).isEqualTo("id-b");
             assertThat(got.get(0).transactionType()).isEqualTo("PRIZE");
@@ -214,15 +214,15 @@ class Level0QueryTest extends Level0TestSupport {
         try {
             // 60 users x 2000 rows over May 2034; USER is one of them. Set-based, like the bulk test.
             db().execute("""
-                    insert into "wqWebItem" ("userId", "itemId", "source", "sourceId", "occurredAt",
+                    insert into "wqPrjWebTransaction" ("userId", "transactionId", "source", "sourceId", "occurredAt",
                                              "type", "amount", "currency", "productType")
                     select ?::bigint + (i % 60), 9100000000 + i, 1, 'cov' || i,
                            timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '20 minutes' + (i % 60) * interval '1 second',
-                           1 + (i % 3), 1, 'EUR', (array['keno','lottery','bingo'])[1 + (i % 3)]
+                           (array['TT_BUY','PRIZE','TT_TRANSFER_OUT'])[1 + (i % 3)], 1, 'EUR', (array['keno','lottery','bingo'])[1 + (i % 3)]
                     from generate_series(0, 119999) as i
                     """, USER);
             // vacuum sets the visibility map, which an index-only scan needs; no planner setting is touched.
-            db().execute("vacuum (analyze) \"wqWebItem\"");
+            db().execute("vacuum (analyze) \"wqPrjWebTransaction\"");
             Level0Filter f = new Level0Filter(USER, java.util.Set.of("keno", "bingo"),
                     java.util.Set.of(TxTypes.PLAY), false);
             StatementRecorder recording = new StatementRecorder(readerDataSource);
@@ -230,7 +230,7 @@ class Level0QueryTest extends Level0TestSupport {
             web.keys(recording.client(), f, t("2034-05-10T00:00:00Z"), t("2034-05-17T00:00:00Z"), 0, 50);
             assertThat(executed).hasSize(1);
             String plan = String.join("\n", recording.rerun("explain", executed.get(0)));
-            assertThat(plan).containsPattern("Index Only Scan using \"wqWebItem_\\d+_\\d+_userId_occurredAt_itemId_cancelled_produc").doesNotContain("Seq Scan");
+            assertThat(plan).containsPattern("Index Only Scan using \"wqPrjWebTransaction_\\d+_\\d+_userId_occurredAt_transactionId(_idx|_cancelled)").doesNotContain("Seq Scan");
         } finally {
             clearProjection();
         }

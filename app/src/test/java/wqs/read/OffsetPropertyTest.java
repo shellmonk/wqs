@@ -15,7 +15,7 @@ import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.gen.ReadGenerators;
 import wqs.gen.ReadGenerators.ReadQuery;
 
@@ -33,10 +33,10 @@ class OffsetPropertyTest extends ReadPropertyBase {
 
     @Property(tries = 30)
     void fast_page_equals_naive_offset(
-            @ForAll("history") List<ProjectionItem> items,
+            @ForAll("history") List<ProjectionTransaction> transactions,
             @ForAll("pagedQueries") List<PagedQuery> queries) {
         reset();
-        applyBatches(items);
+        applyBatches(transactions);
         for (PagedQuery pq : queries) {
             ReadQuery q = pq.query();
             long count = oracle.count(q.view(), q.filter(), q.transactionTypes(), q.from(), q.to());
@@ -47,9 +47,9 @@ class OffsetPropertyTest extends ReadPropertyBase {
                     q.request(page, pq.pageSize()));
             String as = pq + " page=" + page;
             assertThat(got.totalItems()).as(as).isEqualTo(count);
-            assertThat(got.items()).as(as).isEqualTo(oracle.page(
+            assertThat(got.transactions()).as(as).isEqualTo(oracle.page(
                     q.view(), q.filter(), q.transactionTypes(), q.from(), q.to(), (page - 1) * pq.pageSize(), pq.pageSize()));
-            assertWalkLandsInsideOneSegment(q, got.items().isEmpty(), recording.keysCalls,
+            assertWalkLandsInsideOneSegment(q, got.transactions().isEmpty(), recording.keysCalls,
                     (lo, hi) -> oracle.count(q.view(), q.filter(), q.transactionTypes(), lo, hi), as);
         }
     }
@@ -62,10 +62,10 @@ class OffsetPropertyTest extends ReadPropertyBase {
      */
     @Property(tries = 30)
     void fast_high_level_page_equals_naive_offset(
-            @ForAll("highLevelHistory") List<ProjectionItem> items,
+            @ForAll("highLevelHistory") List<ProjectionTransaction> transactions,
             @ForAll("pagedQueries") List<PagedQuery> queries) {
         reset();
-        applyBatches(items);
+        applyBatches(transactions);
         for (PagedQuery pq : queries) {
             ReadQuery q = pq.query();
             HighLevelFilter f = q.highLevelFilter();
@@ -109,12 +109,12 @@ class OffsetPropertyTest extends ReadPropertyBase {
     }
 
     @Provide
-    Arbitrary<List<ProjectionItem>> history() {
+    Arbitrary<List<ProjectionTransaction>> history() {
         return ReadGenerators.history();
     }
 
     @Provide
-    Arbitrary<List<ProjectionItem>> highLevelHistory() {
+    Arbitrary<List<ProjectionTransaction>> highLevelHistory() {
         return ReadGenerators.highLevelHistory();
     }
 

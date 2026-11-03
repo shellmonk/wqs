@@ -9,7 +9,7 @@ import java.util.List;
  * A session as levels 1 and 2 return it (spec 4.1, api-contract). Every figure is the stored
  * rollup (spec 5.5), the all or the excl-cancelled variant per {@code excludeCancelledTransactions}
  * (plan D11), never recomputed on read: {@code amount} is the stored "net" ({@code totalWin -
- * totalPlay}). {@code productId}/{@code productType} are the first item's (plan D6); {@code
+ * totalPlay}). {@code productId}/{@code productType} are the first transaction's (plan D6); {@code
  * created} is "startedAt". {@code status} is deliberately absent (D12).
  *
  * <p>Level 1 nests the session's transactions under {@code txs} and has no {@code subitems}; level

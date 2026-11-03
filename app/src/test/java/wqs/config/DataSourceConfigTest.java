@@ -63,9 +63,9 @@ class DataSourceConfigTest extends PostgresTestBase {
         /** Writes two offset rows, checks both are visible on the transaction's connection, then fails. */
         @Transactional
         public void writeBothThenFail(String first, String second) {
-            jdbc.sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 1)")
+            jdbc.sql("insert into \"wqIngestCursor\" (\"feed\", \"streamOffset\") values (?, 1)")
                     .param(first).update();
-            jdbc.sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 2)")
+            jdbc.sql("insert into \"wqIngestCursor\" (\"feed\", \"streamOffset\") values (?, 2)")
                     .param(second).update();
             // Uncommitted rows are visible only on the connection that wrote them.
             assertThat(countOffsets(jdbc, first, second)).as("one connection sees both").isEqualTo(2);
@@ -81,7 +81,7 @@ class DataSourceConfigTest extends PostgresTestBase {
     private MixedWriter mixedWriter;
 
     private static long countOffsets(JdbcClient jdbc, String a, String b) {
-        return jdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" in (?, ?)")
+        return jdbc.sql("select count(*) from \"wqIngestCursor\" where \"feed\" in (?, ?)")
                 .params(a, b).query(Long.class).single();
     }
 
@@ -130,29 +130,29 @@ class DataSourceConfigTest extends PostgresTestBase {
         String stream = "r1-snapshot-" + UUID.randomUUID();
         try {
             long[] seen = readerTx.execute(status -> {
-                long before = readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
+                long before = readerJdbc.sql("select count(*) from \"wqIngestCursor\" where \"feed\" = ?")
                         .param(stream).query(Long.class).single();
                 // Committed by the writer pool, outside the reader transaction.
-                writerJdbc.sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 1)")
+                writerJdbc.sql("insert into \"wqIngestCursor\" (\"feed\", \"streamOffset\") values (?, 1)")
                         .param(stream).update();
-                long viaJdbc = readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
+                long viaJdbc = readerJdbc.sql("select count(*) from \"wqIngestCursor\" where \"feed\" = ?")
                         .param(stream).query(Long.class).single();
-                long again = readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
+                long again = readerJdbc.sql("select count(*) from \"wqIngestCursor\" where \"feed\" = ?")
                         .param(stream).query(Long.class).single();
                 return new long[] {before, viaJdbc, again};
             });
             assertThat(seen).as("before, after the commit, once more").containsExactly(0, 0, 0);
-            assertThat(readerJdbc.sql("select count(*) from \"wqStreamOffset\" where \"stream\" = ?")
+            assertThat(readerJdbc.sql("select count(*) from \"wqIngestCursor\" where \"feed\" = ?")
                     .param(stream).query(Long.class).single()).as("a new transaction sees the row").isEqualTo(1);
         } finally {
-            writerJdbc.sql("delete from \"wqStreamOffset\" where \"stream\" = ?").param(stream).update();
+            writerJdbc.sql("delete from \"wqIngestCursor\" where \"feed\" = ?").param(stream).update();
         }
     }
 
     @Test
     void reader_jdbc_rejects_writes_inside_the_reader_transaction() {
         assertThatThrownBy(() -> readerTx.executeWithoutResult(status -> readerJdbc
-                        .sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values ('s', 1)")
+                        .sql("insert into \"wqIngestCursor\" (\"feed\", \"streamOffset\") values ('s', 1)")
                         .update()))
                 .rootCause()
                 .hasMessageContaining("read-only transaction");
@@ -164,12 +164,12 @@ class DataSourceConfigTest extends PostgresTestBase {
         String stream = "reader-autocommit-" + UUID.randomUUID();
         try {
             assertThatThrownBy(() -> readerJdbc
-                            .sql("insert into \"wqStreamOffset\" (\"stream\", \"offsetVal\") values (?, 1)")
+                            .sql("insert into \"wqIngestCursor\" (\"feed\", \"streamOffset\") values (?, 1)")
                             .param(stream).update())
                     .rootCause()
                     .hasMessageContaining("read-only transaction");
         } finally {
-            writerJdbc.sql("delete from \"wqStreamOffset\" where \"stream\" = ?").param(stream).update();
+            writerJdbc.sql("delete from \"wqIngestCursor\" where \"feed\" = ?").param(stream).update();
         }
     }
 

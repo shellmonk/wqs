@@ -254,8 +254,8 @@ class StreamPayloadJsonTest {
     }
 
     /**
-     * F2a: the wire type code is checked at parse time. A code the type registry would insert --
-     * and Postgres could reject -- must be poison (dead-lettered), never a retry-forever failure.
+     * F2a: the wire type code is checked at parse time. A code that would be stored as-is --
+     * and could be rejected downstream -- must be poison (dead-lettered), never a retry-forever failure.
      * Every real code is upper-case letters, digits and underscores (source-schema.sql).
      */
     @Test

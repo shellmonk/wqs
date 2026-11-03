@@ -1,6 +1,6 @@
 package wqs.domain;
 
-/** The {@code aggregationLevel} request parameter (spec 7.1): 0 items, 1 sessions, 2 plays. */
+/** The {@code aggregationLevel} request parameter (spec 7.1): 0 transactions, 1 sessions, 2 plays. */
 public enum AggregationLevel {
     L0, L1, L2;
 

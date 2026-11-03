@@ -15,8 +15,8 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Spec 9 control 3, security by schema: /web cannot reach operator data, and /cc reads only its
  * own tables. SQL is Java text, so this is checked on the source: no file under the web packages
- * mentions an operator table or type ({@code wqCc...}, any case, so {@code WqCc...} type names
- * too), and no file under the cc packages mentions a web one ({@code wqWeb...}).
+ * mentions an operator table or type ({@code wqPrjCc...}, any case, so {@code WqPrjCc...} type names
+ * too), and no file under the cc packages mentions a web one ({@code wqPrjWeb...}).
  *
  * <p>Replaces an ArchUnit rule over generated {@code WqCc*} table types, which SQL text strings
  * bypass. The scan sees only names written literally in those directories: a table name built
@@ -30,30 +30,30 @@ class ViewSourceIsolationTest {
 
     @Test
     void web_sources_never_name_an_operator_table() {
-        assertThat(mentions(mainSources(WEB), "wqcc")).isEmpty();
+        assertThat(mentions(mainSources(WEB), "wqprjcc")).isEmpty();
     }
 
     @Test
     void cc_sources_never_name_a_web_table() {
-        assertThat(mentions(mainSources(CC), "wqweb")).isEmpty();
+        assertThat(mentions(mainSources(CC), "wqprjweb")).isEmpty();
     }
 
     /** Proves the scan can fail: a SQL string and a type name, each in a different case. */
     @Test
     void the_scan_reports_every_mention_in_any_case(@TempDir Path dir) throws IOException {
         Files.writeString(dir.resolve("LeakyWebQuery.java"),
-                "class LeakyWebQuery { String sql = \"select * from \\\"wqCcItem\\\"\"; }");
+                "class LeakyWebQuery { String sql = \"select * from \\\"wqPrjCcTransaction\\\"\"; }");
         Files.writeString(dir.resolve("LeakyWebAssembly.java"),
-                "class LeakyWebAssembly { WqCcHighLevelRow row; }");
+                "class LeakyWebAssembly { WqPrjCcHighLevelRow row; }");
         Files.writeString(dir.resolve("CleanWebQuery.java"),
-                "class CleanWebQuery { String sql = \"select * from \\\"wqWebItem\\\"\"; }");
+                "class CleanWebQuery { String sql = \"select * from \\\"wqPrjWebTransaction\\\"\"; }");
 
-        assertThat(mentions(List.of(dir), "wqcc"))
+        assertThat(mentions(List.of(dir), "wqprjcc"))
                 .hasSize(2)
-                .anyMatch(m -> m.contains("LeakyWebQuery.java:1") && m.contains("\"wqCcItem"))
-                .anyMatch(m -> m.contains("LeakyWebAssembly.java:1") && m.contains("WqCcHighLevelRow"))
+                .anyMatch(m -> m.contains("LeakyWebQuery.java:1") && m.contains("\"wqPrjCcTransaction"))
+                .anyMatch(m -> m.contains("LeakyWebAssembly.java:1") && m.contains("WqPrjCcHighLevelRow"))
                 .noneMatch(m -> m.contains("CleanWebQuery"));
-        assertThat(mentions(List.of(dir), "wqweb")).singleElement().asString().contains("CleanWebQuery");
+        assertThat(mentions(List.of(dir), "wqprjweb")).singleElement().asString().contains("CleanWebQuery");
     }
 
     /** The package directories, each required to exist and hold Java sources (no hollow pass). */

@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 class CoveringIndexTest extends PostgresTestBase {
 
     private static final List<String> PARENTS =
-            List.of("wqWebItem", "wqCcItem", "wqWebHighLevel", "wqCcHighLevel");
+            List.of("wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjWebHighLevel", "wqPrjCcHighLevel");
 
     @BeforeAll
     static void createPartition() {
@@ -25,7 +25,7 @@ class CoveringIndexTest extends PostgresTestBase {
     }
 
     @Test
-    void every_item_and_high_level_partition_has_the_cover_index() {
+    void every_transaction_and_high_level_partition_has_the_cover_index() {
         for (String parent : PARENTS) {
             List<String> childDefs = db().column("""
                     select pg_get_indexdef(ci.oid)
@@ -51,12 +51,12 @@ class CoveringIndexTest extends PostgresTestBase {
      */
     @Test
     void cover_index_key_and_include_columns() {
-        String items = "(userId, occurredAt DESC, itemId DESC) INCLUDE (cancelled, productType, type)";
+        String transactions = "(userId, occurredAt DESC, transactionId DESC) INCLUDE (cancelled, productType, type)";
         String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled)";
         for (String parent : PARENTS) {
             String def = db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class,
                     "\"" + parent + "_cover\"").replace("\"", "");
-            assertThat(def).as(parent).endsWith(parent.endsWith("Item") ? items : highLevel);
+            assertThat(def).as(parent).endsWith(parent.endsWith("Transaction") ? transactions : highLevel);
         }
     }
 
@@ -67,12 +67,12 @@ class CoveringIndexTest extends PostgresTestBase {
             s.execute("set enable_seqscan = off");
             s.execute("set enable_bitmapscan = off");
             try (ResultSet rs = s.executeQuery("""
-                    explain select "occurredAt","itemId" from "wqWebItem"
+                    explain select "occurredAt","transactionId" from "wqPrjWebTransaction"
                     where "userId" = 1
                       and "occurredAt" >= timestamptz '2036-07-01T00:00:00Z'
                       and "occurredAt" < timestamptz '2036-08-01T00:00:00Z'
-                      and "productType" = 'instants' and "type" = 1 and not "cancelled"
-                    order by "occurredAt" desc, "itemId" desc limit 10
+                      and "productType" = 'instants' and "type" = 'TT_BUY' and not "cancelled"
+                    order by "occurredAt" desc, "transactionId" desc limit 10
                     """)) {
                 while (rs.next()) plan.add(rs.getString(1));
             }
@@ -88,7 +88,7 @@ class CoveringIndexTest extends PostgresTestBase {
                 select exists (
                   select 1 from pg_inherits i
                   where i.inhrelid = to_regclass(?)::oid
-                    and i.inhparent = to_regclass('"wqWebItem_cover"')::oid)
+                    and i.inhparent = to_regclass('"wqPrjWebTransaction_cover"')::oid)
                 """, Boolean.class, "\"" + indexName + "\"");
         assertThat(isCoverChild).as("scanned index %s in plan:%n%s", indexName, text).isTrue();
     }

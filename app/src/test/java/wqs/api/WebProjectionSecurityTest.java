@@ -42,12 +42,12 @@ class WebProjectionSecurityTest extends ApiTestBase {
     void fixtures() {
         reset();
         project(
-                item(1L, SourceKind.TRANSACTION, "u1-tx", "2034-02-10T10:00:00Z"),
-                item(1L, SourceKind.CLAIMABLE_PRIZE, "u1-prize", "2034-02-11T10:00:00Z"),
-                item(1L, SourceKind.PAYMENT, "u1-payment", "2034-02-12T10:00:00Z"),
-                item(2L, SourceKind.TRANSACTION, "u2-tx-a", "2034-02-10T11:00:00Z"),
-                item(2L, SourceKind.TRANSACTION, "u2-tx-b", "2034-02-13T10:00:00Z"),
-                item(2L, SourceKind.CLAIMABLE_PRIZE, "u2-prize", "2034-02-14T10:00:00Z"));
+                transaction(1L, SourceKind.TRANSACTION, "u1-tx", "2034-02-10T10:00:00Z"),
+                transaction(1L, SourceKind.CLAIMABLE_PRIZE, "u1-prize", "2034-02-11T10:00:00Z"),
+                transaction(1L, SourceKind.PAYMENT, "u1-payment", "2034-02-12T10:00:00Z"),
+                transaction(2L, SourceKind.TRANSACTION, "u2-tx-a", "2034-02-10T11:00:00Z"),
+                transaction(2L, SourceKind.TRANSACTION, "u2-tx-b", "2034-02-13T10:00:00Z"),
+                transaction(2L, SourceKind.CLAIMABLE_PRIZE, "u2-prize", "2034-02-14T10:00:00Z"));
     }
 
     private static MockHttpServletRequestBuilder web() {

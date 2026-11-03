@@ -12,22 +12,23 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The delta poller's cursor in "wqIngestWatermark" (phase 6 plan D5, D7). One row: the endpoint
+ * The delta poller's cursor: the "watermark" of the "wqIngestCursor" row whose "feed" is
+ * {@value #WALLET_DELTA} (phase 6 plan D5, D7). One row: the endpoint
  * returns all four polled sources in one stream of pages, so they share one watermark.
  */
 @Component
 public class DeltaWatermarkStore {
 
-    /** The "source" key of the {@code /wallet/delta} watermark row. */
+    /** The "feed" key of the {@code /wallet/delta} watermark row. */
     public static final String WALLET_DELTA = "wallet-delta";
 
     private static final String READ = """
-            select "watermark" from "wqIngestWatermark" where "source" = ?
+            select "watermark" from "wqIngestCursor" where "feed" = ? and "watermark" is not null
             """;
     private static final String WRITE = """
-            insert into "wqIngestWatermark" ("source", "watermark") values (?, ?)
-            on conflict ("source") do update set
-                "watermark" = greatest("wqIngestWatermark"."watermark", excluded."watermark"),
+            insert into "wqIngestCursor" ("feed", "watermark") values (?, ?)
+            on conflict ("feed") do update set
+                "watermark" = greatest("wqIngestCursor"."watermark", excluded."watermark"),
                 "updatedAt" = current_timestamp
             """;
 
@@ -47,7 +48,7 @@ public class DeltaWatermarkStore {
 
     /**
      * Upserts the watermark in the caller's transaction, so it commits or rolls back with the
-     * batch's items. Never moves it backwards: a page holding only overlap rows has a max version
+     * batch's projected transactions. Never moves it backwards: a page holding only overlap rows has a max version
      * below the stored watermark, and re-reading further back each run would be pointless work.
      */
     @Transactional(propagation = Propagation.MANDATORY)

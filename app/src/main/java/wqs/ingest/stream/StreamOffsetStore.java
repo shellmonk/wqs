@@ -8,19 +8,20 @@ import org.springframework.stereotype.Component;
 import wqs.projection.OffsetSink;
 
 /**
- * Reads and writes the consumer position. Deliberately in Postgres rather than the broker: the
- * offset advances inside the projection transaction, which is what makes ingestion
+ * Reads and writes the consumer position: the "streamOffset" of the stream's "wqIngestCursor" row
+ * ("feed" = the stream name). Deliberately in Postgres rather than the broker: the
+ * offset advances inside the projection's database transaction, which is what makes ingestion
  * effectively-once rather than at-least-once plus reconciliation (spec 6.2).
  */
 @Component
 public class StreamOffsetStore implements OffsetSink {
 
     private static final String READ = """
-            select "offsetVal" from "wqStreamOffset" where "stream" = ?
+            select "streamOffset" from "wqIngestCursor" where "feed" = ? and "streamOffset" is not null
             """;
     private static final String WRITE = """
-            insert into "wqStreamOffset" ("stream", "offsetVal", "updatedAt") values (?, ?, ?)
-            on conflict ("stream") do update set "offsetVal" = ?, "updatedAt" = ?
+            insert into "wqIngestCursor" ("feed", "streamOffset", "updatedAt") values (?, ?, ?)
+            on conflict ("feed") do update set "streamOffset" = ?, "updatedAt" = ?
             """;
 
     private final JdbcClient jdbc;

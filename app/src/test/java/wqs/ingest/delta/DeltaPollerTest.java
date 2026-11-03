@@ -37,7 +37,6 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
-import wqs.db.TxTypeRegistry;
 import wqs.domain.SourceKind;
 import wqs.ingest.DeadLetterStore;
 import wqs.projection.DeltaWatermarkStore;
@@ -70,7 +69,6 @@ class DeltaPollerTest extends PostgresTestBase {
     @Autowired private ProjectionWriter writer;
     @Autowired private DeltaWatermarkStore watermarks;
     @Autowired private DeadLetterStore deadLetters;
-    @Autowired private TxTypeRegistry txTypes;
     @Autowired private PartitionManager partitionManager;
     @Autowired private MeterRegistry meters;
     @Autowired private Clock clock;
@@ -96,7 +94,7 @@ class DeltaPollerTest extends PostgresTestBase {
     private DeltaProperties properties;
 
     private DeltaPoller pollerWith(ProjectionWriter projectionWriter) {
-        return new DeltaPoller(client, new DeltaRowDecoder(properties), txTypes, projectionWriter, watermarks,
+        return new DeltaPoller(client, new DeltaRowDecoder(properties), projectionWriter, watermarks,
                 deadLetters, properties, new DeltaPollMetrics(meters, watermarks, clock));
     }
 
@@ -109,7 +107,7 @@ class DeltaPollerTest extends PostgresTestBase {
         java.util.concurrent.atomic.AtomicInteger left = new java.util.concurrent.atomic.AtomicInteger(times);
         org.mockito.Mockito.when(flaky.applyDelta(org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
             wqs.projection.DeltaBatch batch = call.getArgument(0);
-            if (batch.rows().size() == 1 && batch.rows().get(0).item().sourceId().equals(failingId)
+            if (batch.rows().size() == 1 && batch.rows().get(0).transaction().sourceId().equals(failingId)
                     && left.getAndDecrement() > 0) {
                 throw failure;
             }
@@ -195,7 +193,7 @@ class DeltaPollerTest extends PostgresTestBase {
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(2, PAGE_LIMIT + 2, false));
         assertThat(watermarks.read()).contains(v(7));
-        assertThat(count("wqCcItem")).isEqualTo(PAGE_LIMIT + 2);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(PAGE_LIMIT + 2);
         assertThat(meters.counter(DeltaPollMetrics.PAGE_SATURATED).count()).isEqualTo(saturated + 1);
     }
 
@@ -223,7 +221,7 @@ class DeltaPollerTest extends PostgresTestBase {
         assertThat(meters.counter(DeltaPollMetrics.TIMESTAMP_CLIFF).count()).isEqualTo(cliffs + 1);
         assertThat(watermarks.read()).as("the cliff does not advance the watermark").contains(v(9));
         // The page's rows are still applied: versioned upserts are idempotent.
-        assertThat(count("wqCcItem")).isEqualTo(1 + PAGE_LIMIT);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(1 + PAGE_LIMIT);
     }
 
     /**
@@ -245,7 +243,7 @@ class DeltaPollerTest extends PostgresTestBase {
 
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 2, false));
-        assertThat(db().count("\"wqCcItem\" where \"sourceId\" = '999'")).isEqualTo(1);
+        assertThat(db().count("\"wqPrjCcTransaction\" where \"sourceId\" = '999'")).isEqualTo(1);
         assertThat(watermarks.read()).contains(v(11));
     }
 
@@ -272,7 +270,7 @@ class DeltaPollerTest extends PostgresTestBase {
         assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 2, false));
         assertThat(meters.counter(DeltaPollMetrics.TIMESTAMP_CLIFF).count()).isEqualTo(cliffs);
         assertThat(watermarks.read()).contains(v(12));
-        assertThat(count("wqCcItem")).isEqualTo(PAGE_LIMIT + 2);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(PAGE_LIMIT + 2);
     }
 
     /**
@@ -298,8 +296,8 @@ class DeltaPollerTest extends PostgresTestBase {
 
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 3, false));
-        assertThat(db().count("\"wqCcItem\" where \"sourceId\" = '999'")).isEqualTo(1);
-        assertThat(count("wqCcItem")).isEqualTo(PAGE_LIMIT + 3);
+        assertThat(db().count("\"wqPrjCcTransaction\" where \"sourceId\" = '999'")).isEqualTo(1);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(PAGE_LIMIT + 3);
         assertThat(watermarks.read()).contains(v(12));
         assertThat(meters.counter(DeltaPollMetrics.VERSION_OVERFLOW).count()).isEqualTo(overflows + 1);
         assertThat(meters.counter(DeltaPollMetrics.OVERLAP_SATURATED).count())
@@ -366,7 +364,7 @@ class DeltaPollerTest extends PostgresTestBase {
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(2, PAGE_LIMIT + 3, false));
         assertThat(watermarks.read()).contains(v(12));
-        assertThat(count("wqCcItem")).isEqualTo(7);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(7);
         assertThat(meters.counter(DeltaPollMetrics.OVERLAP_SATURATED).count()).isEqualTo(overlapSaturated + 1);
     }
 
@@ -456,7 +454,7 @@ class DeltaPollerTest extends PostgresTestBase {
 
         server.verify();
         assertThat(outcome).isEqualTo(new PollOutcome(1, 4, false));
-        assertThat(count("wqCcItem")).isEqualTo(2);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(2);
         assertThat(watermarks.read())
                 .as("advances past the poison row's readable version, so it cannot pin the cursor")
                 .contains(v(5));
@@ -526,7 +524,7 @@ class DeltaPollerTest extends PostgresTestBase {
         poller.runOnce();
 
         server.verify();
-        assertThat(count("wqCcItem")).isEqualTo(2);
+        assertThat(count("wqPrjCcTransaction")).isEqualTo(2);
         assertThat(watermarks.read()).contains(v(4));
         TestSql.Row letter = db().row("select \"source\", \"sourceId\" from \"wqDeadLetter\"");
         assertThat(letter.get("source", Short.class)).isEqualTo((short) SourceKind.CLAIMABLE_PRIZE.code());
@@ -562,7 +560,7 @@ class DeltaPollerTest extends PostgresTestBase {
             flaky.runOnce();
 
             server.verify();
-            assertThat(count("wqCcItem")).isEqualTo(2);
+            assertThat(count("wqPrjCcTransaction")).isEqualTo(2);
             assertThat(count("wqDeadLetter")).as("only the out-of-window row").isEqualTo(1);
             assertThat(watermarks.read()).contains(v(4));
         }
@@ -584,7 +582,7 @@ class DeltaPollerTest extends PostgresTestBase {
             flaky.runOnce();
 
             server.verify();
-            assertThat(count("wqCcItem")).as("%s", failure).isEqualTo(1);
+            assertThat(count("wqPrjCcTransaction")).as("%s", failure).isEqualTo(1);
             assertThat(db().column("select \"sourceId\" from \"wqDeadLetter\" order by \"sourceId\"", String.class)).containsExactly("1", "2");
             assertThat(watermarks.read()).contains(v(4));
         }

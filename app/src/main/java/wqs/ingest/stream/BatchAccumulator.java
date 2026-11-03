@@ -6,7 +6,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.projection.ProjectionBatch;
 
 /**
@@ -24,7 +24,7 @@ public class BatchAccumulator {
     private final Duration maxWait;
     private final Clock clock;
 
-    private final List<ProjectionItem> pending = new ArrayList<>();
+    private final List<ProjectionTransaction> pending = new ArrayList<>();
     private final List<Long> pendingOffsets = new ArrayList<>();
     private long highestOffset = -1;
     private Instant windowStart;
@@ -36,11 +36,11 @@ public class BatchAccumulator {
         this.clock = clock;
     }
 
-    public void add(ProjectionItem item, long offset) {
+    public void add(ProjectionTransaction transaction, long offset) {
         if (pending.isEmpty()) {
             windowStart = clock.instant();
         }
-        pending.add(item);
+        pending.add(transaction);
         pendingOffsets.add(offset);
         highestOffset = Math.max(highestOffset, offset);
     }

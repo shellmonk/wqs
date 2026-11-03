@@ -10,48 +10,48 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import wqs.db.TxTypeRegistry;
-import wqs.domain.MoneyDirection;
 import wqs.domain.CounterSentinels;
+import wqs.domain.MoneyDirection;
 import wqs.domain.PageUnit;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
+import wqs.domain.TransactionType;
 import wqs.domain.ViewKind;
 
 /**
- * Applies a cancellation to an already-projected item (spec 6.3), or parks it until the item
+ * Applies a cancellation to an already-projected transaction (spec 6.3), or parks it until the transaction
  * arrives.
  *
- * <p><b>Resolution.</b> A cancel targets an item of its OWN source: a TRANSACTION cancel cancels
+ * <p><b>Resolution.</b> A cancel targets a projected transaction of its OWN source: a TRANSACTION cancel cancels
  * a TRANSACTION, a PAYMENT cancel a PAYMENT. The original is therefore resolved through
- * "wqItemLocator" by (cancel.source, cancel.cancels) -- the locator's own key -- never by sourceId
+ * "wqPrjTransactionLocator" by (cancel.source, cancel.cancels) -- the locator's own key -- never by sourceId
  * alone, which different sources may share. The same-source assumption is to be confirmed with
  * the producer (O-13).
  *
  * <p><b>Effects</b>, each the exact inverse of what the original contributed when it arrived:
  * <ul>
- *   <li>Item rows: "cancelled" = true in every view the original's source feeds; the ITEM
+ *   <li>Transaction rows: "cancelled" = true in every view the original's source feeds; the TRANSACTION
  *       excl-cancelled counter loses one in each, at the original's own (occurredAt, productType).
- *       cntAll is untouched -- a cancelled item is still returned when the filter is off.</li>
+ *       cntAll is untouched -- a cancelled transaction is still returned when the filter is off.</li>
  *   <li>Rollups (sessioned original): txCountExclCancelled -1 and the original's own money
  *       (computed exactly as {@link RollupUpdater} added it) on its play and its session; the
  *       session's playCountExclCancelled -1 when the play's txCountExclCancelled reaches 0.</li>
  *   <li>Page index, PER VIEW: a session row in view V is visible while the session has at least
- *       one surviving (non-cancelled, non-cancellation) item whose source feeds V. For each view
- *       the original's source feeds, that is re-evaluated against the item table; if nothing
+ *       one surviving (non-cancelled, non-cancellation) transaction whose source feeds V. For each view
+ *       the original's source feeds, that is re-evaluated against the transaction table; if nothing
  *       survives, the row flips to hidden and the HIGH_LEVEL excl-cancelled counter loses one at
  *       the SESSION's key (start and productType from the session row, never the original's). An
- *       unsessioned original's own row flips at the item's key. A live item joining later
+ *       unsessioned original's own row flips at the transaction's key. A live transaction joining later
  *       revives the row ({@link HighLevelUpdater}).</li>
  * </ul>
- * The session's key is not touched: startedAt and the product fold over every item, cancelled or
+ * The session's key is not touched: startedAt and the product fold over every transaction, cancelled or
  * not, so a cancel never moves a row.
  *
  * <p><b>A zero-amount original</b> (spec 4.1) has a locator row and nothing else: the cancel
  * resolves against it -- it never parks -- and marks nothing.
  *
  * <p><b>Idempotence.</b> The writer's locator gate stops a replayed cancel before it gets here.
- * A different cancel of an already-cancelled item changes no tally; it only lowers
+ * A different cancel of an already-cancelled transaction changes no tally; it only lowers
  * "cancelledBy" to the smallest cancel id, so the stored state does not depend on which of two
  * cancels arrived first (P-1).
  *
@@ -65,37 +65,37 @@ public class CancellationApplier {
     private static final String SESSION_MARKER = "";
 
     private static final String LOCATE = """
-            select "userId", "occurredAt", "zeroAmount" from "wqItemLocator"
+            select "userId", "occurredAt", "zeroAmount" from "wqPrjTransactionLocator"
             where "source" = ? and "sourceId" = ? and "userId" = ?
             """;
     private static final String FETCH_ORIGINAL = """
             select "userId", "occurredAt", "source", "sourceId", "productType", "batchId",
                    "subBatchId", "type", "amount", "cancelled", "cancels"
-            from "wqCcItem"
+            from "wqPrjCcTransaction"
             where "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?
             """;
     private static final String SUBTRACT_FROM_PLAY = """
-            update "wqPlay" set
-                "txCountExclCancelled" = "wqPlay"."txCountExclCancelled" - ?,
-                "totalPlaysExclCancelled" = "wqPlay"."totalPlaysExclCancelled" - ?,
-                "totalWinsExclCancelled" = "wqPlay"."totalWinsExclCancelled" - ?,
-                "netExclCancelled" = "wqPlay"."netExclCancelled" - ?
+            update "wqPrjPlay" set
+                "txCountExclCancelled" = "wqPrjPlay"."txCountExclCancelled" - ?,
+                "totalPlaysExclCancelled" = "wqPrjPlay"."totalPlaysExclCancelled" - ?,
+                "totalWinsExclCancelled" = "wqPrjPlay"."totalWinsExclCancelled" - ?,
+                "netExclCancelled" = "wqPrjPlay"."netExclCancelled" - ?
             where "userId" = ? and "startedAt" = ? and "batchId" = ? and "subBatchId" = ?
             returning "txCountExclCancelled"
             """;
     private static final String SUBTRACT_FROM_SESSION = """
-            update "wqSession" set
-                "txCountExclCancelled" = "wqSession"."txCountExclCancelled" - ?,
-                "playCountExclCancelled" = "wqSession"."playCountExclCancelled" - ?,
-                "totalPlaysExclCancelled" = "wqSession"."totalPlaysExclCancelled" - ?,
-                "totalWinsExclCancelled" = "wqSession"."totalWinsExclCancelled" - ?,
-                "netExclCancelled" = "wqSession"."netExclCancelled" - ?
+            update "wqPrjSession" set
+                "txCountExclCancelled" = "wqPrjSession"."txCountExclCancelled" - ?,
+                "playCountExclCancelled" = "wqPrjSession"."playCountExclCancelled" - ?,
+                "totalPlaysExclCancelled" = "wqPrjSession"."totalPlaysExclCancelled" - ?,
+                "totalWinsExclCancelled" = "wqPrjSession"."totalWinsExclCancelled" - ?,
+                "netExclCancelled" = "wqPrjSession"."netExclCancelled" - ?
             where "userId" = ? and "startedAt" = ? and "batchId" = ?
             returning "userId", "batchId", "startedAt", "endedAt", "productType",
                       "txCountExclCancelled", "playCountExclCancelled"
             """;
     private static final String GROUP_START = """
-            select "startedAt" from "wqGroupLocator"
+            select "startedAt" from "wqPrjGroupLocator"
             where "userId" = ? and "batchId" = ? and "subBatchId" = ?
             """;
 
@@ -105,7 +105,7 @@ public class CancellationApplier {
     private static final RowMapper<Original> ORIGINAL = (rs, n) -> new Original(
             rs.getLong("userId"), rs.getObject("occurredAt", OffsetDateTime.class),
             rs.getShort("source"), rs.getString("sourceId"), rs.getString("productType"),
-            rs.getString("batchId"), rs.getString("subBatchId"), rs.getShort("type"),
+            rs.getString("batchId"), rs.getString("subBatchId"), rs.getString("type"),
             rs.getBigDecimal("amount"), rs.getBoolean("cancelled"), rs.getString("cancels"));
     private static final RowMapper<Session> SESSION = (rs, n) -> new Session(
             rs.getLong("userId"), rs.getString("batchId"),
@@ -116,15 +116,12 @@ public class CancellationApplier {
     private final JdbcClient jdbc;
     private final CounterUpdater counterUpdater;
     private final PendingCancelStore pendingCancelStore;
-    private final TxTypeRegistry txTypes;
 
     public CancellationApplier(
-            JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
-            TxTypeRegistry txTypes) {
+            JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore) {
         this.jdbc = jdbc;
         this.counterUpdater = counterUpdater;
         this.pendingCancelStore = pendingCancelStore;
-        this.txTypes = txTypes;
     }
 
     /**
@@ -134,7 +131,7 @@ public class CancellationApplier {
      *         cancel was parked.
      */
     @Transactional(propagation = Propagation.MANDATORY)
-    public boolean apply(ProjectionItem cancel) {
+    public boolean apply(ProjectionTransaction cancel) {
         if (!cancel.isCancellation()) {
             throw new IllegalArgumentException("not a cancellation: " + cancel.sourceId());
         }
@@ -161,12 +158,12 @@ public class CancellationApplier {
         Instant occurredAt = original.occurredAt().toInstant();
         for (ViewKind view : source.views()) {
             counterUpdater.uncountExclCancelled(
-                    userId, view, PageUnit.ITEM, original.productType(), original.type(),
+                    userId, view, PageUnit.TRANSACTION, original.productType(), original.type(),
                     occurredAt);
         }
 
         // A cancellation contributed to no rollup and no page unit, so cancelling one (should a
-        // producer ever do so) has only the item-level effect above.
+        // producer ever do so) has only the transaction-level effect above.
         if (isCancellation(original.cancels())) {
             return true;
         }
@@ -192,13 +189,13 @@ public class CancellationApplier {
     /**
      * The original's locator row as (userId, occurredAt, zeroAmount), or null if not yet seen.
      *
-     * The cancel's userId must match the original's: an item of another user is treated as not
+     * The cancel's userId must match the original's: a transaction of another user is treated as not
      * seen, so the cancel parks (and, since {@link PendingCancelStore#drainFor} matches on userId
      * too, stays parked, surfacing through the oldest-age gauge). A cross-user cancel is an
      * expected mismatch, not a failure; an unexpected failure on the drain path is contained by
      * {@link DrainedCancelApplier}'s savepoint and dead-letters the cancel, never the original.
      */
-    private Located locate(ProjectionItem cancel) {
+    private Located locate(ProjectionTransaction cancel) {
         return jdbc.sql(LOCATE)
                 .params((short) cancel.source().code(), cancel.cancels(), cancel.userId())
                 .query(LOCATED)
@@ -206,8 +203,8 @@ public class CancellationApplier {
                 .orElse(null);
     }
 
-    /** The located original, read from "wqCcItem" -- every source feeds /cc. */
-    private Original fetchOriginal(ProjectionItem cancel, Located located) {
+    /** The located original, read from "wqPrjCcTransaction" -- every source feeds /cc. */
+    private Original fetchOriginal(ProjectionTransaction cancel, Located located) {
         return jdbc.sql(FETCH_ORIGINAL)
                 .params(located.userId(), timestamptz(located.occurredAt()),
                         (short) cancel.source().code(), cancel.cancels())
@@ -215,25 +212,25 @@ public class CancellationApplier {
                 .single();
     }
 
-    private void markCancelled(ProjectionItem cancel, Original original, SourceKind source) {
+    private void markCancelled(ProjectionTransaction cancel, Original original, SourceKind source) {
         for (ViewKind view : source.views()) {
-            ItemTable t = ItemTable.of(view);
+            TransactionTable t = TransactionTable.of(view);
             int rows = jdbc.sql(t.markCancelled())
                     .param(cancel.sourceId())
                     .params(identifies(original))
                     .update();
-            requireOne(rows, "item row in " + view, original);
+            requireOne(rows, "transaction row in " + view, original);
         }
     }
 
-    private void lowerCancelledBy(ProjectionItem cancel, Original original, SourceKind source) {
+    private void lowerCancelledBy(ProjectionTransaction cancel, Original original, SourceKind source) {
         for (ViewKind view : source.views()) {
-            ItemTable t = ItemTable.of(view);
+            TransactionTable t = TransactionTable.of(view);
             int rows = jdbc.sql(t.lowerCancelledBy())
                     .param(cancel.sourceId())
                     .params(identifies(original))
                     .update();
-            requireOne(rows, "item row in " + view, original);
+            requireOne(rows, "transaction row in " + view, original);
         }
     }
 
@@ -246,7 +243,7 @@ public class CancellationApplier {
         long userId = original.userId();
         String batchId = original.batchId();
         // Mirrors RollupUpdater exactly: direction by type, magnitude by abs(amount).
-        MoneyDirection direction = txTypes.directionOf(original.type());
+        MoneyDirection direction = TransactionType.directionOf(original.type());
         BigDecimal amount = original.amount().abs();
         BigDecimal plays = direction == MoneyDirection.PLAY ? amount : BigDecimal.ZERO;
         BigDecimal wins = direction == MoneyDirection.WIN ? amount : BigDecimal.ZERO;
@@ -284,12 +281,12 @@ public class CancellationApplier {
     }
 
     /**
-     * Whether the session keeps a surviving item in {@code view}. Every item of the session lies
+     * Whether the session keeps a surviving transaction in {@code view}. Every transaction of the session lies
      * in [startedAt, endedAt] (both fold over all of them), so the bound loses nothing and lets
-     * the partitioned item table prune.
+     * the partitioned transaction table prune.
      */
     private boolean sessionSurvivesIn(ViewKind view, Session session) {
-        return Boolean.TRUE.equals(jdbc.sql(ItemTable.of(view).survivor())
+        return Boolean.TRUE.equals(jdbc.sql(TransactionTable.of(view).survivor())
                 .params(session.userId(), timestamptz(session.startedAt()),
                         timestamptz(session.endedAt()), session.batchId(), "")
                 .query(Boolean.class)
@@ -298,7 +295,7 @@ public class CancellationApplier {
 
     /**
      * Hides one page-index row and takes it out of the HIGH_LEVEL excl-cancelled tally. The row
-     * was visible -- the original was a surviving item in this view until now -- so anything but
+     * was visible -- the original was a surviving transaction in this view until now -- so anything but
      * exactly one flip is a bug.
      */
     private void hide(ViewKind view, long userId, Instant at, short kind, String refId,
@@ -348,10 +345,10 @@ public class CancellationApplier {
     private record Located(long userId, OffsetDateTime occurredAt, boolean zeroAmount) {
     }
 
-    /** The columns of the original's "wqCcItem" row that a cancel reads. */
+    /** The columns of the original's "wqPrjCcTransaction" row that a cancel reads. */
     private record Original(
             long userId, OffsetDateTime occurredAt, short source, String sourceId,
-            String productType, String batchId, String subBatchId, short type, BigDecimal amount,
+            String productType, String batchId, String subBatchId, String type, BigDecimal amount,
             boolean cancelled, String cancels) {
     }
 
@@ -366,24 +363,24 @@ public class CancellationApplier {
             where "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?
               and "visibleExclCancelled" = true
             """;
-    private static final String HIDE_WEB = HIDE.formatted("wqWebHighLevel");
-    private static final String HIDE_CC = HIDE.formatted("wqCcHighLevel");
+    private static final String HIDE_WEB = HIDE.formatted("wqPrjWebHighLevel");
+    private static final String HIDE_CC = HIDE.formatted("wqPrjCcHighLevel");
 
-    /** The two item tables share a column shape; this carries one table's statements. */
-    private record ItemTable(String markCancelled, String lowerCancelledBy, String survivor) {
+    /** The two transaction tables share a column shape; this carries one table's statements. */
+    private record TransactionTable(String markCancelled, String lowerCancelledBy, String survivor) {
 
         private static final String IDENTIFIES = """
                 "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?""";
 
-        static final ItemTable WEB = of("wqWebItem");
-        static final ItemTable CC = of("wqCcItem");
+        static final TransactionTable WEB = of("wqPrjWebTransaction");
+        static final TransactionTable CC = of("wqPrjCcTransaction");
 
-        static ItemTable of(ViewKind view) {
+        static TransactionTable of(ViewKind view) {
             return view == ViewKind.WEB ? WEB : CC;
         }
 
-        private static ItemTable of(String table) {
-            return new ItemTable(
+        private static TransactionTable of(String table) {
+            return new TransactionTable(
                     """
                     update "%s" set "cancelled" = true, "cancelledBy" = ?
                     where %s

@@ -16,7 +16,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import wqs.db.PartitionManager;
 import wqs.db.PostgresTestBase;
 import wqs.db.TestSql;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.Products;
 import wqs.gen.TxTypes;
@@ -80,16 +80,16 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     @Test
-    void an_earlier_item_arriving_second_re_anchors_the_session_and_the_play() {
-        ProjectionItem later = wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100));
-        ProjectionItem earlier = win("t2", "b1", "p1", "3.0000", T0);
+    void an_earlier_transaction_arriving_second_re_anchors_the_session_and_the_play() {
+        ProjectionTransaction later = wager("t1", "b1", "p1", "5.0000", T0.plusSeconds(100));
+        ProjectionTransaction earlier = win("t2", "b1", "p1", "3.0000", T0);
 
         apply(later);
         apply(earlier);
         Map<String, List<Map<String, Object>>> outOfOrder = snapshot();
 
-        assertThat(db().count("\"wqSession\"")).isEqualTo(1);
-        assertThat(db().count("\"wqPlay\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPrjSession\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPrjPlay\"")).isEqualTo(1);
         Rollup session = session("b1");
         assertThat(session.startedAt()).isEqualTo(utc(T0));
         assertThat(session.endedAt()).isEqualTo(utc(T0.plusSeconds(100)));
@@ -99,7 +99,7 @@ class RollupUpdaterTest extends PostgresTestBase {
         Rollup play = play("b1", "p1");
         assertThat(play.startedAt()).isEqualTo(utc(T0));
         assertThat(play.endedAt()).isEqualTo(utc(T0.plusSeconds(100)));
-        assertThat(db().column("select \"startedAt\" from \"wqGroupLocator\"", Instant.class))
+        assertThat(db().column("select \"startedAt\" from \"wqPrjGroupLocator\"", Instant.class))
                 .containsExactly(T0, T0);
 
         clean();
@@ -116,8 +116,8 @@ class RollupUpdaterTest extends PostgresTestBase {
      */
     @Test
     void the_re_key_reinsert_keeps_numeric_scale_and_nullable_columns() {
-        ProjectionItem later = item("t2", "b1", "p1", "1.2345", T0.plusSeconds(100), TxTypes.PLAY, null);
-        ProjectionItem earlier = item("t1", "b1", "p1", "0.0001", T0, TxTypes.WIN, null);
+        ProjectionTransaction later = transaction("t2", "b1", "p1", "1.2345", T0.plusSeconds(100), TxTypes.PLAY, null);
+        ProjectionTransaction earlier = transaction("t1", "b1", "p1", "0.0001", T0, TxTypes.WIN, null);
 
         apply(earlier);
         apply(later);
@@ -125,7 +125,7 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         clean();
         apply(later);
-        for (String table : List.of("wqSession", "wqPlay")) {
+        for (String table : List.of("wqPrjSession", "wqPrjPlay")) {
             assertThat(db().execute("update \"" + table + "\" set \"firstSourceId\" = null, \"firstSource\" = null"))
                     .isEqualTo(1);
         }
@@ -133,7 +133,7 @@ class RollupUpdaterTest extends PostgresTestBase {
 
         assertThat(rekey.sessionKeyChanged()).isTrue();
         assertThat(snapshot()).isEqualTo(inOrder);
-        for (String table : List.of("wqSession", "wqPlay")) {
+        for (String table : List.of("wqPrjSession", "wqPrjPlay")) {
             TestSql.Row row = db().row("select * from \"" + table + "\"");
             assertThat(row.get("startedAt", Instant.class)).as(table).isEqualTo(T0);
             assertThat(row.get("productId")).as(table).isNull();
@@ -155,10 +155,10 @@ class RollupUpdaterTest extends PostgresTestBase {
         apply(wager("t1", "b1", "p1", "5.0000", mayFirst));
         apply(wager("t2", "b1", "p1", "4.0000", aprilLast));
 
-        assertThat(db().count("\"wqSession_2034_04\"")).isEqualTo(1);
-        assertThat(db().count("\"wqSession_2034_05\"")).isZero();
-        assertThat(db().count("\"wqPlay_2034_04\"")).isEqualTo(1);
-        assertThat(db().count("\"wqPlay_2034_05\"")).isZero();
+        assertThat(db().count("\"wqPrjSession_2034_04\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPrjSession_2034_05\"")).isZero();
+        assertThat(db().count("\"wqPrjPlay_2034_04\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPrjPlay_2034_05\"")).isZero();
         Rollup session = session("b1");
         assertThat(session.startedAt()).isEqualTo(utc(aprilLast));
         assertThat(session.endedAt()).isEqualTo(utc(mayFirst));
@@ -179,18 +179,18 @@ class RollupUpdaterTest extends PostgresTestBase {
         assertThat(play("b1", "p2").endedAt()).isEqualTo(utc(T0.plusSeconds(50)));
         assertThat(session("b1").startedAt()).isEqualTo(utc(T0));
         assertThat(session("b1").playCount()).isEqualTo(2);
-        assertThat(db().count("\"wqPlay\"")).isEqualTo(2);
+        assertThat(db().count("\"wqPrjPlay\"")).isEqualTo(2);
     }
 
     @Test
     void any_arrival_order_converges_to_identical_rollups() {
-        List<ProjectionItem> chronological = List.of(
+        List<ProjectionTransaction> chronological = List.of(
                 wager("t1", "b1", "p1", "5.0000", T0, 12),
                 win("t2", "b1", "p1", "7.5000", T0.plusSeconds(20)),
                 wager("t3", "b1", "p2", "2.0000", T0.plusSeconds(40)),
-                item("t4", "b1", "p2", "0.5000", T0.plusSeconds(50), TxTypes.NEUTRAL, 11),
+                transaction("t4", "b1", "p2", "0.5000", T0.plusSeconds(50), TxTypes.NEUTRAL, 11),
                 win("t5", "b1", "p2", "1.2500", T0.plusSeconds(80)));
-        List<ProjectionItem> shuffled = List.of(
+        List<ProjectionTransaction> shuffled = List.of(
                 chronological.get(3), chronological.get(1), chronological.get(4),
                 chronological.get(0), chronological.get(2));
 
@@ -207,7 +207,7 @@ class RollupUpdaterTest extends PostgresTestBase {
         assertThat(session.endedAt()).isEqualTo(utc(T0.plusSeconds(80)));
         assertThat(session.txCount()).isEqualTo(5);
         assertThat(session.playCount()).isEqualTo(2);
-        // t1, the first item, carries product 12 -- not the LEAST of the session's products.
+        // t1, the first transaction, carries product 12 -- not the LEAST of the session's products.
         assertThat(session.productId()).isEqualTo(Products.id(12));
         assertThat(session.productType()).isEqualTo(Products.type(12));
         assertThat(session.totalPlays()).isEqualByComparingTo("7.0000");
@@ -233,10 +233,10 @@ class RollupUpdaterTest extends PostgresTestBase {
     void the_session_key_reports_a_product_change_without_a_time_change() {
         apply(wager("t1", "b1", "p1", "5.0000", T0, 12));
 
-        // Same instant, lower sourceId: t0 is the first item, so its product is the session's.
+        // Same instant, lower sourceId: t0 is the first transaction, so its product is the session's.
         assertThat(apply(wager("t0", "b1", "p1", "1.0000", T0, 11)))
                 .isEqualTo(rr(false, false, T0, 11, T0, 12, true));
-        // A later item does not displace the first item's product, whatever its value.
+        // A later transaction does not displace the first transaction's product, whatever its value.
         assertThat(apply(wager("t3", "b1", "p1", "1.0000", T0.plusSeconds(20), 3)))
                 .isEqualTo(rr(false, false, T0, 11, null, null, false));
     }
@@ -245,10 +245,10 @@ class RollupUpdaterTest extends PostgresTestBase {
     void the_session_key_reports_a_product_arriving_after_none() {
         apply(wager("t1", "b1", "p1", "5.0000", T0, null));
 
-        // A later item with a product does not label a session whose first item has none...
+        // A later transaction with a product does not label a session whose first transaction has none...
         assertThat(apply(wager("t2", "b1", "p1", "1.0000", T0.plusSeconds(10), 11)))
                 .isEqualTo(rr(false, false, T0, null, null, null, false));
-        // ...but a new first item does, and a null pair is displaced like any other.
+        // ...but a new first transaction does, and a null pair is displaced like any other.
         assertThat(apply(wager("t0", "b1", "p1", "1.0000", T0, 11)))
                 .isEqualTo(rr(false, false, T0, 11, T0, null, true));
     }
@@ -278,13 +278,13 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     /**
-     * D6: the session's (productId, productType) is its FIRST item's pair, never a per-column
-     * LEAST, which here would pair P03 with "arcade" -- a product no item has.
+     * D6: the session's (productId, productType) is its FIRST transaction's pair, never a per-column
+     * LEAST, which here would pair P03 with "arcade" -- a product no transaction has.
      */
     @Test
-    void the_session_and_play_product_is_the_first_items_pair_in_any_order() {
-        ProjectionItem first = labelled("t9", T0, "P13", "arcade");
-        ProjectionItem later = labelled("t1", T0.plusSeconds(30), "P03", "lottery");
+    void the_session_and_play_product_is_the_first_transactions_pair_in_any_order() {
+        ProjectionTransaction first = labelled("t9", T0, "P13", "arcade");
+        ProjectionTransaction later = labelled("t1", T0.plusSeconds(30), "P03", "lottery");
 
         apply(first);
         apply(later);
@@ -301,11 +301,11 @@ class RollupUpdaterTest extends PostgresTestBase {
         assertThat(reanchor.sessionProductType()).isEqualTo("arcade");
     }
 
-    /** Items at the same instant: the lower (sourceId, source) is first, whatever arrives first. */
+    /** Transactions at the same instant: the lower (sourceId, source) is first, whatever arrives first. */
     @Test
     void a_tie_on_occurred_at_is_broken_by_source_id() {
-        ProjectionItem a = labelled("tA", T0, "P13", "lottery");
-        ProjectionItem b = labelled("tB", T0, "P03", "arcade");
+        ProjectionTransaction a = labelled("tA", T0, "P13", "lottery");
+        ProjectionTransaction b = labelled("tB", T0, "P03", "arcade");
 
         apply(b);
         RollupResult tie = apply(a);
@@ -320,8 +320,8 @@ class RollupUpdaterTest extends PostgresTestBase {
         assertThat(snapshot()).isEqualTo(aWins);
     }
 
-    private static ProjectionItem labelled(String id, Instant at, String productId, String productType) {
-        return new ProjectionItem(1L, SourceKind.TRANSACTION, id, at, productId, productType, "b1", "p1",
+    private static ProjectionTransaction labelled(String id, Instant at, String productId, String productType) {
+        return new ProjectionTransaction(1L, SourceKind.TRANSACTION, id, at, productId, productType, "b1", "p1",
                 TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
     }
 
@@ -331,34 +331,34 @@ class RollupUpdaterTest extends PostgresTestBase {
 
     @Test
     void a_cancellation_touches_no_rollup() {
-        ProjectionItem cancel = new ProjectionItem(
+        ProjectionTransaction cancel = new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, "tx-2", T0, "P11", "instants", "b1", "p1",
                 TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, "tx-1", null);
 
         assertThat(apply(cancel)).isEqualTo(RollupResult.NONE);
 
-        assertThat(db().count("\"wqSession\"")).isZero();
-        assertThat(db().count("\"wqPlay\"")).isZero();
-        assertThat(db().count("\"wqGroupLocator\"")).isZero();
+        assertThat(db().count("\"wqPrjSession\"")).isZero();
+        assertThat(db().count("\"wqPrjPlay\"")).isZero();
+        assertThat(db().count("\"wqPrjGroupLocator\"")).isZero();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"", "  "})
     void a_blank_sub_batch_id_rolls_up_into_the_session_only(String blank) {
-        RollupResult first = apply(item("t1", "b1", blank, "5.0000", T0.plusSeconds(100), TxTypes.PLAY, 11));
-        RollupResult earlier = apply(item("t2", "b1", blank, "1.0000", T0, TxTypes.PLAY, 11));
+        RollupResult first = apply(transaction("t1", "b1", blank, "5.0000", T0.plusSeconds(100), TxTypes.PLAY, 11));
+        RollupResult earlier = apply(transaction("t2", "b1", blank, "1.0000", T0, TxTypes.PLAY, 11));
 
         assertThat(first).isEqualTo(
                 rr(true, false, T0.plusSeconds(100), 11, null, null, false));
         assertThat(earlier).isEqualTo(
                 rr(false, false, T0, 11, T0.plusSeconds(100), 11, true));
-        assertThat(db().count("\"wqSession\"")).isEqualTo(1);
-        assertThat(db().count("\"wqPlay\"")).isZero();
+        assertThat(db().count("\"wqPrjSession\"")).isEqualTo(1);
+        assertThat(db().count("\"wqPrjPlay\"")).isZero();
         Rollup session = session("b1");
         assertThat(session.startedAt()).isEqualTo(utc(T0));
         assertThat(session.txCount()).isEqualTo(2);
         assertThat(session.playCount()).isZero();
-        assertThat(db().rows("select * from \"wqGroupLocator\""))
+        assertThat(db().rows("select * from \"wqPrjGroupLocator\""))
                 .singleElement()
                 .satisfies(locator -> {
                     assertThat(locator.get("subBatchId", String.class)).isEmpty();
@@ -367,54 +367,54 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     @Test
-    void an_unsessioned_item_creates_no_rollup() {
+    void an_unsessioned_transaction_creates_no_rollup() {
         apply(payment());
 
-        assertThat(db().count("\"wqSession\"")).isZero();
-        assertThat(db().count("\"wqGroupLocator\"")).isZero();
+        assertThat(db().count("\"wqPrjSession\"")).isZero();
+        assertThat(db().count("\"wqPrjGroupLocator\"")).isZero();
     }
 
-    private RollupResult apply(ProjectionItem item) {
-        return inTx().execute(status -> new RollupUpdater(jdbc(), txTypes()).applyItem(item));
+    private RollupResult apply(ProjectionTransaction transaction) {
+        return inTx().execute(status -> new RollupUpdater(jdbc()).applyTransaction(transaction));
     }
 
     private void clean() {
-        db().execute("delete from \"wqGroupLocator\"");
-        db().execute("delete from \"wqPlay\"");
-        db().execute("delete from \"wqSession\"");
+        db().execute("delete from \"wqPrjGroupLocator\"");
+        db().execute("delete from \"wqPrjPlay\"");
+        db().execute("delete from \"wqPrjSession\"");
     }
 
     private Map<String, List<Map<String, Object>>> snapshot() {
         return Map.of(
-                "session", db().maps("select * from \"wqSession\" order by \"userId\", \"batchId\""),
-                "play", db().maps("select * from \"wqPlay\" order by \"userId\", \"batchId\", \"subBatchId\""),
+                "session", db().maps("select * from \"wqPrjSession\" order by \"userId\", \"batchId\""),
+                "play", db().maps("select * from \"wqPrjPlay\" order by \"userId\", \"batchId\", \"subBatchId\""),
                 "locator", db().maps(
-                        "select * from \"wqGroupLocator\" order by \"userId\", \"batchId\", \"subBatchId\""));
+                        "select * from \"wqPrjGroupLocator\" order by \"userId\", \"batchId\", \"subBatchId\""));
     }
 
-    private static ProjectionItem payment() {
-        return new ProjectionItem(
+    private static ProjectionTransaction payment() {
+        return new ProjectionTransaction(
                 1L, SourceKind.PAYMENT, "pay1", T0, null, null, null, null,
                 TxTypes.NEUTRAL, new BigDecimal("50.0000"), "EUR", null, null, null);
     }
 
-    private static ProjectionItem wager(String id, String batch, String play, String amount, Instant at) {
-        return item(id, batch, play, amount, at, TxTypes.PLAY, 11);
+    private static ProjectionTransaction wager(String id, String batch, String play, String amount, Instant at) {
+        return transaction(id, batch, play, amount, at, TxTypes.PLAY, 11);
     }
 
-    private static ProjectionItem wager(
+    private static ProjectionTransaction wager(
             String id, String batch, String play, String amount, Instant at, Integer productId) {
-        return item(id, batch, play, amount, at, TxTypes.PLAY, productId);
+        return transaction(id, batch, play, amount, at, TxTypes.PLAY, productId);
     }
 
-    private static ProjectionItem win(String id, String batch, String play, String amount, Instant at) {
-        return item(id, batch, play, amount, at, TxTypes.WIN, 11);
+    private static ProjectionTransaction win(String id, String batch, String play, String amount, Instant at) {
+        return transaction(id, batch, play, amount, at, TxTypes.WIN, 11);
     }
 
-    private static ProjectionItem item(
-            String id, String batch, String play, String amount, Instant at, short type,
+    private static ProjectionTransaction transaction(
+            String id, String batch, String play, String amount, Instant at, String type,
             Integer productId) {
-        return new ProjectionItem(
+        return new ProjectionTransaction(
                 1L, SourceKind.TRANSACTION, id, at,
                 productId == null ? null : Products.id(productId),
                 productId == null ? null : Products.type(productId), batch, play,
@@ -435,7 +435,7 @@ class RollupUpdaterTest extends PostgresTestBase {
         return instant.atOffset(ZoneOffset.UTC);
     }
 
-    /** The rollup columns these tests read, from one "wqSession" or "wqPlay" row. */
+    /** The rollup columns these tests read, from one "wqPrjSession" or "wqPrjPlay" row. */
     private record Rollup(OffsetDateTime startedAt, OffsetDateTime endedAt, Integer txCount, Integer playCount,
                           BigDecimal totalPlays, BigDecimal totalWins, BigDecimal net,
                           String productId, String productType) {
@@ -450,11 +450,11 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     private Rollup session(String batchId) {
-        return Rollup.of(db().row("select * from \"wqSession\" where \"batchId\" = ?", batchId), true);
+        return Rollup.of(db().row("select * from \"wqPrjSession\" where \"batchId\" = ?", batchId), true);
     }
 
     private Rollup play(String batchId, String subBatchId) {
-        return Rollup.of(db().row("select * from \"wqPlay\" where \"batchId\" = ? and \"subBatchId\" = ?",
+        return Rollup.of(db().row("select * from \"wqPrjPlay\" where \"batchId\" = ? and \"subBatchId\" = ?",
                 batchId, subBatchId), false);
     }
 }

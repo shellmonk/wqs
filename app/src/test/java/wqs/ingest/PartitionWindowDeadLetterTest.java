@@ -46,7 +46,6 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
     @Autowired private DeadLetterStore deadLetterStore;
     @Autowired private StreamOffsetStore offsetStore;
     @Autowired private StreamPayloadMapper payloadMapper;
-    @Autowired private wqs.db.TxTypeRegistry txTypes;
     @Autowired private ProjectionWriter writer;
 
     @BeforeEach
@@ -61,7 +60,7 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
         StreamConsumer consumer = new StreamConsumer(
                 source,
                 new StreamProperties(true, STREAM, 1, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
-                payloadMapper, txTypes, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
+                payloadMapper, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
                 deadLetterStore);
         consumer.start();
         // +14 rather than +13 so a month boundary passing mid-test cannot bring it into the window.
@@ -83,7 +82,7 @@ class PartitionWindowDeadLetterTest extends PostgresTestBase {
         StreamConsumer consumer = new StreamConsumer(
                 source,
                 new StreamProperties(true, STREAM, 1, Duration.ofMillis(1), 2, Duration.ofSeconds(5), null),
-                payloadMapper, txTypes, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
+                payloadMapper, writer, offsetStore, new SimpleMeterRegistry(), Clock.systemUTC(),
                 deadLetterStore);
         consumer.start();
         int partitionsBefore = partitionCount();

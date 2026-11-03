@@ -2,17 +2,17 @@ package wqs.db;
 
 /**
  * Every monthly RANGE-partitioned table and the column it is partitioned on.
- * "wqCountDay" is partitioned on a date, the rest on timestamptz.
+ * "wqPrjCountDay" is partitioned on a date, the rest on timestamptz.
  */
 public enum PartitionedTable {
 
-    WQ_WEB_ITEM("wqWebItem", "occurredAt"),
-    WQ_CC_ITEM("wqCcItem", "occurredAt"),
-    WQ_SESSION("wqSession", "startedAt"),
-    WQ_PLAY("wqPlay", "startedAt"),
-    WQ_WEB_HIGH_LEVEL("wqWebHighLevel", "occurredAt"),
-    WQ_CC_HIGH_LEVEL("wqCcHighLevel", "occurredAt"),
-    WQ_COUNT_DAY("wqCountDay", "period");
+    WQ_PRJ_WEB_TRANSACTION("wqPrjWebTransaction", "occurredAt"),
+    WQ_PRJ_CC_TRANSACTION("wqPrjCcTransaction", "occurredAt"),
+    WQ_PRJ_SESSION("wqPrjSession", "startedAt"),
+    WQ_PRJ_PLAY("wqPrjPlay", "startedAt"),
+    WQ_PRJ_WEB_HIGH_LEVEL("wqPrjWebHighLevel", "occurredAt"),
+    WQ_PRJ_CC_HIGH_LEVEL("wqPrjCcHighLevel", "occurredAt"),
+    WQ_PRJ_COUNT_DAY("wqPrjCountDay", "period");
 
     private final String tableName;
     private final String partitionKey;

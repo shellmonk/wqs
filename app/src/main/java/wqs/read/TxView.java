@@ -26,7 +26,7 @@ public record TxView(
         String subBatchId,
         @JsonRawValue String detail) implements HighLevelEntry {
 
-    static TxView of(ItemEntry e) {
+    static TxView of(TransactionEntry e) {
         return new TxView(e.sourceId(), e.kind(), e.occurredAt(), e.productId(), e.productType(),
                 e.transactionType(), e.amount(), e.currency(), e.balanceAfter(), e.cancelled(), e.batchId(),
                 e.subBatchId(), e.detail());

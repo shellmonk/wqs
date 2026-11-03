@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
@@ -179,8 +179,8 @@ class HighLevelResponseInvariantTest extends ReadPropertyBase {
 
     // ------------------------------------------------------------------ the dataset
 
-    private static List<ProjectionItem> dataset() {
-        List<ProjectionItem> d = new ArrayList<>();
+    private static List<ProjectionTransaction> dataset() {
+        List<ProjectionTransaction> d = new ArrayList<>();
         Instant base = Instant.parse("2034-02-03T08:00:00Z");
         for (int s = 0; s < 12; s++) {
             Instant start = base.plus(Duration.ofHours(37L * s));
@@ -193,7 +193,7 @@ class HighLevelResponseInvariantTest extends ReadPropertyBase {
                 for (int t = 0; t < txs; t++) {
                     String id = batch + "-p" + p + "-t" + t;
                     boolean win = t % 2 == 1;
-                    d.add(item(SourceKind.TRANSACTION, id, start.plus(Duration.ofMinutes(minute++)), product, batch,
+                    d.add(transaction(SourceKind.TRANSACTION, id, start.plus(Duration.ofMinutes(minute++)), product, batch,
                             batch + "-p" + p, win ? TxTypes.WIN : TxTypes.PLAY, (s + 2 * p + 3 * t) % 7 + 1));
                     // cancels: a fully cancelled play (s2-p1) and scattered single cancels
                     if ((s == 2 && p == 1) || (s + p + t) % 5 == 0) {
@@ -202,32 +202,32 @@ class HighLevelResponseInvariantTest extends ReadPropertyBase {
                 }
             }
             if (s % 3 == 2 || s == 11) {
-                d.add(item(SourceKind.TRANSACTION, batch + "-loose", start.plus(Duration.ofMinutes(minute++)), product,
+                d.add(transaction(SourceKind.TRANSACTION, batch + "-loose", start.plus(Duration.ofMinutes(minute++)), product,
                         batch, null, TxTypes.NEUTRAL, 3));
             }
             // unsessioned peers: one tied with the session start, one between sessions (no eInstant: P-7)
             String peerProduct = s % 3 == 2 ? "keno" : product;
-            d.add(item(s % 2 == 0 ? SourceKind.TRANSACTION : SourceKind.CLAIMABLE_PRIZE, "u" + s, start, peerProduct,
+            d.add(transaction(s % 2 == 0 ? SourceKind.TRANSACTION : SourceKind.CLAIMABLE_PRIZE, "u" + s, start, peerProduct,
                     null, null, s % 2 == 0 ? TxTypes.PLAY : TxTypes.WIN, 2));
-            d.add(item(SourceKind.PAYMENT, "y" + s, start.plus(Duration.ofHours(20)), null, null, null, TxTypes.NEUTRAL, 9));
+            d.add(transaction(SourceKind.PAYMENT, "y" + s, start.plus(Duration.ofHours(20)), null, null, null, TxTypes.NEUTRAL, 9));
         }
         // a session kept visible only by its play-less transaction: every play transaction cancelled
         Instant last = Instant.parse("2034-02-27T08:00:00Z");
-        d.add(item(SourceKind.TRANSACTION, "sv-t0", last, "keno", "sv", "sv-p0", TxTypes.PLAY, 4));
+        d.add(transaction(SourceKind.TRANSACTION, "sv-t0", last, "keno", "sv", "sv-p0", TxTypes.PLAY, 4));
         d.add(cancel("sv-t0-x", last.plus(Duration.ofMinutes(1)), "sv", "sv-t0"));
-        d.add(item(SourceKind.TRANSACTION, "sv-loose", last.plus(Duration.ofMinutes(2)), "keno", "sv", null,
+        d.add(transaction(SourceKind.TRANSACTION, "sv-loose", last.plus(Duration.ofMinutes(2)), "keno", "sv", null,
                 TxTypes.NEUTRAL, 1));
         return d;
     }
 
-    private static ProjectionItem item(SourceKind source, String id, Instant at, String productType, String batchId,
-                                       String subBatchId, short type, int amount) {
-        return new ProjectionItem(USER, source, id, at, productType == null ? null : "P-" + productType, productType,
+    private static ProjectionTransaction transaction(SourceKind source, String id, Instant at, String productType, String batchId,
+                                       String subBatchId, String type, int amount) {
+        return new ProjectionTransaction(USER, source, id, at, productType == null ? null : "P-" + productType, productType,
                 batchId, subBatchId, type, new BigDecimal(amount), "EUR", null, null, null);
     }
 
-    private static ProjectionItem cancel(String id, Instant at, String batchId, String target) {
-        return new ProjectionItem(USER, SourceKind.TRANSACTION, id, at, null, null, batchId, null,
+    private static ProjectionTransaction cancel(String id, Instant at, String batchId, String target) {
+        return new ProjectionTransaction(USER, SourceKind.TRANSACTION, id, at, null, null, batchId, null,
                 TxTypes.CANCEL, new BigDecimal("-1"), "EUR", null, target, null);
     }
 }

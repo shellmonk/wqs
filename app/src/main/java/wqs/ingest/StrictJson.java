@@ -26,8 +26,8 @@ public final class StrictJson {
 
     /**
      * Every real transaction type code is upper-case letters, digits and underscores, at most 64
-     * characters (walAccountTransactions.transactionType is varchar(64), source-schema.sql). The
-     * registry inserts a first-sighted code; anything else is rejected HERE as poison, so a code
+     * characters (walAccountTransactions.transactionType is varchar(64), source-schema.sql). A code
+     * of that shape is stored as-is (plan D1), known or not; anything else is rejected HERE as poison, so a code
      * the database would refuse can never become a retry-forever failure downstream.
      */
     private static final Pattern TYPE_CODE = Pattern.compile("[A-Z0-9_]{1,64}");
@@ -119,7 +119,7 @@ public final class StrictJson {
      * Text fields must be JSON strings: asText() would silently turn true/numbers/objects into text.
      *
      * <p>U+0000 is legal JSON but Postgres can store it neither in text nor in jsonb, so an
-     * accepted NUL would make the item insert AND its dead-letter row fail on every retry --
+     * accepted NUL would make the transaction insert AND its dead-letter row fail on every retry --
      * halting ingestion for good. Rejected here it becomes poison.
      */
     public static String textual(JsonNode node, String field) {

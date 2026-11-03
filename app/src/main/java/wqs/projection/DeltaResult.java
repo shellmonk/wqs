@@ -3,7 +3,7 @@ package wqs.projection;
 /**
  * Outcome of one {@link DeltaBatch}, one count per {@code wqs.delta.rows{outcome}} value (plan D10).
  *
- * @param inserted     first sight of the row: projected like a stream item
+ * @param inserted     first sight of the row: projected like a stream transaction
  * @param updated      a strictly newer version: "detail" and the stored version replaced
  * @param duplicates   the stored version again (the overlap window)
  * @param stale        an older version than the stored one: ignored

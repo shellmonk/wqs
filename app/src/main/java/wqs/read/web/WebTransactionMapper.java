@@ -1,21 +1,20 @@
-package wqs.read.cc;
+package wqs.read.web;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import org.springframework.stereotype.Component;
 import wqs.domain.SourceKind;
-import wqs.read.ItemEntry;
-import wqs.read.TypeCodes;
+import wqs.read.TransactionEntry;
 
-/** Maps one "wqCcItem" row of the current result-set position to its wire entry. */
+/** Maps one "wqPrjWebTransaction" row of the current result-set position to its wire entry. */
 @Component
-public class CcItemMapper {
+public class WebTransactionMapper {
 
-    /** The row's entry; its "type" id resolves through {@code codes}. */
-    public ItemEntry toEntry(ResultSet rs, TypeCodes codes) throws SQLException {
+    /** The row's entry; "type" is the stored code (plan D1). */
+    public TransactionEntry toEntry(ResultSet rs) throws SQLException {
         OffsetDateTime occurredAt = rs.getObject("occurredAt", OffsetDateTime.class);
-        return new ItemEntry(
+        return new TransactionEntry(
                 SourceKind.ofCode(rs.getShort("source")).name(),
                 rs.getString("sourceId"),
                 occurredAt == null ? null : occurredAt.toInstant(),
@@ -23,7 +22,7 @@ public class CcItemMapper {
                 rs.getString("productType"),
                 rs.getString("batchId"),
                 rs.getString("subBatchId"),
-                codes.codeOf(rs.getShort("type")),
+                rs.getString("type"),
                 rs.getBigDecimal("amount"),
                 rs.getString("currency"),
                 rs.getBigDecimal("balanceAfter"),

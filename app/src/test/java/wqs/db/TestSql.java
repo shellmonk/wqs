@@ -58,7 +58,7 @@ public final class TestSql {
         return jdbc.sql(sql).params(args).query((rs, n) -> get(rs, 1, type)).list();
     }
 
-    /** {@code count(*)} over {@code fromClause}, e.g. {@code "\"wqSession\" where ..."}. */
+    /** {@code count(*)} over {@code fromClause}, e.g. {@code "\"wqPrjSession\" where ..."}. */
     public int count(String fromClause, Object... args) {
         return value("select count(*)::int from " + fromClause, Integer.class, args);
     }

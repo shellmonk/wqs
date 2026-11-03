@@ -19,7 +19,7 @@ import wqs.db.PartitionManager;
 import wqs.db.PartitionProvisioner;
 import wqs.db.PartitionedTable;
 import wqs.db.PostgresTestBase;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 import wqs.ingest.stream.StreamOffsetStore;
@@ -48,7 +48,7 @@ class ProjectionWriterTest extends PostgresTestBase {
     void setUp() {
         partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 7), 0);
         clearProjection();
-        db().execute("delete from \"wqStreamOffset\"");
+        db().execute("delete from \"wqIngestCursor\"");
     }
 
     @Test
@@ -74,12 +74,12 @@ class ProjectionWriterTest extends PostgresTestBase {
     }
 
     @Test
-    void a_failing_item_rolls_back_the_whole_batch_including_the_offset() {
+    void a_failing_transaction_rolls_back_the_whole_batch_including_the_offset() {
         writer.apply(new ProjectionBatch(STREAM, List.of(tx("tx-1")), 10L));
 
         // Postgres text cannot hold U+0000, so this insert fails at the database -- after tx-3
         // has been written in the same transaction.
-        ProjectionItem unpartitioned = new ProjectionItem(
+        ProjectionTransaction unpartitioned = new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, "tx-bad\u0000", WHEN,
                 "P11", "instants", "b-1", "p-1", TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null);
 
@@ -88,7 +88,7 @@ class ProjectionWriterTest extends PostgresTestBase {
                 .isInstanceOf(RuntimeException.class);
 
         // tx-3 must not survive, and the offset must still be the previous one.
-        assertThat(count("wqWebItem")).isEqualTo(1);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(10L);
     }
 
@@ -106,8 +106,8 @@ class ProjectionWriterTest extends PostgresTestBase {
                 tx("tx-past", past.atDay(15).atStartOfDay(ZoneOffset.UTC).toInstant()),
                 tx("tx-future", future.atDay(15).atStartOfDay(ZoneOffset.UTC).toInstant())), 5L));
 
-        assertThat(count("wqWebItem")).isEqualTo(2);
-        assertThat(count("wqSession")).isEqualTo(2);
+        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
+        assertThat(count("wqPrjSession")).isEqualTo(2);
         assertThat(partitionManager.runwayMonths(past)).isPositive();
         assertThat(partitionManager.runwayMonths(future)).isPositive();
         assertThat(offsetStore.read(STREAM)).contains(5L);
@@ -124,11 +124,11 @@ class ProjectionWriterTest extends PostgresTestBase {
 
     /** D8: recorded in the locator so it stays idempotent, written to nothing else. */
     @Test
-    void zero_amount_item_writes_locator_only() {
+    void zero_amount_transaction_writes_locator_only() {
         WriteResult first = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 1L));
 
-        assertThat(count("wqItemLocator")).isEqualTo(1);
-        assertThat(db().value("select \"zeroAmount\" from \"wqItemLocator\"", Boolean.class)).isTrue();
+        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
+        assertThat(db().value("select \"zeroAmount\" from \"wqPrjTransactionLocator\"", Boolean.class)).isTrue();
         assertNothingProjected();
         assertThat(first.projected()).isZero();
         assertThat(first.skipped()).isEqualTo(1);
@@ -137,28 +137,28 @@ class ProjectionWriterTest extends PostgresTestBase {
         WriteResult again = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 2L));
         assertThat(again.duplicates()).isEqualTo(1);
         assertThat(again.skipped()).isZero();
-        assertThat(count("wqItemLocator")).isEqualTo(1);
+        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
         assertNothingProjected();
     }
 
     /**
-     * A cancel of a zero-amount item has its own amount, so it is projected; it resolves against
+     * A cancel of a zero-amount transaction has its own amount, so it is projected; it resolves against
      * the locator row, marks nothing and never parks -- in either arrival order.
      */
     @Test
-    void cancel_of_zero_amount_item_resolves_and_is_itself_projected() {
+    void cancel_of_zero_amount_transaction_resolves_and_is_itself_projected() {
         for (boolean cancelFirst : new boolean[] {false, true}) {
             clearProjection();
-            ProjectionItem target = zero("z-1");
-            ProjectionItem cancel = cancelOf("c-1", "z-1", new BigDecimal("-2.0000"));
-            List<ProjectionItem> order = cancelFirst ? List.of(cancel, target) : List.of(target, cancel);
+            ProjectionTransaction target = zero("z-1");
+            ProjectionTransaction cancel = cancelOf("c-1", "z-1", new BigDecimal("-2.0000"));
+            List<ProjectionTransaction> order = cancelFirst ? List.of(cancel, target) : List.of(target, cancel);
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(0)), 1L));
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
 
-            assertThat(count("wqWebItem")).as("cancelFirst=" + cancelFirst).isEqualTo(1);
-            assertThat(db().value("select \"sourceId\" from \"wqWebItem\"", String.class)).isEqualTo("c-1");
-            assertThat(db().value("select count(*)::int from \"wqWebItem\" where \"cancelled\"", Integer.class)).isZero();
-            assertThat(count("wqPendingCancel")).as("cancelFirst=" + cancelFirst).isZero();
+            assertThat(count("wqPrjWebTransaction")).as("cancelFirst=" + cancelFirst).isEqualTo(1);
+            assertThat(db().value("select \"sourceId\" from \"wqPrjWebTransaction\"", String.class)).isEqualTo("c-1");
+            assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\" where \"cancelled\"", Integer.class)).isZero();
+            assertThat(count("wqPrjPendingCancel")).as("cancelFirst=" + cancelFirst).isZero();
             assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
         }
     }
@@ -168,42 +168,42 @@ class ProjectionWriterTest extends PostgresTestBase {
     void zero_amount_cancel_is_locator_only_and_still_cancels_its_target() {
         for (boolean cancelFirst : new boolean[] {false, true}) {
             clearProjection();
-            ProjectionItem target = unsessioned("t-1", "lottery", new BigDecimal("3.0000"));
-            ProjectionItem cancel = cancelOf("c-1", "t-1", BigDecimal.ZERO);
-            List<ProjectionItem> order = cancelFirst ? List.of(cancel, target) : List.of(target, cancel);
+            ProjectionTransaction target = unsessioned("t-1", "lottery", new BigDecimal("3.0000"));
+            ProjectionTransaction cancel = cancelOf("c-1", "t-1", BigDecimal.ZERO);
+            List<ProjectionTransaction> order = cancelFirst ? List.of(cancel, target) : List.of(target, cancel);
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(0)), 1L));
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
 
-            assertThat(count("wqItemLocator")).isEqualTo(2);
-            assertThat(count("wqWebItem")).as("only the target has an item row").isEqualTo(1);
-            assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\"").asMap().values().toArray())
+            assertThat(count("wqPrjTransactionLocator")).isEqualTo(2);
+            assertThat(count("wqPrjWebTransaction")).as("only the target has a transaction row").isEqualTo(1);
+            assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqPrjWebTransaction\"").asMap().values().toArray())
                     .as("cancelFirst=" + cancelFirst).containsExactly(true, "c-1");
-            assertThat(count("wqPendingCancel")).isZero();
+            assertThat(count("wqPrjPendingCancel")).isZero();
             assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
         }
     }
 
-    /** D6 / O-4: a session is single-currency; the offending item alone is dead-lettered. */
+    /** D6 / O-4: a session is single-currency; the offending transaction alone is dead-lettered. */
     @Test
     void currency_mismatch_in_session_dead_letters() {
         writer.apply(new ProjectionBatch(STREAM, List.of(inSession("e-1", "EUR")), 1L));
-        List<String> sessionBefore = db().lines("select * from \"wqSession\"");
+        List<String> sessionBefore = db().lines("select * from \"wqPrjSession\"");
 
         WriteResult result = writer.apply(new ProjectionBatch(STREAM,
                 List.of(inSession("u-1", "USD"), tx("other")), 3L, List.of(2L, 3L)));
 
         assertThat(result.deadLettered()).isEqualTo(1);
         assertThat(result.projected()).isEqualTo(1);
-        assertThat(db().lines("select * from \"wqSession\" where \"batchId\" = 'b-shared'"))
+        assertThat(db().lines("select * from \"wqPrjSession\" where \"batchId\" = 'b-shared'"))
                 .isEqualTo(sessionBefore);
-        assertThat(db().count("\"wqItemLocator\" where \"sourceId\" = 'u-1'"))
+        assertThat(db().count("\"wqPrjTransactionLocator\" where \"sourceId\" = 'u-1'"))
                 .as("not even the locator").isZero();
         assertThat(deadLetters()).containsExactly("u-1|2|currency-mismatch");
         assertThat(offsetStore.read(STREAM)).contains(3L);
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
-    /** D7 / P-7: an eInstant item must be sessioned; one that is not is dead-lettered. */
+    /** D7 / P-7: an eInstant transaction must be sessioned; one that is not is dead-lettered. */
     @Test
     void einstant_without_batch_dead_letters() {
         WriteResult result = writer.apply(new ProjectionBatch(STREAM,
@@ -213,7 +213,7 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.deadLettered()).isEqualTo(1);
         assertThat(result.projected()).isEqualTo(1);
-        assertThat(db().count("\"wqItemLocator\" where \"sourceId\" = 'ei-1'")).isZero();
+        assertThat(db().count("\"wqPrjTransactionLocator\" where \"sourceId\" = 'ei-1'")).isZero();
         assertThat(deadLetters()).containsExactly("ei-1|7|einstant-unsessioned");
         assertThat(offsetStore.read(STREAM)).contains(8L);
     }
@@ -225,8 +225,8 @@ class ProjectionWriterTest extends PostgresTestBase {
      */
     @Test
     void an_unsessioned_einstant_cancel_cancels_its_target() {
-        ProjectionItem target = inSession("ei-t", "EUR");
-        ProjectionItem cancel = new ProjectionItem(
+        ProjectionTransaction target = inSession("ei-t", "EUR");
+        ProjectionTransaction cancel = new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, "ei-c", WHEN.plusSeconds(60), "P11", "instants", null, null,
                 TxTypes.CANCEL, new BigDecimal("-5.0000"), "EUR", null, "ei-t", null);
 
@@ -234,13 +234,45 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.deadLettered()).isZero();
         assertThat(deadLetters()).isEmpty();
-        assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqWebItem\" where \"sourceId\" = 'ei-t'").asMap().values().toArray()).containsExactly(true, "ei-c");
+        assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqPrjWebTransaction\" where \"sourceId\" = 'ei-t'").asMap().values().toArray()).containsExactly(true, "ei-c");
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
+    /**
+     * Plan D1: a type code the enum does not list is projected, never rejected -- stored as-is in
+     * both views and counted under its own code -- and rolls up NEUTRAL: it moves neither
+     * totalPlays nor totalWins, while a known PLAY code in the same session does.
+     */
+    @Test
+    void an_unknown_type_code_is_stored_as_is_and_rolls_up_neutral() {
+        ProjectionTransaction unknown = new ProjectionTransaction(
+                7L, SourceKind.TRANSACTION, "tx-unknown", WHEN, "P11", "instants", "b-u", "p-1",
+                "TT_NEVER_SEEN_BEFORE", new BigDecimal("-7.0000"), "EUR", null, null, null);
+        ProjectionTransaction play = new ProjectionTransaction(
+                7L, SourceKind.TRANSACTION, "tx-play", WHEN.plusSeconds(1), "P11", "instants", "b-u", "p-1",
+                TxTypes.PLAY, new BigDecimal("-5.0000"), "EUR", null, null, null);
+
+        WriteResult result = writer.apply(new ProjectionBatch(STREAM, List.of(unknown, play), 1L));
+
+        assertThat(result.projected()).isEqualTo(2);
+        assertThat(deadLetters()).isEmpty();
+        for (String table : List.of("wqPrjWebTransaction", "wqPrjCcTransaction")) {
+            assertThat(db().value("select \"type\" from \"" + table + "\" where \"sourceId\" = 'tx-unknown'",
+                    String.class)).as(table).isEqualTo("TT_NEVER_SEEN_BEFORE");
+        }
+        assertThat(db().value("""
+                select count(*)::int from "wqPrjCountDay" where "type" = 'TT_NEVER_SEEN_BEFORE'""", Integer.class))
+                .as("counted under its own code: (instants, code) and (ALL, code), per view").isEqualTo(4);
+        var session = db().row("""
+                select "txCount", "totalPlays", "totalWins" from "wqPrjSession" where "batchId" = 'b-u'""");
+        assertThat(session.get("txCount", Integer.class)).isEqualTo(2);
+        assertThat(session.get("totalPlays", BigDecimal.class)).as("only the PLAY code").isEqualByComparingTo("5.0000");
+        assertThat(session.get("totalWins", BigDecimal.class)).isEqualByComparingTo("0");
+    }
+
     private void assertNothingProjected() {
-        for (String table : List.of("wqWebItem", "wqCcItem", "wqGroupLocator", "wqSession", "wqPlay",
-                "wqWebHighLevel", "wqCcHighLevel", "wqCountDay", "wqCountMonth", "wqPendingCancel")) {
+        for (String table : List.of("wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjGroupLocator", "wqPrjSession", "wqPrjPlay",
+                "wqPrjWebHighLevel", "wqPrjCcHighLevel", "wqPrjCountDay", "wqPrjCountMonth", "wqPrjPendingCancel")) {
             assertThat(count(table)).as(table).isZero();
         }
     }
@@ -250,26 +282,26 @@ class ProjectionWriterTest extends PostgresTestBase {
                 + " from \"wqDeadLetter\" order by \"deadLetterId\"", String.class);
     }
 
-    private ProjectionItem zero(String sourceId) {
-        return new ProjectionItem(
+    private ProjectionTransaction zero(String sourceId) {
+        return new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, sourceId, WHEN, "P11", "instants", "b-z", "p-z",
                 TxTypes.WIN, new BigDecimal("0.0000"), "EUR", null, null, null);
     }
 
-    private ProjectionItem cancelOf(String sourceId, String target, BigDecimal amount) {
-        return new ProjectionItem(
+    private ProjectionTransaction cancelOf(String sourceId, String target, BigDecimal amount) {
+        return new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, sourceId, WHEN.plusSeconds(60), "P13", "lottery", null, null,
                 TxTypes.CANCEL, amount, "EUR", null, target, null);
     }
 
-    private ProjectionItem unsessioned(String sourceId, String productType, BigDecimal amount) {
-        return new ProjectionItem(
+    private ProjectionTransaction unsessioned(String sourceId, String productType, BigDecimal amount) {
+        return new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, sourceId, WHEN, "P13", productType, null, null,
                 TxTypes.PLAY, amount, "EUR", null, null, null);
     }
 
-    private ProjectionItem inSession(String sourceId, String currency) {
-        return new ProjectionItem(
+    private ProjectionTransaction inSession(String sourceId, String currency) {
+        return new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, sourceId, WHEN, "P11", "instants",
                 "b-shared", "p-1", TxTypes.PLAY, new BigDecimal("5.0000"), currency, null, null, null);
     }
@@ -282,12 +314,12 @@ class ProjectionWriterTest extends PostgresTestBase {
         provisioner.forgetKnownMonths();
     }
 
-    private ProjectionItem tx(String sourceId) {
+    private ProjectionTransaction tx(String sourceId) {
         return tx(sourceId, WHEN);
     }
 
-    private ProjectionItem tx(String sourceId, Instant at) {
-        return new ProjectionItem(
+    private ProjectionTransaction tx(String sourceId, Instant at) {
+        return new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, sourceId, at, "P11", "instants", "b-" + sourceId, "p-1",
                 TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null);
     }

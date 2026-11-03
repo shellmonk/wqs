@@ -18,14 +18,13 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.config.ReaderJdbc;
 import wqs.config.ReaderTx;
-import wqs.db.TxTypeRegistry;
 import wqs.domain.PageUnit;
 import wqs.domain.ViewKind;
 import wqs.read.Segment.Tier;
 
 /**
  * Paged reads assembled from counters and live slices (spec 7.5, 7.6), for both page units: level
- * 0 pages the view's item table (ITEM), levels 1 and 2 its high-level page index (HIGH_LEVEL). One
+ * 0 pages the view's transaction table (TRANSACTION), levels 1 and 2 its high-level page index (HIGH_LEVEL). One
  * counter-assisted offset walk serves both; a per-unit adapter supplies the counter key, the live
  * count and the key query.
  *
@@ -40,7 +39,6 @@ public class ProjectionReader {
 
     private final JdbcClient readerJdbc;
     private final TransactionTemplate readerTx;
-    private final TxTypeRegistry txTypes;
     private final CounterReader counters;
     private final ReadProperties properties;
     private final ReadMetrics metrics;
@@ -51,11 +49,10 @@ public class ProjectionReader {
      * @throws IllegalStateException if a view has none or several
      */
     public ProjectionReader(
-            @ReaderJdbc JdbcClient readerJdbc, @ReaderTx TransactionTemplate readerTx, TxTypeRegistry txTypes,
+            @ReaderJdbc JdbcClient readerJdbc, @ReaderTx TransactionTemplate readerTx,
             CounterReader counters, ReadProperties properties, ReadMetrics metrics, List<HighLevelQuery> highLevelQueries) {
         this.readerJdbc = readerJdbc;
         this.readerTx = readerTx;
-        this.txTypes = txTypes;
         this.counters = counters;
         this.properties = properties;
         this.metrics = metrics;
@@ -80,25 +77,20 @@ public class ProjectionReader {
 
     /**
      * One level-0 page by counter-assisted offset (spec 7.6), in one REPEATABLE READ transaction:
-     * the walk (see {@link #walk}) finds the page's item keys, which are then fetched. A page past
+     * the walk (see {@link #walk}) finds the page's projected transaction keys, which are then fetched. A page past
      * the end -- including any offset that overflows a long -- is empty with correct totals
      * (spec 7.9).
      */
     public ProjectionPage readLevel0(Level0Query q, Level0Request r) {
         long effective = effectivePageSize(r.pageSize());
-        Outcome<ItemEntry> out = readerTx.execute(status -> {
+        Outcome<TransactionEntry> out = readerTx.execute(status -> {
             JdbcClient tx = readerJdbc;
             Level0Filter f = r.filter();
             if (!r.transactionTypes().isEmpty()) {
-                // Resolved through the reader's own tx (M2): never the writer pool.
-                Set<Short> ids = txTypes.idsOf(tx, r.transactionTypes());
-                if (ids.isEmpty()) {
-                    // Nothing can match: no slice, no totals, no SQL beyond the lookup.
-                    return new Outcome<>(Walk.none(), List.of());
-                }
-                f = f.withTypeIds(ids);
+                // Matched as text (plan D2): an unknown code matches nothing, no lookup needed.
+                f = f.withTypeCodes(r.transactionTypes());
             }
-            Walk<ItemKey> w = walk(tx, itemUnit(q, f), r.from(), r.to(), r.page(), effective);
+            Walk<TransactionKey> w = walk(tx, transactionUnit(q, f), r.from(), r.to(), r.page(), effective);
             return new Outcome<>(w, w.walked() ? q.fetch(tx, f.userId(), w.keys()) : List.of());
         });
 
@@ -108,15 +100,15 @@ public class ProjectionReader {
         return new ProjectionPage(r.page(), effective, total, totalPages, LEVEL_0, out.entries());
     }
 
-    /** Exact item count of [from, to), in one REPEATABLE READ transaction. */
+    /** Exact projected transaction count of [from, to), in one REPEATABLE READ transaction. */
     public long total(Level0Query q, Level0Filter f, Instant from, Instant to) {
-        return readerTx.execute(status -> segmentCounts(readerJdbc, itemUnit(q, f), from, to).total());
+        return readerTx.execute(status -> segmentCounts(readerJdbc, transactionUnit(q, f), from, to).total());
     }
 
-    /** Per-segment ITEM counts of [from, to): counters for whole months and days, live for the rest. */
+    /** Per-segment TRANSACTION counts of [from, to): counters for whole months and days, live for the rest. */
     public SegmentCounts segmentCounts(
             JdbcClient tx, Level0Query q, Level0Filter f, Instant from, Instant to) {
-        return segmentCounts(tx, itemUnit(q, f), from, to);
+        return segmentCounts(tx, transactionUnit(q, f), from, to);
     }
 
     // ------------------------------------------------------------------ levels 1-2
@@ -174,7 +166,7 @@ public class ProjectionReader {
      * and excludeCancelled), a live count and an ordered key query over a sub-range.
      */
     private record Unit<K>(
-            PageUnit pageUnit, ViewKind view, long userId, Set<String> productTypes, Set<Short> typeIds,
+            PageUnit pageUnit, ViewKind view, long userId, Set<String> productTypes, Set<String> typeCodes,
             boolean excludeCancelled, LiveCount count, KeyQuery<K> keys, Function<K, Instant> occurredAt) {}
 
     @FunctionalInterface
@@ -187,12 +179,12 @@ public class ProjectionReader {
         List<K> keys(JdbcClient tx, Instant lo, Instant hi, long offset, int limit);
     }
 
-    private static Unit<ItemKey> itemUnit(Level0Query q, Level0Filter f) {
-        return new Unit<>(PageUnit.ITEM, q.view(), f.userId(), f.productTypes(), f.typeIds(),
+    private static Unit<TransactionKey> transactionUnit(Level0Query q, Level0Filter f) {
+        return new Unit<>(PageUnit.TRANSACTION, q.view(), f.userId(), f.productTypes(), f.typeCodes(),
                 f.excludeCancelled(),
                 (tx, lo, hi) -> q.count(tx, f, lo, hi),
                 (tx, lo, hi, offset, limit) -> q.keys(tx, f, lo, hi, offset, limit),
-                ItemKey::occurredAt);
+                TransactionKey::occurredAt);
     }
 
     private static Unit<HighLevelKey> highLevelUnit(HighLevelQuery q, HighLevelFilter f) {
@@ -208,10 +200,6 @@ public class ProjectionReader {
      * query ran); {@code partitionsTouched} is the number of distinct UTC months among the keys.
      */
     private record Walk<K>(long total, int counterRows, long residual, List<K> keys, int partitionsTouched) {
-
-        static <K> Walk<K> none() {
-            return new Walk<>(0, 0, -1, List.of(), 0);
-        }
 
         boolean walked() {
             return residual >= 0;
@@ -286,10 +274,10 @@ public class ProjectionReader {
             LocalDate oldest = period(run.get(run.size() - 1));
             if (run.get(0).tier() == Tier.MONTH) {
                 months.putAll(counters.monthCounts(tx, u.userId(), u.view(), u.pageUnit(), u.productTypes(),
-                        u.typeIds(), u.excludeCancelled(), oldest, newest));
+                        u.typeCodes(), u.excludeCancelled(), oldest, newest));
             } else {
                 days.putAll(counters.dayCounts(tx, u.userId(), u.view(), u.pageUnit(), u.productTypes(),
-                        u.typeIds(), u.excludeCancelled(), oldest, newest));
+                        u.typeCodes(), u.excludeCancelled(), oldest, newest));
             }
         }
         long[] counts = new long[segments.size()];

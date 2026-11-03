@@ -9,7 +9,7 @@ import wqs.domain.MoneyDirection;
 /**
  * The one oracle for the projection's derived state (spec 8.1 P-2, P-4, P-8). Each method
  * recomputes what the incremental write path maintains -- counters, rollups and group locators,
- * the page index -- from the item rows alone, compares it with what is stored, and returns one
+ * the page index -- from the transaction rows alone, compares it with what is stored, and returns one
  * human-readable line per discrepancy: empty when the invariant holds.
  *
  * Deliberately slow-but-obvious SQL over the whole projection: these are the reference
@@ -20,14 +20,14 @@ import wqs.domain.MoneyDirection;
  *
  * The spec semantics checked here, which the write path must also follow:
  * <ul>
- *   <li>A cancellation is an item row ("cancels" non-blank). It is counted at the ITEM page unit
+ *   <li>A cancellation is a transaction row ("cancels" non-blank). It is counted at the TRANSACTION page unit
  *       like any row, but never rolls up and never gets a page-index row.</li>
- *   <li>A session's key is (MIN occurredAt, the FIRST item's productType) over its
- *       non-cancellation items, cancelled or not -- a cancel never moves a row. First is by
- *       ("occurredAt", "sourceId", "source") (plan D6); its productId is the same item's, so the
- *       pair always belongs to one item. A session is single-currency (mismatches are
- *       dead-lettered), so its currency is any item's -- MIN here.</li>
- *   <li>A zero-amount item is in the locator only ("zeroAmount"), in no table checked here; a
+ *   <li>A session's key is (MIN occurredAt, the FIRST transaction's productType) over its
+ *       non-cancellation transactions, cancelled or not -- a cancel never moves a row. First is by
+ *       ("occurredAt", "sourceId", "source") (plan D6); its productId is the same transaction's, so the
+ *       pair always belongs to one transaction. A session is single-currency (mismatches are
+ *       dead-lettered), so its currency is any transaction's -- MIN here.</li>
+ *   <li>A zero-amount transaction is in the locator only ("zeroAmount"), in no table checked here; a
  *       zero-amount cancel's target is in the locator's "cancels" and still counts as a
  *       cancel.</li>
  *   <li>Counters are sparse: a stored row with cntAll = 0 is itself drift.</li>
@@ -54,9 +54,9 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * Cancellation itself (spec 6.3), per view item table: an item is "cancelled" exactly when a
-     * cancel for it exists -- a cancel item row, or a zero-amount cancel's locator row -- same source, same user, "cancels" = its sourceId -- and then
-     * "cancelledBy" is the least such cancel's sourceId (null otherwise). And "wqPendingCancel"
+     * Cancellation itself (spec 6.3), per view transaction table: a transaction is "cancelled" exactly when a
+     * cancel for it exists -- a cancel transaction row, or a zero-amount cancel's locator row -- same source, same user, "cancels" = its sourceId -- and then
+     * "cancelledBy" is the least such cancel's sourceId (null otherwise). And "wqPrjPendingCancel"
      * holds exactly the cancels whose target is absent (no locator row with that source,
      * sourceId and user).
      *
@@ -70,12 +70,12 @@ public final class ProjectionInvariants {
         // only (spec 4.1) yet still cancel their target.
         String allCancels = """
                 select c."source", c."userId", c."sourceId", c."cancels" as target
-                from "wqCcItem" c where %s
+                from "wqPrjCcTransaction" c where %s
                 union all
                 select l."source", l."userId", l."sourceId", l."cancels"
-                from "wqItemLocator" l where l."zeroAmount" and l."cancels" is not null
+                from "wqPrjTransactionLocator" l where l."zeroAmount" and l."cancels" is not null
                 """.formatted(cancels);
-        for (String[] view : new String[][] {{"WEB", "wqWebItem"}, {"CC", "wqCcItem"}}) {
+        for (String[] view : new String[][] {{"WEB", "wqPrjWebTransaction"}, {"CC", "wqPrjCcTransaction"}}) {
             drift.addAll(sql.rows("""
                     with cancel as (
                         select "source", "userId", target, min("sourceId") as "by"
@@ -101,7 +101,7 @@ public final class ProjectionInvariants {
                 with expected as (
                     select c."source", c."sourceId", c.target as "cancels", c."userId"
                     from (%2$s) c
-                    where not exists (select 1 from "wqItemLocator" l
+                    where not exists (select 1 from "wqPrjTransactionLocator" l
                                       where l."source" = c."source" and l."sourceId" = c.target
                                         and l."userId" = c."userId")
                 )
@@ -112,7 +112,7 @@ public final class ProjectionInvariants {
                        coalesce(e."sourceId", p."cancelSourceId") as "cancelSourceId",
                        coalesce(e."cancels", p."cancelsSourceId") as "cancelsSourceId"
                 from expected e
-                full outer join "wqPendingCancel" p
+                full outer join "wqPrjPendingCancel" p
                   on p."source" = e."source" and p."cancelSourceId" = e."sourceId"
                  and p."cancelsSourceId" = e."cancels" and p."userId" = e."userId"
                 where e."sourceId" is null or p."cancelSourceId" is null
@@ -126,36 +126,36 @@ public final class ProjectionInvariants {
      * P-2: every counter row in both tiers equals a live COUNT, and no other counter row exists.
      *
      * Expected rows, per view, page unit, tier, product-type key, type key and UTC period (day,
-     * or first of the month): ITEM from the view's item rows (cancellation rows included; excl =
+     * or first of the month): TRANSACTION from the view's transaction rows (cancellation rows included; excl =
      * not cancelled); HIGH_LEVEL from the view's page-index rows at each row's own (occurredAt,
      * productType) -- a session row already sits at the session key -- with excl =
      * "visibleExclCancelled". Each row counts under its own product type (when it has one) and the
      * ALL sentinel ''. A productType of '' counts once, as the write path's key set does.
      *
-     * The type key (D4): an ITEM row counts under its own "type" and the ALL sentinel 0, crossed
+     * The type key (D4): a TRANSACTION row counts under its own "type" and the ALL sentinel '', crossed
      * with its product keys -- four keys, or two without a product type. HIGH_LEVEL rows never
-     * carry a type: only the type sentinel 0.
+     * carry a type: only the type sentinel ''.
      */
     public List<String> counterDrift() {
         return sql.rows("""
                 with src as (
                     select 1 as v, 0 as u, "userId", "occurredAt" as t, "productType" as p,
-                           not "cancelled" as vis, "type"::int as ty from "wqWebItem"
+                           not "cancelled" as vis, "type" as ty from "wqPrjWebTransaction"
                   union all
-                    select 2, 0, "userId", "occurredAt", "productType", not "cancelled", "type"::int
-                    from "wqCcItem"
+                    select 2, 0, "userId", "occurredAt", "productType", not "cancelled", "type"
+                    from "wqPrjCcTransaction"
                   union all
-                    select 1, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", 0
-                    from "wqWebHighLevel"
+                    select 1, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", ''
+                    from "wqPrjWebHighLevel"
                   union all
-                    select 2, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", 0
-                    from "wqCcHighLevel"
+                    select 2, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", ''
+                    from "wqPrjCcHighLevel"
                 ),
                 keyed as (
                     select distinct v, u, "userId", pk.prod, tk.typ, t, vis, src_id
                     from (select row_number() over () as src_id, * from src) s,
                          lateral (values (s.p), ('')) as pk(prod),
-                         lateral (values (s.ty), (0)) as tk(typ)
+                         lateral (values (s.ty), ('')) as tk(typ)
                     where pk.prod is not null
                 ),
                 expected as (
@@ -171,13 +171,13 @@ public final class ProjectionInvariants {
                 ),
                 stored as (
                     select 'day' as tier, "userId", "viewKind"::int as v, "pageUnit"::int as u,
-                           "productType" as prod, "typeId"::int as typ, "period", "cntAll",
+                           "productType" as prod, "type" as typ, "period", "cntAll",
                            "cntExclCancelled" as "cntExcl"
-                    from "wqCountDay"
+                    from "wqPrjCountDay"
                   union all
-                    select 'month', "userId", "viewKind", "pageUnit", "productType", "typeId",
+                    select 'month', "userId", "viewKind", "pageUnit", "productType", "type",
                            "period", "cntAll", "cntExclCancelled"
-                    from "wqCountMonth"
+                    from "wqPrjCountMonth"
                 )
                 select case when e.tier is null then 'orphan counter row'
                             when s.tier is null then 'missing counter row'
@@ -185,9 +185,9 @@ public final class ProjectionInvariants {
                        coalesce(e.tier, s.tier) as tier,
                        coalesce(e."userId", s."userId") as "userId",
                        coalesce(e.v, s.v) as "viewKind",
-                       case coalesce(e.u, s.u) when 0 then 'ITEM' else 'HIGH_LEVEL' end as "pageUnit",
+                       case coalesce(e.u, s.u) when 0 then 'TRANSACTION' else 'HIGH_LEVEL' end as "pageUnit",
                        coalesce(e.prod, s.prod) as "productType",
-                       coalesce(e.typ, s.typ) as "typeId",
+                       coalesce(e.typ, s.typ) as "type",
                        coalesce(e.period, s.period) as period,
                        e."cntAll" as "expectedAll", s."cntAll" as "storedAll",
                        e."cntExcl" as "expectedExcl", s."cntExcl" as "storedExcl"
@@ -203,17 +203,18 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * P-4: every session and play row equals a fold over its items, and "wqGroupLocator" points
+     * P-4: every session and play row equals a fold over its transactions, and "wqPrjGroupLocator" points
      * at each group's row.
      *
-     * Expected from the non-cancellation sessioned rows of "wqCcItem" (every source feeds /cc):
+     * Expected from the non-cancellation sessioned rows of "wqPrjCcTransaction" (every source feeds /cc):
      * txCount and its ExclCancelled form; playCount = distinct non-null subBatchId,
-     * playCountExclCancelled = plays with at least one non-cancelled item; totalPlays, totalWins
-     * (abs(amount) by the type's "wqTxType" direction, exactly as {@link RollupUpdater}) and net
+     * playCountExclCancelled = plays with at least one non-cancelled transaction; totalPlays, totalWins
+     * (abs(amount) by the type's {@link wqs.domain.TransactionType} direction, exactly as
+     * {@link RollupUpdater}) and net
      * = wins - plays, each with its ExclCancelled form; startedAt = MIN occurredAt, endedAt = MAX,
-     * productId and productType = the first item's pair by (occurredAt, sourceId, source),
+     * productId and productType = the first transaction's pair by (occurredAt, sourceId, source),
      * currency = MIN (the session is single-currency). Session and play locators sit at the row's
-     * startedAt. Orphan rows (no items) and missing rows are reported too.
+     * startedAt. Orphan rows (no transactions) and missing rows are reported too.
      */
     public List<String> aggregationDrift() {
         String plays = money(MoneyDirection.PLAY);
@@ -223,7 +224,7 @@ public final class ProjectionInvariants {
                        i."productType", i."currency"::text as currency, i."cancelled",
                        i."sourceId", i."source",
                        %s as plays, %s as wins
-                from "wqCcItem" i
+                from "wqPrjCcTransaction" i
                 where i."batchId" is not null and %s
                 """.formatted(plays, wins, NOT_A_CANCELLATION);
         String folded = """
@@ -258,13 +259,13 @@ public final class ProjectionInvariants {
 
         List<String> drift = new ArrayList<>();
         drift.addAll(sql.rows("""
-                with items as (%1$s),
+                with transactions as (%1$s),
                 expected as (
                     select "userId", "batchId", %2$s,
                            count(distinct "subBatchId")::int as "playCount",
                            count(distinct "subBatchId") filter (where not "cancelled")::int
                              as "playCountExclCancelled"
-                    from items group by 1, 2
+                    from transactions group by 1, 2
                 )
                 select case when e."batchId" is null then 'orphan session row'
                             when s."batchId" is null then 'missing session row'
@@ -273,7 +274,7 @@ public final class ProjectionInvariants {
                        coalesce(e."batchId", s."batchId") as "batchId",
                        e::text as expected, s::text as stored
                 from expected e
-                full outer join "wqSession" s
+                full outer join "wqPrjSession" s
                   on s."userId" = e."userId" and s."batchId" = e."batchId"
                 where e."batchId" is null or s."batchId" is null
                    or %3$s
@@ -283,10 +284,10 @@ public final class ProjectionInvariants {
                 """.formatted(sessioned, folded, compared))
                 .stream().map(ProjectionInvariants::describe).toList());
         drift.addAll(sql.rows("""
-                with items as (%1$s),
+                with transactions as (%1$s),
                 expected as (
                     select "userId", "batchId", "subBatchId", %2$s
-                    from items where "subBatchId" is not null group by 1, 2, 3
+                    from transactions where "subBatchId" is not null group by 1, 2, 3
                 )
                 select case when e."batchId" is null then 'orphan play row'
                             when s."batchId" is null then 'missing play row'
@@ -296,7 +297,7 @@ public final class ProjectionInvariants {
                        coalesce(e."subBatchId", s."subBatchId") as "subBatchId",
                        e::text as expected, s::text as stored
                 from expected e
-                full outer join "wqPlay" s
+                full outer join "wqPrjPlay" s
                   on s."userId" = e."userId" and s."batchId" = e."batchId"
                  and s."subBatchId" = e."subBatchId"
                 where e."batchId" is null or s."batchId" is null or %3$s
@@ -304,13 +305,13 @@ public final class ProjectionInvariants {
                 """.formatted(sessioned, folded, compared))
                 .stream().map(ProjectionInvariants::describe).toList());
         drift.addAll(sql.rows("""
-                with items as (%1$s),
+                with transactions as (%1$s),
                 expected as (
                     select "userId", "batchId", '' as "subBatchId", min("occurredAt") as "startedAt"
-                    from items group by 1, 2
+                    from transactions group by 1, 2
                   union all
                     select "userId", "batchId", "subBatchId", min("occurredAt")
-                    from items where "subBatchId" is not null group by 1, 2, 3
+                    from transactions where "subBatchId" is not null group by 1, 2, 3
                 )
                 select case when e."batchId" is null then 'orphan group locator'
                             when l."batchId" is null then 'missing group locator'
@@ -320,7 +321,7 @@ public final class ProjectionInvariants {
                        coalesce(e."subBatchId", l."subBatchId") as "subBatchId",
                        e."startedAt" as "expectedStartedAt", l."startedAt" as "storedStartedAt"
                 from expected e
-                full outer join "wqGroupLocator" l
+                full outer join "wqPrjGroupLocator" l
                   on l."userId" = e."userId" and l."batchId" = e."batchId"
                  and l."subBatchId" = e."subBatchId"
                 where e."batchId" is null or l."batchId" is null
@@ -332,24 +333,24 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * P-8: each page-index table holds exactly the rows its view's items justify, at the right
+     * P-8: each page-index table holds exactly the rows its view's transactions justify, at the right
      * key and with the right visibility.
      *
-     * Per view V (its item table holds exactly the items whose source feeds V): one session row
-     * for each session with at least one non-cancellation item in V, at the session key
-     * (startedAt, productType) over ALL the session's non-cancellation items -- the product being
-     * the first item's by (occurredAt, sourceId, source), productId from the same item and carried
-     * on the row -- visible iff at least one of its non-cancellation items in V is not cancelled,
+     * Per view V (its transaction table holds exactly the transactions whose source feeds V): one session row
+     * for each session with at least one non-cancellation transaction in V, at the session key
+     * (startedAt, productType) over ALL the session's non-cancellation transactions -- the product being
+     * the first transaction's by (occurredAt, sourceId, source), productId from the same transaction and carried
+     * on the row -- visible iff at least one of its non-cancellation transactions in V is not cancelled,
      * carrying the session's currency; and one row per non-cancellation
-     * unsessioned item in V, at the item's own (occurredAt, productType) with its own productId
+     * unsessioned transaction in V, at the transaction's own (occurredAt, productType) with its own productId
      * and currency,
-     * visible iff the item is not cancelled. Rows are matched on (userId, kind, refId), so a row at the
+     * visible iff the transaction is not cancelled. Rows are matched on (userId, kind, refId), so a row at the
      * wrong key reads as a key mismatch rather than an orphan plus a missing row.
      */
     public List<String> highLevelDrift() {
         List<String> drift = new ArrayList<>();
         for (String[] view : new String[][] {
-                {"WEB", "wqWebItem", "wqWebHighLevel"}, {"CC", "wqCcItem", "wqCcHighLevel"}}) {
+                {"WEB", "wqPrjWebTransaction", "wqPrjWebHighLevel"}, {"CC", "wqPrjCcTransaction", "wqPrjCcHighLevel"}}) {
             drift.addAll(sql.rows("""
                     with session_key as (
                         select i."userId", i."batchId", min(i."occurredAt") as "startedAt",
@@ -358,7 +359,7 @@ public final class ProjectionInvariants {
                                (array_agg(i."productType"
                                     order by i."occurredAt", i."sourceId", i."source"))[1] as "productType",
                                min(i."currency"::text) as currency
-                        from "wqCcItem" i
+                        from "wqPrjCcTransaction" i
                         where i."batchId" is not null and %3$s
                         group by 1, 2
                     ),
@@ -412,8 +413,8 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * P-7 (spec 7.4), the stored half: every non-cancellation item whose product type is eInstant
-     * carries a non-null "batchId", in both item tables, and so neither view's page index holds an
+     * P-7 (spec 7.4), the stored half: every non-cancellation transaction whose product type is eInstant
+     * carries a non-null "batchId", in both transaction tables, and so neither view's page index holds an
      * unsessioned eInstant row. {@code eInstantProductTypes} is {@code wqs.einstant.product-types}
      * (plan D3); the classification is configuration, which is why this cannot be a check
      * constraint. Cancellations are exempt, as at ingest (IngestRules): they never get a page row.
@@ -425,9 +426,9 @@ public final class ProjectionInvariants {
         }
         String[] types = eInstantProductTypes.toArray(String[]::new);
         for (String[] view : new String[][] {
-                {"WEB", "wqWebItem", "wqWebHighLevel"}, {"CC", "wqCcItem", "wqCcHighLevel"}}) {
+                {"WEB", "wqPrjWebTransaction", "wqPrjWebHighLevel"}, {"CC", "wqPrjCcTransaction", "wqPrjCcHighLevel"}}) {
             drift.addAll(sql.rows("""
-                    select 'unsessioned eInstant item' as problem, '%3$s' as view,
+                    select 'unsessioned eInstant transaction' as problem, '%3$s' as view,
                            i."userId", i."source", i."sourceId", i."productType"
                     from "%1$s" i
                     where i."batchId" is null and i."productType" = any(?::text[]) and %4$s
@@ -447,13 +448,16 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * abs(amount) for the item types whose "wqTxType" direction is {@code direction}, else 0.
-     * The direction is read from the same table the write path's registry reads, so this can
-     * never disagree with the write path's mapping.
+     * abs(amount) for the transaction types whose {@link wqs.domain.TransactionType} direction is
+     * {@code direction}, else 0. The codes come from the same enum the write path reads, so this
+     * can never disagree with the write path's mapping; an unknown code is in no list (NEUTRAL).
      */
     private static String money(MoneyDirection direction) {
-        return "case when i.\"type\" in (select t.\"typeId\" from \"wqTxType\" t where t.\"direction\" = "
-                + direction.code() + ") then abs(i.\"amount\") else 0 end";
+        String codes = java.util.Arrays.stream(wqs.domain.TransactionType.values())
+                .filter(t -> t.direction() == direction)
+                .map(t -> "'" + t.code() + "'")
+                .collect(java.util.stream.Collectors.joining(", "));
+        return "case when i.\"type\" in (" + codes + ") then abs(i.\"amount\") else 0 end";
     }
 
     private static String describe(TestSql.Row r) {

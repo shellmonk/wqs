@@ -8,7 +8,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.web.servlet.MockMvc;
-import wqs.domain.ProjectionItem;
+import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
 import wqs.projection.ProjectionBatch;
@@ -32,13 +32,13 @@ abstract class ApiTestBase extends ProjectionPropertyBase {
         clearProjection();
     }
 
-    protected static ProjectionItem item(long userId, SourceKind source, String sourceId, String at) {
-        return new ProjectionItem(userId, source, sourceId, Instant.parse(at), "P10", "keno", null, null,
+    protected static ProjectionTransaction transaction(long userId, SourceKind source, String sourceId, String at) {
+        return new ProjectionTransaction(userId, source, sourceId, Instant.parse(at), "P10", "keno", null, null,
                 TxTypes.PLAY,
                 new BigDecimal("12.5000"), "EUR", null, null, "{\"note\":\"" + sourceId + "\"}");
     }
 
-    protected void project(ProjectionItem... items) {
-        writer.apply(new ProjectionBatch("wallet-transactions", List.of(items), 1L));
+    protected void project(ProjectionTransaction... transactions) {
+        writer.apply(new ProjectionBatch("wallet-transactions", List.of(transactions), 1L));
     }
 }

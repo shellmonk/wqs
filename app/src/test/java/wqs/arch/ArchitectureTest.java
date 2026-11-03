@@ -351,11 +351,11 @@ class ArchitectureTest {
     }
 
     /** True when the class has an injection point of {@code type} carrying {@code qualifier}. */
-    private static boolean injects(JavaClass item, String type, Class<? extends java.lang.annotation.Annotation> qualifier) {
-        boolean field = item.getFields().stream()
+    private static boolean injects(JavaClass transaction, String type, Class<? extends java.lang.annotation.Annotation> qualifier) {
+        boolean field = transaction.getFields().stream()
                 .filter(ArchitectureTest::injected)
                 .anyMatch(f -> f.getRawType().isAssignableTo(type) && f.isAnnotatedWith(qualifier));
-        boolean parameter = item.getCodeUnits().stream()
+        boolean parameter = transaction.getCodeUnits().stream()
                 .filter(ArchitectureTest::injectionPoint)
                 .flatMap(u -> u.getParameters().stream())
                 .anyMatch(p -> p.getRawType().isAssignableTo(type) && p.isAnnotatedWith(qualifier));
@@ -366,16 +366,16 @@ class ArchitectureTest {
         return new ArchCondition<>("take JdbcClient only as @ReaderJdbc injection parameters, "
                 + "and never as an @Autowired/@Inject field without @ReaderJdbc") {
             @Override
-            public void check(JavaClass item, ConditionEvents events) {
+            public void check(JavaClass transaction, ConditionEvents events) {
                 // A plain field assigned from a @ReaderJdbc constructor parameter is the normal
                 // pattern; only injected fields are checked.
-                item.getFields().stream()
+                transaction.getFields().stream()
                         .filter(f -> f.getRawType().isAssignableTo(JDBC_CLIENT))
                         .filter(ArchitectureTest::injected)
                         .filter(f -> !f.isAnnotatedWith(ReaderJdbc.class))
                         .forEach(f -> events.add(SimpleConditionEvent.violated(
                                 f, f.getDescription() + " is an injected JdbcClient without @ReaderJdbc")));
-                item.getCodeUnits().stream()
+                transaction.getCodeUnits().stream()
                         .filter(ArchitectureTest::injectionPoint)
                         .forEach(u -> {
                             for (int i = 0; i < u.getRawParameterTypes().size(); i++) {
@@ -393,10 +393,10 @@ class ArchitectureTest {
     private static ArchCondition<JavaClass> injectReaderTxWithReaderJdbc() {
         return new ArchCondition<>("inject a @ReaderTx TransactionTemplate wherever they inject a @ReaderJdbc JdbcClient") {
             @Override
-            public void check(JavaClass item, ConditionEvents events) {
-                if (injects(item, JDBC_CLIENT, ReaderJdbc.class)
-                        && !injects(item, TRANSACTION_TEMPLATE, ReaderTx.class)) {
-                    events.add(SimpleConditionEvent.violated(item, item.getName()
+            public void check(JavaClass transaction, ConditionEvents events) {
+                if (injects(transaction, JDBC_CLIENT, ReaderJdbc.class)
+                        && !injects(transaction, TRANSACTION_TEMPLATE, ReaderTx.class)) {
+                    events.add(SimpleConditionEvent.violated(transaction, transaction.getName()
                             + " injects @ReaderJdbc JdbcClient but no @ReaderTx TransactionTemplate:"
                             + " its reads would autocommit, one snapshot per statement"));
                 }

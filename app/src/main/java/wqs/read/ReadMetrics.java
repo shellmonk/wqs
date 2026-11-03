@@ -49,7 +49,7 @@ public class ReadMetrics {
             pageSize.put(view, DistributionSummary.builder("wqs.read.pagesize")
                     .description("Effective page size").tag("endpoint", endpoint).register(registry));
             totalItems.put(view, DistributionSummary.builder("wqs.read.totalitems")
-                    .description("Total items of the requested range").tag("endpoint", endpoint).register(registry));
+                    .description("Total transactions of the requested range").tag("endpoint", endpoint).register(registry));
             for (int level = 0; level <= MAX_LEVEL; level++) {
                 for (String bucket : PAGE_DEPTH_BUCKETS) {
                     durations.put(timerKey(endpoint, level, bucket), Timer.builder("wqs.read.duration")

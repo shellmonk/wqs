@@ -132,7 +132,7 @@ public abstract class MigrationQuotingCheck extends DefaultTask {
 
     /**
      * A token is camelCase when an uppercase letter follows a lowercase one anywhere earlier
-     * in the token, letters or digits may sit between them (e.g. "item2Id" still counts: the
+     * in the token, letters or digits may sit between them (e.g. "transaction2Id" still counts: the
      * 'm' is lowercase, the 'I' two characters later is upper, and that's enough).
      */
     private static boolean isCamelCase(String token) {
