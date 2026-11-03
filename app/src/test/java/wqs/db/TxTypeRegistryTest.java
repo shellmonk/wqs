@@ -5,13 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 import java.util.UUID;
-import org.jooq.DSLContext;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.domain.MoneyDirection;
 
@@ -22,8 +18,6 @@ class TxTypeRegistryTest extends PostgresTestBase {
     // registry call made inside an outer transaction would join it unless the registry isolates
     // itself.
     private static final DataSourceTransactionManager TM = new DataSourceTransactionManager(dataSource());
-    private static final DSLContext TX_DSL =
-            DSL.using(new TransactionAwareDataSourceProxy(dataSource()), SQLDialect.POSTGRES);
 
     private static TxTypeRegistry registry() {
         return new TxTypeRegistry(jdbc(), TM);
@@ -100,18 +94,11 @@ class TxTypeRegistryTest extends PostgresTestBase {
             codes.add("TT_BOGUS_" + i + "_" + UUID.randomUUID());
         }
         java.util.concurrent.atomic.AtomicInteger statements = new java.util.concurrent.atomic.AtomicInteger();
-        DSLContext countingDsl = DSL.using(TX_DSL.configuration().derive(
-                org.jooq.ExecuteListener.onExecuteStart(ctx -> statements.incrementAndGet())));
         JdbcClient counting = JdbcClient.create(countingStatements(statements));
 
         // reader overload, cold registry
         var viaReader = registry().idsOf(counting, codes);
         assertThat(statements.get()).as("reader overload statements").isEqualTo(1);
-
-        // the jOOQ reader overload kept for unported read-path callers, cold registry
-        statements.set(0);
-        var viaReaderDsl = registry().idsOf(countingDsl, codes);
-        assertThat(statements.get()).as("jOOQ reader overload statements").isEqualTo(1);
 
         // writer overload, cold registry built on the counting client
         statements.set(0);
@@ -120,18 +107,14 @@ class TxTypeRegistryTest extends PostgresTestBase {
 
         TxTypeRegistry warm = registry();
         assertThat(viaReader).containsExactlyInAnyOrder(warm.idOf("TT_BUY"), warm.idOf("PRIZE"));
-        assertThat(viaReaderDsl).isEqualTo(viaReader);
         assertThat(viaWriter).isEqualTo(viaReader);
     }
 
     @Test
-    void code_of_reads_through_either_reader_overload() {
+    void code_of_reads_through_the_reader_overload() {
         short prize = registry().idOf("PRIZE");
         assertThat(registry().codeOf(jdbc(), prize)).isEqualTo("PRIZE");
-        assertThat(registry().codeOf(TX_DSL, prize)).isEqualTo("PRIZE");
         assertThatThrownBy(() -> registry().codeOf(jdbc(), (short) 32000))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("32000");
-        assertThatThrownBy(() -> registry().codeOf(TX_DSL, (short) 32000))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("32000");
     }
 
@@ -167,6 +150,6 @@ class TxTypeRegistryTest extends PostgresTestBase {
     }
 
     private static int rowCount() {
-        return dsl().fetchCount(DSL.table(DSL.name("wqTxType")));
+        return jdbc().sql("select count(*) from \"wqTxType\"").query(Integer.class).single();
     }
 }

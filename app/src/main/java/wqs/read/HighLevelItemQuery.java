@@ -4,7 +4,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.domain.ViewKind;
 
 /**
@@ -13,7 +13,7 @@ import wqs.domain.ViewKind;
  * page -- every probe is per session (its batch id, through the "_batch" index) or per key (its
  * exact "occurredAt"), never a scan of the time span the page covers (final review F1). Each row
  * carries its type code from "wqTxType" in the same statement, so no registry lookup is needed
- * whatever the cache holds. Stateless: every method takes the reader transaction's DSL.
+ * whatever the cache holds. Stateless: every method takes the reader transaction's client.
  */
 public interface HighLevelItemQuery {
 
@@ -28,9 +28,9 @@ public interface HighLevelItemQuery {
      * it is non-empty; only non-cancelled items when {@code excludeCancelled} (level 0's
      * predicate, so cancellation rows stay).
      */
-    List<ItemEntry> sessionItems(DSLContext tx, long userId, Set<String> batchIds, Instant startedFrom,
+    List<ItemEntry> sessionItems(JdbcClient tx, long userId, Set<String> batchIds, Instant startedFrom,
                                  Instant startedTo, Instant to, Set<String> typeCodes, boolean excludeCancelled);
 
     /** The view's items for unsessioned page-index keys ("kind" = source code, "refId" = sourceId). */
-    Map<HighLevelKey, ItemEntry> unsessioned(DSLContext tx, long userId, List<HighLevelKey> keys);
+    Map<HighLevelKey, ItemEntry> unsessioned(JdbcClient tx, long userId, List<HighLevelKey> keys);
 }

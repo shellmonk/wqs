@@ -13,7 +13,6 @@ import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
 import net.jqwik.api.Tag;
 import net.jqwik.spring.JqwikSpringSupport;
-import org.jooq.impl.DSL;
 import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionItem;
@@ -90,8 +89,8 @@ class TotalsPropertyTest extends ReadPropertyBase {
         Instant from = Instant.parse("2034-02-10T00:00:00Z");
         Instant to = Instant.parse("2034-02-10T23:59:59Z");
 
-        SegmentCounts sc = readerDsl.transactionResult(cfg ->
-                reader.segmentCounts(DSL.using(cfg), queryFor(ViewKind.WEB), f, from, to));
+        SegmentCounts sc = readerTx.execute(status ->
+                reader.segmentCounts(readerJdbc, queryFor(ViewKind.WEB), f, from, to));
 
         assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.LIVE);
         assertThat(sc.counterRows()).isZero();
@@ -110,8 +109,8 @@ class TotalsPropertyTest extends ReadPropertyBase {
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
 
-        SegmentCounts sc = readerDsl.transactionResult(cfg ->
-                reader.segmentCounts(DSL.using(cfg), queryFor(ViewKind.WEB), f, from, to));
+        SegmentCounts sc = readerTx.execute(status ->
+                reader.segmentCounts(readerJdbc, queryFor(ViewKind.WEB), f, from, to));
 
         assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.MONTH);
         assertThat(sc.counterRows()).isEqualTo(2);
@@ -134,8 +133,8 @@ class TotalsPropertyTest extends ReadPropertyBase {
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-02-01T00:00:00Z");
         for (ViewKind v : ViewKind.values()) {
-            List<ItemEntry> viaReader = readerDsl.transactionResult(cfg -> {
-                var tx = DSL.using(cfg);
+            List<ItemEntry> viaReader = readerTx.execute(status -> {
+                var tx = readerJdbc;
                 Level0Query q = queryFor(v);
                 return q.fetch(tx, 1L, q.keys(tx, f, from, to, 0, 10));
             });

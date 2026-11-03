@@ -3,7 +3,7 @@ package wqs.read;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.domain.ViewKind;
 
 /** Test-only delegate that records every {@link #keys} call, to observe where the offset walk lands. */
@@ -26,19 +26,19 @@ final class RecordingLevel0Query implements Level0Query {
     }
 
     @Override
-    public long count(DSLContext tx, Level0Filter f, Instant lo, Instant hi) {
+    public long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi) {
         countCalls++;
         return delegate.count(tx, f, lo, hi);
     }
 
     @Override
-    public List<ItemKey> keys(DSLContext tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
+    public List<ItemKey> keys(JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
         keysCalls.add(new KeysCall(lo, hi, offset, limit));
         return delegate.keys(tx, f, lo, hi, offset, limit);
     }
 
     @Override
-    public List<ItemEntry> fetch(DSLContext tx, long userId, List<ItemKey> keys) {
+    public List<ItemEntry> fetch(JdbcClient tx, long userId, List<ItemKey> keys) {
         fetchCalls++;
         return delegate.fetch(tx, userId, keys);
     }

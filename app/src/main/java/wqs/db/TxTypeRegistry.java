@@ -1,22 +1,16 @@
 package wqs.db;
 
-import static wqs.db.generated.Tables.WQ_TX_TYPE;
-
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
-import org.jooq.impl.SQLDataType;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
-import wqs.db.generated.tables.records.WqTxTypeRecord;
 import wqs.domain.MoneyDirection;
 
 /**
@@ -119,24 +113,6 @@ public class TxTypeRegistry {
         return missing;
     }
 
-    /**
-     * The jOOQ form of {@link #idsOf(JdbcClient, Collection)}, for read-path callers not yet ported
-     * off jOOQ (removed with them).
-     */
-    public Set<Short> idsOf(DSLContext reader, Collection<String> codes) {
-        Set<Short> ids = new LinkedHashSet<>();
-        Set<String> missing = cachedIds(codes, ids);
-        if (!missing.isEmpty()) {
-            // One statement for every uncached code (final review F4), the array a single bind.
-            reader.selectFrom(WQ_TX_TYPE)
-                    .where(WQ_TX_TYPE.code.eq(DSL.any(DSL.val(missing.toArray(String[]::new),
-                            SQLDataType.CLOB.getArrayDataType()))))
-                    .fetch()
-                    .forEach(row -> ids.add(remember(entryOf(row)).typeId()));
-        }
-        return ids;
-    }
-
     /** @throws IllegalArgumentException if no type has this id -- a stored id always exists */
     public MoneyDirection directionOf(short typeId) {
         return entry(jdbc, typeId).direction();
@@ -152,19 +128,6 @@ public class TxTypeRegistry {
         return entry(reader, typeId).code();
     }
 
-    /** The jOOQ form of {@link #codeOf(JdbcClient, short)}, for read-path callers not yet ported. */
-    public String codeOf(DSLContext reader, short typeId) {
-        Entry cached = byId.get(typeId);
-        if (cached != null) {
-            return cached.code();
-        }
-        WqTxTypeRecord row = reader.selectFrom(WQ_TX_TYPE).where(WQ_TX_TYPE.typeId.eq(typeId)).fetchOne();
-        if (row == null) {
-            throw new IllegalArgumentException("no transaction type with id " + typeId);
-        }
-        return remember(entryOf(row)).code();
-    }
-
     private Entry entry(JdbcClient source, short typeId) {
         Entry cached = byId.get(typeId);
         if (cached != null) {
@@ -177,10 +140,6 @@ public class TxTypeRegistry {
 
     private Entry find(String code) {
         return jdbc.sql(BY_CODE).param(code).query(ROW).optional().orElse(null);
-    }
-
-    private static Entry entryOf(WqTxTypeRecord row) {
-        return new Entry(row.getTypeId(), row.getCode(), MoneyDirection.ofCode(row.getDirection()));
     }
 
     private Entry remember(Entry entry) {

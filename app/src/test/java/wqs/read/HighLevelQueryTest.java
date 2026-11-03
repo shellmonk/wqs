@@ -9,7 +9,6 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -58,18 +57,18 @@ class HighLevelQueryTest extends Level0TestSupport {
                 hl(TRANSACTION, "d1-x", "2034-02-15T11:00:00Z", null, null, "d1"),
                 hl(PAYMENT, "p", "2034-02-20T10:00:00Z", null, null, null));          // /cc only
 
-        assertThat(web.count(readerDsl, new HighLevelFilter(USER, false), FEB, MAR)).isEqualTo(4);
-        assertThat(cc.count(readerDsl, new HighLevelFilter(USER, false), FEB, MAR)).isEqualTo(5);
+        assertThat(web.count(readerJdbc, new HighLevelFilter(USER, false), FEB, MAR)).isEqualTo(4);
+        assertThat(cc.count(readerJdbc, new HighLevelFilter(USER, false), FEB, MAR)).isEqualTo(5);
         // c and b2 are hidden: "visibleExclCancelled" is false for them.
-        assertThat(web.count(readerDsl, new HighLevelFilter(USER, true), FEB, MAR)).isEqualTo(2);
-        assertThat(cc.count(readerDsl, new HighLevelFilter(USER, true), FEB, MAR)).isEqualTo(3);
+        assertThat(web.count(readerJdbc, new HighLevelFilter(USER, true), FEB, MAR)).isEqualTo(2);
+        assertThat(cc.count(readerJdbc, new HighLevelFilter(USER, true), FEB, MAR)).isEqualTo(3);
         // b1 is labelled by its FIRST item's product ("lottery"), not "keno".
-        assertThat(web.count(readerDsl, new HighLevelFilter(USER, Set.of("keno"), false), FEB, MAR)).isEqualTo(2);
-        assertThat(web.count(readerDsl, new HighLevelFilter(USER, Set.of("lottery", "absent"), false), FEB, MAR))
+        assertThat(web.count(readerJdbc, new HighLevelFilter(USER, Set.of("keno"), false), FEB, MAR)).isEqualTo(2);
+        assertThat(web.count(readerJdbc, new HighLevelFilter(USER, Set.of("lottery", "absent"), false), FEB, MAR))
                 .isEqualTo(1);
-        assertThat(web.count(readerDsl, new HighLevelFilter(USER, Set.of("absent"), false), FEB, MAR)).isZero();
-        assertThat(web.count(readerDsl, new HighLevelFilter(USER + 1, false), FEB, MAR)).isZero();
-        assertThat(web.count(readerDsl, new HighLevelFilter(USER, false), FEB, t("2034-02-01T00:00:01Z")))
+        assertThat(web.count(readerJdbc, new HighLevelFilter(USER, Set.of("absent"), false), FEB, MAR)).isZero();
+        assertThat(web.count(readerJdbc, new HighLevelFilter(USER + 1, false), FEB, MAR)).isZero();
+        assertThat(web.count(readerJdbc, new HighLevelFilter(USER, false), FEB, t("2034-02-01T00:00:01Z")))
                 .isEqualTo(1);
     }
 
@@ -108,15 +107,15 @@ class HighLevelQueryTest extends Level0TestSupport {
         // /web holds no payments; same order otherwise.
         assertThat(seqScan(web, f, 0, 20)).isEqualTo(all.subList(2, 8));
         // The index-ordered plan agrees.
-        assertThat(cc.keys(readerDsl, f, FEB, MAR, 0, 20)).isEqualTo(all);
+        assertThat(cc.keys(readerJdbc, f, FEB, MAR, 0, 20)).isEqualTo(all);
     }
 
     private List<HighLevelKey> seqScan(HighLevelQuery q, HighLevelFilter f, long offset, int limit) {
-        return readerDsl.transactionResult(cfg -> {
-            var tx = DSL.using(cfg);
-            tx.execute("set local enable_indexscan = off");
-            tx.execute("set local enable_indexonlyscan = off");
-            tx.execute("set local enable_bitmapscan = off");
+        return readerTx.execute(status -> {
+            var tx = readerJdbc;
+            tx.sql("set local enable_indexscan = off").update();
+            tx.sql("set local enable_indexonlyscan = off").update();
+            tx.sql("set local enable_bitmapscan = off").update();
             return q.keys(tx, f, FEB, MAR, offset, limit);
         });
     }

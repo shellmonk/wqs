@@ -1,6 +1,6 @@
 package wqs.read;
 
-/** Resolves a stored "wqTxType" id to its wire code, for the item mappers (a MapStruct context). */
+/** Resolves a stored "wqTxType" id to its wire code, for the item mappers. */
 @FunctionalInterface
 public interface TypeCodes {
 

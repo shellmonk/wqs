@@ -32,8 +32,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * off Boot's pooled DataSource auto-config, so both are explicit. The writer stays primary:
  * Flyway, Quartz, the transaction manager, Boot's jOOQ configuration, the primary
  * {@link JdbcClient}, ingest and projection all use it. The reader serves only {@code wqs.read..},
- * through {@link ReaderJdbc} inside a {@link ReaderTx} transaction (or, until the read path is
- * ported, {@link ReaderDsl}).
+ * through {@link ReaderJdbc} inside a {@link ReaderTx} transaction. ({@link ReaderDsl} has no
+ * main-code user left; it goes with jOOQ.)
  *
  * <p>Two transaction managers exist, so the writer one is {@code @Primary}: an unqualified
  * {@code @Transactional}, {@code PlatformTransactionManager} or {@code TransactionTemplate} is the
@@ -89,8 +89,9 @@ public class DataSourceConfig {
     /**
      * Plain jOOQ transactions: open them with {@code readerDsl.transactionResult(cfg -> ...)}. Bound
      * through a {@link TransactionAwareDataSourceProxy} so that, inside a {@link ReaderTx}
-     * transaction, it uses that transaction's connection -- one snapshot with {@link ReaderJdbc}
-     * while the read path is ported. Outside one, each call takes its own pool connection, as before.
+     * transaction, it uses that transaction's connection -- one snapshot with {@link ReaderJdbc}.
+     * Outside one, each call takes its own pool connection, as before. The read path no longer uses
+     * it (it runs on {@link ReaderJdbc} in one {@link ReaderTx}); it is removed with jOOQ.
      */
     @Bean
     @ReaderDsl

@@ -9,8 +9,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -54,8 +53,8 @@ class ProjectionReaderTest extends ReadPropertyBase {
         Instant from = Instant.parse("2034-01-10T00:00:00Z");
         Instant to = Instant.parse("2034-03-10T00:00:00Z");
 
-        SegmentCounts sc = readerDsl.transactionResult(cfg ->
-                probe.segmentCounts(DSL.using(cfg), webQuery, ALL, from, to));
+        SegmentCounts sc = readerTx.execute(status ->
+                probe.segmentCounts(readerJdbc, webQuery, ALL, from, to));
 
         assertThat(sc.total()).isEqualTo(5).isEqualTo(oracle.count(ViewKind.WEB, ALL, from, to));
         // Feb's month row + the Jan 20 and Mar 5 day rows.
@@ -176,7 +175,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveItems());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
+                readerJdbc, readerTx, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
 
@@ -208,7 +207,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveItems());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
+                readerJdbc, readerTx, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         RecordingLevel0Query recording = new RecordingLevel0Query(webQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
@@ -301,19 +300,19 @@ class ProjectionReaderTest extends ReadPropertyBase {
         }
 
         @Override
-        public long count(DSLContext tx, Level0Filter f, Instant lo, Instant hi) {
+        public long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi) {
             once();
             return delegate.count(tx, f, lo, hi);
         }
 
         @Override
-        public List<ItemKey> keys(DSLContext tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
+        public List<ItemKey> keys(JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
             once();
             return delegate.keys(tx, f, lo, hi, offset, limit);
         }
 
         @Override
-        public List<ItemEntry> fetch(DSLContext tx, long userId, List<ItemKey> keys) {
+        public List<ItemEntry> fetch(JdbcClient tx, long userId, List<ItemKey> keys) {
             once();
             return delegate.fetch(tx, userId, keys);
         }
@@ -376,7 +375,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
                 org.springframework.jdbc.core.simple.JdbcClient.create(dead),
                 org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class));
         WebLevel0Query web = new WebLevel0Query(webMapper, isolated);
-        ProjectionReader probe = new ProjectionReader(readerDsl, isolated, new CounterReader(),
+        ProjectionReader probe = new ProjectionReader(readerJdbc, readerTx, isolated, new CounterReader(),
                 new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
 
         ProjectionPage page = probe.readLevel0(web, new Level0Request(ALL, java.util.Set.of("TT_BUY"),
@@ -419,7 +418,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
         applyBatches(fiveHighLevelRows());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         ProjectionReader probe = new ProjectionReader(
-                readerDsl, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
+                readerJdbc, readerTx, txTypes(), new CounterReader(), new ReadProperties(null), new ReadMetrics(registry), highLevelQueries());
         RecordingHighLevelQuery recording = new RecordingHighLevelQuery(webHighLevelQuery);
         Instant from = Instant.parse("2034-01-01T00:00:00Z");
         Instant to = Instant.parse("2034-03-01T00:00:00Z");
@@ -460,11 +459,11 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
     @Test
     void reader_needs_exactly_one_high_level_query_per_view() {
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerDsl, txTypes(),
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerJdbc, readerTx, txTypes(),
                         new CounterReader(), new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()),
                         List.of(webHighLevelQuery)))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("CC");
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerDsl, txTypes(),
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ProjectionReader(readerJdbc, readerTx, txTypes(),
                         new CounterReader(), new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()),
                         List.of(webHighLevelQuery, ccHighLevelQuery, webHighLevelQuery)))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("WEB");
@@ -494,12 +493,12 @@ class ProjectionReaderTest extends ReadPropertyBase {
             }
 
             @Override
-            public long count(DSLContext tx, HighLevelFilter f, Instant lo, Instant hi) {
+            public long count(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi) {
                 return webHighLevelQuery.count(tx, f, lo, hi);
             }
 
             @Override
-            public List<HighLevelKey> keys(DSLContext tx, HighLevelFilter f, Instant lo, Instant hi, long o, int l) {
+            public List<HighLevelKey> keys(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi, long o, int l) {
                 if (!fired) {
                     fired = true;
                     commits[0].run();
@@ -562,7 +561,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
     /** Builds a reader around a test counter reader, with no ceiling and a private registry. */
     private ProjectionReader probeReader(CounterReader counters) {
         return new ProjectionReader(
-                readerDsl, txTypes(), counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
+                readerJdbc, readerTx, txTypes(), counters, new ReadProperties(null), new ReadMetrics(new SimpleMeterRegistry()), highLevelQueries());
     }
 
     /** Records every day row {@link CounterReader#dayCounts} returns, without a mocking framework. */
@@ -573,7 +572,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
         @Override
         public Map<LocalDate, Long> monthCounts(
-                DSLContext tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
+                JdbcClient tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
                 java.util.Set<String> productTypes, java.util.Set<Short> typeIds,
                 boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
             monthCalls++;
@@ -583,7 +582,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
         @Override
         public Map<LocalDate, Long> dayCounts(
-                DSLContext tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
+                JdbcClient tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
                 java.util.Set<String> productTypes, java.util.Set<Short> typeIds,
                 boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
             Map<LocalDate, Long> rows = super.dayCounts(tx, userId, v, unit, productTypes, typeIds,

@@ -41,23 +41,23 @@ class CounterReaderTest extends Level0TestSupport {
         Level0Filter all = new Level0Filter(USER, false);
         Level0Filter excl = new Level0Filter(USER, true);
 
-        var months = counters.monthCounts(readerDsl, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false,
+        var months = counters.monthCounts(readerJdbc, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false,
                 LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-01"));
         assertThat(months).containsEntry(LocalDate.parse("2034-01-01"),
-                web.count(readerDsl, all, Instant.parse("2034-01-01T00:00:00Z"), Instant.parse("2034-02-01T00:00:00Z")));
+                web.count(readerJdbc, all, Instant.parse("2034-01-01T00:00:00Z"), Instant.parse("2034-02-01T00:00:00Z")));
         assertThat(months).containsEntry(LocalDate.parse("2034-02-01"),
-                web.count(readerDsl, all, Instant.parse("2034-02-01T00:00:00Z"), Instant.parse("2034-03-01T00:00:00Z")));
+                web.count(readerJdbc, all, Instant.parse("2034-02-01T00:00:00Z"), Instant.parse("2034-03-01T00:00:00Z")));
         assertThat(months).containsOnlyKeys(LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-01"));
 
         // excl column: "a" is cancelled
-        assertThat(counters.monthCounts(readerDsl, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, true,
+        assertThat(counters.monthCounts(readerJdbc, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, true,
                 LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-01")))
                 .containsEntry(LocalDate.parse("2034-01-01"), 1L);
 
-        var days = counters.dayCounts(readerDsl, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false,
+        var days = counters.dayCounts(readerJdbc, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false,
                 LocalDate.parse("2034-01-09"), LocalDate.parse("2034-01-12"));
         assertThat(days).containsOnly(java.util.Map.entry(LocalDate.parse("2034-01-10"), 2L));
-        assertThat(counters.dayCounts(readerDsl, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false,
+        assertThat(counters.dayCounts(readerJdbc, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false,
                 LocalDate.parse("2034-01-11"), LocalDate.parse("2034-01-12"))).isEmpty();
     }
 
@@ -70,10 +70,10 @@ class CounterReaderTest extends Level0TestSupport {
         LocalDate jan = LocalDate.parse("2034-01-01");
         Instant lo = Instant.parse("2034-01-01T00:00:00Z");
         Instant hi = Instant.parse("2034-02-01T00:00:00Z");
-        long webLive = web.count(readerDsl, all, lo, hi);
-        long ccLive = cc.count(readerDsl, all, lo, hi);
-        assertThat(counters.monthCounts(readerDsl, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false, jan, jan)).containsEntry(jan, webLive);
-        assertThat(counters.monthCounts(readerDsl, USER, ViewKind.CC, ITEM, NONE, NO_TYPES, false, jan, jan)).containsEntry(jan, ccLive);
+        long webLive = web.count(readerJdbc, all, lo, hi);
+        long ccLive = cc.count(readerJdbc, all, lo, hi);
+        assertThat(counters.monthCounts(readerJdbc, USER, ViewKind.WEB, ITEM, NONE, NO_TYPES, false, jan, jan)).containsEntry(jan, webLive);
+        assertThat(counters.monthCounts(readerJdbc, USER, ViewKind.CC, ITEM, NONE, NO_TYPES, false, jan, jan)).containsEntry(jan, ccLive);
         assertThat(webLive).isNotEqualTo(ccLive);
     }
 
@@ -95,10 +95,10 @@ class CounterReaderTest extends Level0TestSupport {
         LocalDate mar = LocalDate.parse("2034-03-01");
         LocalDate day = LocalDate.parse("2034-03-10");
         java.util.function.BiFunction<java.util.Set<String>, java.util.Set<Short>, Long> month =
-                (p, t) -> counters.monthCounts(readerDsl, USER, ViewKind.WEB, ITEM, p, t, false, mar, mar)
+                (p, t) -> counters.monthCounts(readerJdbc, USER, ViewKind.WEB, ITEM, p, t, false, mar, mar)
                         .getOrDefault(mar, 0L);
         java.util.function.BiFunction<java.util.Set<String>, java.util.Set<Short>, Long> daily =
-                (p, t) -> counters.dayCounts(readerDsl, USER, ViewKind.WEB, ITEM, p, t, false, day, day)
+                (p, t) -> counters.dayCounts(readerJdbc, USER, ViewKind.WEB, ITEM, p, t, false, day, day)
                         .getOrDefault(day, 0L);
 
         for (var f : java.util.List.of(month, daily)) {

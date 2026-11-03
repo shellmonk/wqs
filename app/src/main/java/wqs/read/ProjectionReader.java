@@ -13,10 +13,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Function;
-import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
-import wqs.config.ReaderDsl;
+import org.springframework.transaction.support.TransactionTemplate;
+import wqs.config.ReaderJdbc;
+import wqs.config.ReaderTx;
 import wqs.db.TxTypeRegistry;
 import wqs.domain.PageUnit;
 import wqs.domain.ViewKind;
@@ -27,13 +28,18 @@ import wqs.read.Segment.Tier;
  * 0 pages the view's item table (ITEM), levels 1 and 2 its high-level page index (HIGH_LEVEL). One
  * counter-assisted offset walk serves both; a per-unit adapter supplies the counter key, the live
  * count and the key query.
+ *
+ * <p>Every read runs in ONE {@code @ReaderTx} transaction (read-only, REPEATABLE READ, reader
+ * pool); each statement inside it goes through the {@code @ReaderJdbc} client, which joins that
+ * transaction's connection, so the total, the walk and the fetch or assembly share one snapshot.
  */
 @Component
 public class ProjectionReader {
 
     private static final int LEVEL_0 = 0;
 
-    private final DSLContext readerDsl;
+    private final JdbcClient readerJdbc;
+    private final TransactionTemplate readerTx;
     private final TxTypeRegistry txTypes;
     private final CounterReader counters;
     private final ReadProperties properties;
@@ -45,9 +51,10 @@ public class ProjectionReader {
      * @throws IllegalStateException if a view has none or several
      */
     public ProjectionReader(
-            @ReaderDsl DSLContext readerDsl, TxTypeRegistry txTypes, CounterReader counters,
-            ReadProperties properties, ReadMetrics metrics, List<HighLevelQuery> highLevelQueries) {
-        this.readerDsl = readerDsl;
+            @ReaderJdbc JdbcClient readerJdbc, @ReaderTx TransactionTemplate readerTx, TxTypeRegistry txTypes,
+            CounterReader counters, ReadProperties properties, ReadMetrics metrics, List<HighLevelQuery> highLevelQueries) {
+        this.readerJdbc = readerJdbc;
+        this.readerTx = readerTx;
         this.txTypes = txTypes;
         this.counters = counters;
         this.properties = properties;
@@ -79,8 +86,8 @@ public class ProjectionReader {
      */
     public ProjectionPage readLevel0(Level0Query q, Level0Request r) {
         long effective = effectivePageSize(r.pageSize());
-        Outcome<ItemEntry> out = readerDsl.transactionResult(cfg -> {
-            DSLContext tx = DSL.using(cfg);
+        Outcome<ItemEntry> out = readerTx.execute(status -> {
+            JdbcClient tx = readerJdbc;
             Level0Filter f = r.filter();
             if (!r.transactionTypes().isEmpty()) {
                 // Resolved through the reader's own tx (M2): never the writer pool.
@@ -103,13 +110,12 @@ public class ProjectionReader {
 
     /** Exact item count of [from, to), in one REPEATABLE READ transaction. */
     public long total(Level0Query q, Level0Filter f, Instant from, Instant to) {
-        return readerDsl.transactionResult(cfg ->
-                segmentCounts(DSL.using(cfg), itemUnit(q, f), from, to).total());
+        return readerTx.execute(status -> segmentCounts(readerJdbc, itemUnit(q, f), from, to).total());
     }
 
     /** Per-segment ITEM counts of [from, to): counters for whole months and days, live for the rest. */
     public SegmentCounts segmentCounts(
-            DSLContext tx, Level0Query q, Level0Filter f, Instant from, Instant to) {
+            JdbcClient tx, Level0Query q, Level0Filter f, Instant from, Instant to) {
         return segmentCounts(tx, itemUnit(q, f), from, to);
     }
 
@@ -124,7 +130,7 @@ public class ProjectionReader {
      * which is empty with the correct total.
      */
     public <R> HighLevelPage<R> readHighLevel(
-            HighLevelRequest req, BiFunction<DSLContext, List<HighLevelKey>, List<R>> assemble) {
+            HighLevelRequest req, BiFunction<JdbcClient, List<HighLevelKey>, List<R>> assemble) {
         return readHighLevel(highLevelQueries.get(req.view()), req, assemble);
     }
 
@@ -133,13 +139,13 @@ public class ProjectionReader {
      * request's view; tests observe the walk through it.
      */
     <R> HighLevelPage<R> readHighLevel(
-            HighLevelQuery q, HighLevelRequest req, BiFunction<DSLContext, List<HighLevelKey>, List<R>> assemble) {
+            HighLevelQuery q, HighLevelRequest req, BiFunction<JdbcClient, List<HighLevelKey>, List<R>> assemble) {
         if (q.view() != req.view()) {
             throw new IllegalArgumentException("query for " + q.view() + ", request for " + req.view());
         }
         long effective = effectivePageSize(req.pageSize());
-        Outcome<R> out = readerDsl.transactionResult(cfg -> {
-            DSLContext tx = DSL.using(cfg);
+        Outcome<R> out = readerTx.execute(status -> {
+            JdbcClient tx = readerJdbc;
             Walk<HighLevelKey> w = walk(
                     tx, highLevelUnit(q, req.filter()), req.from(), req.to(), req.page(), effective);
             return new Outcome<>(w, w.walked() ? assemble.apply(tx, w.keys()) : List.<R>of());
@@ -151,13 +157,12 @@ public class ProjectionReader {
 
     /** Exact page-index row count of [from, to), in one REPEATABLE READ transaction. */
     public long total(HighLevelQuery q, HighLevelFilter f, Instant from, Instant to) {
-        return readerDsl.transactionResult(cfg ->
-                segmentCounts(DSL.using(cfg), highLevelUnit(q, f), from, to).total());
+        return readerTx.execute(status -> segmentCounts(readerJdbc, highLevelUnit(q, f), from, to).total());
     }
 
     /** Per-segment HIGH_LEVEL counts of [from, to): counters for whole months and days, live for the rest. */
     public SegmentCounts segmentCounts(
-            DSLContext tx, HighLevelQuery q, HighLevelFilter f, Instant from, Instant to) {
+            JdbcClient tx, HighLevelQuery q, HighLevelFilter f, Instant from, Instant to) {
         return segmentCounts(tx, highLevelUnit(q, f), from, to);
     }
 
@@ -174,12 +179,12 @@ public class ProjectionReader {
 
     @FunctionalInterface
     private interface LiveCount {
-        long count(DSLContext tx, Instant lo, Instant hi);
+        long count(JdbcClient tx, Instant lo, Instant hi);
     }
 
     @FunctionalInterface
     private interface KeyQuery<K> {
-        List<K> keys(DSLContext tx, Instant lo, Instant hi, long offset, int limit);
+        List<K> keys(JdbcClient tx, Instant lo, Instant hi, long offset, int limit);
     }
 
     private static Unit<ItemKey> itemUnit(Level0Query q, Level0Filter f) {
@@ -222,7 +227,7 @@ public class ProjectionReader {
      * then run ONE ordered key query from that segment's end down to {@code from}, skipping only
      * the residual inside it. A page past the end runs no key query.
      */
-    private <K> Walk<K> walk(DSLContext tx, Unit<K> u, Instant from, Instant to, long page, long pageSize) {
+    private <K> Walk<K> walk(JdbcClient tx, Unit<K> u, Instant from, Instant to, long page, long pageSize) {
         SegmentCounts sc = segmentCounts(tx, u, from, to);
         long total = sc.total();
         long offset = offset(page, pageSize);
@@ -272,7 +277,7 @@ public class ProjectionReader {
      * -- at most two, the partial months at either end -- so a multi-year range never fetches the
      * daily rows of the whole months in between (spec 7.5 bounded cost).
      */
-    private SegmentCounts segmentCounts(DSLContext tx, Unit<?> u, Instant from, Instant to) {
+    private SegmentCounts segmentCounts(JdbcClient tx, Unit<?> u, Instant from, Instant to) {
         List<Segment> segments = RangeDecomposition.newestFirst(from, to);
         Map<LocalDate, Long> months = new HashMap<>();
         Map<LocalDate, Long> days = new HashMap<>();

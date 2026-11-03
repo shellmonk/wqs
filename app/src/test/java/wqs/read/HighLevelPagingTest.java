@@ -11,7 +11,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -159,8 +158,8 @@ class HighLevelPagingTest extends ReadPropertyBase {
         Range all = RANGES.get(0);
         for (ViewKind v : ViewKind.values()) {
             RecordingHighLevelQuery recording = new RecordingHighLevelQuery(highLevelQueryFor(v));
-            SegmentCounts sc = readerDsl.transactionResult(cfg ->
-                    reader.segmentCounts(DSL.using(cfg), recording, FILTERS.get(0), all.from(), all.to()));
+            SegmentCounts sc = readerTx.execute(status ->
+                    reader.segmentCounts(readerJdbc, recording, FILTERS.get(0), all.from(), all.to()));
             assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.MONTH);
             assertThat(recording.countCalls).as(v + " live counts").isZero();
             assertThat(sc.counterRows()).as(v.name()).isEqualTo(4);

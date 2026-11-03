@@ -2,9 +2,11 @@ package wqs.read;
 
 import java.time.YearMonth;
 import java.util.List;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
-import wqs.config.ReaderDsl;
+import wqs.config.ReaderJdbc;
+import wqs.config.ReaderTx;
 import wqs.domain.ViewKind;
 import wqs.projection.ProjectionPropertyBase;
 import wqs.read.cc.CcHighLevelQuery;
@@ -15,7 +17,8 @@ import wqs.read.web.WebLevel0Query;
 /** Shared setup for the read-side properties (spec 8.1): reader, both views' queries, the oracle. */
 public abstract class ReadPropertyBase extends ProjectionPropertyBase {
 
-    @Autowired @ReaderDsl protected DSLContext readerDsl;
+    @Autowired @ReaderJdbc protected JdbcClient readerJdbc;
+    @Autowired @ReaderTx protected TransactionTemplate readerTx;
     @Autowired protected ProjectionReader reader;
     @Autowired protected WebLevel0Query webQuery;
     @Autowired protected CcLevel0Query ccQuery;

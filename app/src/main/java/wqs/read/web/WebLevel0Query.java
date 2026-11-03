@@ -1,7 +1,5 @@
 package wqs.read.web;
 
-import static wqs.db.generated.Tables.WQ_WEB_ITEM;
-
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -10,11 +8,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.jooq.Condition;
-import org.jooq.DSLContext;
-import org.jooq.Table;
-import org.jooq.impl.DSL;
-import org.jooq.impl.SQLDataType;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import wqs.db.TxTypeRegistry;
 import wqs.domain.ViewKind;
@@ -24,9 +18,33 @@ import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
 import wqs.read.TypeCodes;
 
-/** Level-0 reads of the web view; touches only WQ_WEB_ITEM. */
+/** Level-0 reads of the web view; touches only "wqWebItem". */
 @Component
 public class WebLevel0Query implements Level0Query {
+
+    private static final String COUNT = """
+            select count(*) from "wqWebItem"
+            where %s
+            """;
+
+    private static final String KEYS = """
+            select "wqWebItem"."occurredAt", "wqWebItem"."itemId" from "wqWebItem"
+            where %s
+            order by "wqWebItem"."occurredAt" desc, "wqWebItem"."itemId" desc
+            offset :offset rows fetch next :limit rows only
+            """;
+
+    private static final String FETCH = """
+            select "wqWebItem"."userId", "wqWebItem"."itemId", "wqWebItem"."source", "wqWebItem"."sourceId",
+                   "wqWebItem"."occurredAt", "wqWebItem"."productId", "wqWebItem"."batchId",
+                   "wqWebItem"."subBatchId", "wqWebItem"."type", "wqWebItem"."amount", "wqWebItem"."currency",
+                   "wqWebItem"."balanceAfter", "wqWebItem"."cancelled", "wqWebItem"."cancelledBy",
+                   "wqWebItem"."cancels", "wqWebItem"."detail", "wqWebItem"."ingestedAt", "wqWebItem"."productType"
+            from "wqWebItem"
+            join unnest(cast(:ids as bigint[])) as "wanted" ("id") on "wqWebItem"."itemId" = "wanted"."id"
+            where ("wqWebItem"."userId" = :userId
+                   and "wqWebItem"."occurredAt" between cast(:min as timestamptz) and cast(:max as timestamptz))
+            """;
 
     private final WebItemMapper mapper;
     private final TxTypeRegistry txTypes;
@@ -42,28 +60,23 @@ public class WebLevel0Query implements Level0Query {
     }
 
     @Override
-    public long count(DSLContext tx, Level0Filter f, Instant lo, Instant hi) {
-        Long n = tx.select(DSL.count())
-                .from(WQ_WEB_ITEM)
-                .where(range(f, lo, hi))
-                .fetchOne(0, Long.class);
-        return n == null ? 0 : n;
+    public long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi) {
+        return range(tx.sql(COUNT.formatted(range(f))), f, lo, hi).query(Long.class).single();
     }
 
     @Override
     public List<ItemKey> keys(
-            DSLContext tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
-        return tx.select(WQ_WEB_ITEM.occurredAt, WQ_WEB_ITEM.itemId)
-                .from(WQ_WEB_ITEM)
-                .where(range(f, lo, hi))
-                .orderBy(WQ_WEB_ITEM.occurredAt.desc(), WQ_WEB_ITEM.itemId.desc())
-                .offset(offset)
-                .limit(limit)
-                .fetch(r -> new ItemKey(r.value1().toInstant(), r.value2()));
+            JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
+        return range(tx.sql(KEYS.formatted(range(f))), f, lo, hi)
+                .param("offset", offset)
+                .param("limit", limit)
+                .query((rs, n) -> new ItemKey(
+                        rs.getObject("occurredAt", OffsetDateTime.class).toInstant(), rs.getLong("itemId")))
+                .list();
     }
 
     @Override
-    public List<ItemEntry> fetch(DSLContext tx, long userId, List<ItemKey> keys) {
+    public List<ItemEntry> fetch(JdbcClient tx, long userId, List<ItemKey> keys) {
         if (keys.isEmpty()) {
             return List.of();
         }
@@ -73,19 +86,19 @@ public class WebLevel0Query implements Level0Query {
         // unnest(?), which Postgres evaluates once; "itemId" = any(?) re-evaluates the text-bound
         // array per row (array_in is not constant-folded), O(rows x keys). itemId comes from a
         // global sequence, so within the user and the occurredAt window it identifies one row.
-        Long[] ids = keys.stream().map(ItemKey::itemId).toArray(Long[]::new);
-        Table<?> wanted = DSL.unnest(DSL.val(ids, SQLDataType.BIGINT.getArrayDataType())).as("wanted", "id");
-        // Codes resolve through the caller's transaction (M2), never the registry's writer DSL.
+        long[] ids = keys.stream().mapToLong(ItemKey::itemId).toArray();
+        // Codes resolve through the caller's transaction (M2), never the registry's writer client.
         TypeCodes codes = id -> txTypes.codeOf(tx, id);
         Map<ItemKey, ItemEntry> byKey = new HashMap<>();
-        tx.select(WQ_WEB_ITEM.fields())
-                .from(WQ_WEB_ITEM)
-                .join(wanted).on(WQ_WEB_ITEM.itemId.eq(wanted.field("id", Long.class)))
-                .where(WQ_WEB_ITEM.userId.eq(userId))
-                .and(WQ_WEB_ITEM.occurredAt.between(utc(min), utc(max)))
-                .fetchInto(WQ_WEB_ITEM)
-                .forEach(r -> byKey.put(
-                        new ItemKey(r.getOccurredAt().toInstant(), r.getItemId()), mapper.toEntry(r, codes)));
+        tx.sql(FETCH)
+                .param("ids", ids)
+                .param("userId", userId)
+                .param("min", utc(min))
+                .param("max", utc(max))
+                .query(rs -> {
+                    byKey.put(new ItemKey(rs.getObject("occurredAt", OffsetDateTime.class).toInstant(),
+                            rs.getLong("itemId")), mapper.toEntry(rs, codes));
+                });
         List<ItemEntry> out = new ArrayList<>(keys.size());
         for (ItemKey k : keys) {
             ItemEntry e = byKey.get(k);
@@ -96,20 +109,35 @@ public class WebLevel0Query implements Level0Query {
         return out;
     }
 
-    private static Condition range(Level0Filter f, Instant lo, Instant hi) {
-        Condition c = WQ_WEB_ITEM.userId.eq(f.userId())
-                .and(WQ_WEB_ITEM.occurredAt.ge(utc(lo)))
-                .and(WQ_WEB_ITEM.occurredAt.lt(utc(hi)));
+    /**
+     * The key-range predicate, value-free: the filter only decides which fixed fragments appear,
+     * and {@link #range(JdbcClient.StatementSpec, Level0Filter, Instant, Instant)} binds them.
+     */
+    private static String range(Level0Filter f) {
+        StringBuilder c = new StringBuilder("""
+                ("wqWebItem"."userId" = :userId and "wqWebItem"."occurredAt" >= cast(:lo as timestamptz) \
+                and "wqWebItem"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c = c.and(DSL.not(WQ_WEB_ITEM.cancelled));
+            c.append(" and not (\"wqWebItem\".\"cancelled\")");
         }
         if (!f.productTypes().isEmpty()) {
-            c = c.and(WQ_WEB_ITEM.productType.in(f.productTypes()));
+            c.append(" and \"wqWebItem\".\"productType\" in (:productTypes)");
         }
         if (!f.typeIds().isEmpty()) {
-            c = c.and(WQ_WEB_ITEM.type.in(f.typeIds()));
+            c.append(" and \"wqWebItem\".\"type\" in (:typeIds)");
         }
-        return c;
+        return c.append(')').toString();
+    }
+
+    private static JdbcClient.StatementSpec range(JdbcClient.StatementSpec spec, Level0Filter f, Instant lo, Instant hi) {
+        spec = spec.param("userId", f.userId()).param("lo", utc(lo)).param("hi", utc(hi));
+        if (!f.productTypes().isEmpty()) {
+            spec = spec.param("productTypes", f.productTypes());
+        }
+        if (!f.typeIds().isEmpty()) {
+            spec = spec.param("typeIds", f.typeIds());
+        }
+        return spec;
     }
 
     private static OffsetDateTime utc(Instant i) {

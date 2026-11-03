@@ -3,10 +3,12 @@ package wqs.read;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import wqs.config.ReaderDsl;
+import wqs.config.ReaderJdbc;
+import wqs.config.ReaderTx;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.gen.TxTypes;
@@ -18,7 +20,8 @@ abstract class Level0TestSupport extends ProjectionPropertyBase {
 
     protected static final long USER = 7001L;
 
-    @Autowired @ReaderDsl protected DSLContext readerDsl;
+    @Autowired @ReaderJdbc protected JdbcClient readerJdbc;
+    @Autowired @ReaderTx protected TransactionTemplate readerTx;
 
     protected static ProjectionItem item(
             SourceKind source, String id, String at, String product, String cancels, String detail) {

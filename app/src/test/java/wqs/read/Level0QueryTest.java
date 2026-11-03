@@ -19,6 +19,8 @@ class Level0QueryTest extends Level0TestSupport {
 
     @Autowired WebLevel0Query web;
     @Autowired CcLevel0Query cc;
+    @Autowired @org.springframework.beans.factory.annotation.Qualifier("readerDataSource")
+    javax.sql.DataSource readerDataSource;
 
     @BeforeEach
     void clean() {
@@ -39,13 +41,13 @@ class Level0QueryTest extends Level0TestSupport {
         Level0Filter all = new Level0Filter(USER, false);
         Level0Filter excl = new Level0Filter(USER, true);
 
-        assertThat(web.count(readerDsl, all, t("2034-02-01T00:00:00Z"), t("2034-02-02T00:00:00Z"))).isEqualTo(1);
+        assertThat(web.count(readerJdbc, all, t("2034-02-01T00:00:00Z"), t("2034-02-02T00:00:00Z"))).isEqualTo(1);
         // the boundary item at 02-01T00:00 is excluded by the exclusive upper bound
-        assertThat(web.count(readerDsl, all, t("2034-01-31T00:00:00Z"), t("2034-02-01T00:00:00Z"))).isEqualTo(3);
-        assertThat(web.count(readerDsl, all, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(4);
+        assertThat(web.count(readerJdbc, all, t("2034-01-31T00:00:00Z"), t("2034-02-01T00:00:00Z"))).isEqualTo(3);
+        assertThat(web.count(readerJdbc, all, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(4);
         // c is cancelled; the cancellation row x is itself an ITEM row and counts
-        assertThat(web.count(readerDsl, excl, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(3);
-        assertThat(web.count(readerDsl, new Level0Filter(USER + 1, false),
+        assertThat(web.count(readerJdbc, excl, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isEqualTo(3);
+        assertThat(web.count(readerJdbc, new Level0Filter(USER + 1, false),
                 t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"))).isZero();
     }
 
@@ -59,20 +61,20 @@ class Level0QueryTest extends Level0TestSupport {
         Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
-        List<ItemKey> all = readerDsl.transactionResult(cfg -> {
-            var tx = org.jooq.impl.DSL.using(cfg);
-            tx.execute("set local enable_indexscan = off");
-            tx.execute("set local enable_indexonlyscan = off");
-            tx.execute("set local enable_bitmapscan = off");
+        List<ItemKey> all = readerTx.execute(status -> {
+            var tx = readerJdbc;
+            tx.sql("set local enable_indexscan = off").update();
+            tx.sql("set local enable_indexonlyscan = off").update();
+            tx.sql("set local enable_bitmapscan = off").update();
             return web.keys(tx, f, lo, hi, 0, 20);
         });
         assertThat(all).hasSize(12);
         assertThat(all).extracting(ItemKey::itemId).isSortedAccordingTo(java.util.Comparator.reverseOrder());
-        List<ItemKey> page = readerDsl.transactionResult(cfg -> {
-            var tx = org.jooq.impl.DSL.using(cfg);
-            tx.execute("set local enable_indexscan = off");
-            tx.execute("set local enable_indexonlyscan = off");
-            tx.execute("set local enable_bitmapscan = off");
+        List<ItemKey> page = readerTx.execute(status -> {
+            var tx = readerJdbc;
+            tx.sql("set local enable_indexscan = off").update();
+            tx.sql("set local enable_indexonlyscan = off").update();
+            tx.sql("set local enable_bitmapscan = off").update();
             return web.keys(tx, f, lo, hi, 2, 2);
         });
         assertThat(page).isEqualTo(all.subList(2, 4));
@@ -92,9 +94,9 @@ class Level0QueryTest extends Level0TestSupport {
                     from generate_series(0, 39999) as i
                     """, USER);
             Level0Filter f = new Level0Filter(USER, false);
-            List<ItemKey> keys = web.keys(readerDsl, f, base, base.plusSeconds(50_000), 0, 50_000);
+            List<ItemKey> keys = web.keys(readerJdbc, f, base, base.plusSeconds(50_000), 0, 50_000);
             assertThat(keys).hasSize(40_000);
-            List<ItemEntry> entries = web.fetch(readerDsl, USER, keys);
+            List<ItemEntry> entries = web.fetch(readerJdbc, USER, keys);
             assertThat(entries).hasSize(40_000);
             assertThat(entries).extracting(ItemEntry::occurredAt)
                     .isSortedAccordingTo(java.util.Comparator.reverseOrder());
@@ -110,7 +112,7 @@ class Level0QueryTest extends Level0TestSupport {
      * 44 s). Timing-free: asserts the executed statement's text and its plan.
      */
     @Test
-    void fetch_joins_the_key_array_through_unnest_not_a_per_row_any() {
+    void fetch_joins_the_key_array_through_unnest_not_a_per_row_any() throws Exception {
         project(
                 item(TRANSACTION, "a", "2034-02-01T01:00:00Z", "P11", null, null),
                 item(PAYMENT, "b", "2034-02-02T01:00:00Z", "P11", null, null));
@@ -118,18 +120,16 @@ class Level0QueryTest extends Level0TestSupport {
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
         for (Level0Query q : List.of(web, cc)) {
-            List<org.jooq.Query> executed = new java.util.ArrayList<>();
-            org.jooq.DSLContext recording = org.jooq.impl.DSL.using(readerDsl.configuration().derive(
-                    org.jooq.ExecuteListener.onExecuteStart(ctx -> executed.add(ctx.query()))));
-            List<ItemKey> keys = q.keys(readerDsl, f, lo, hi, 0, 10);
-            assertThat(q.fetch(recording, USER, keys)).hasSameSizeAs(keys).isNotEmpty();
+            StatementRecorder recording = new StatementRecorder(readerDataSource);
+            List<StatementRecorder.Executed> executed = recording.executed();
+            List<ItemKey> keys = q.keys(readerJdbc, f, lo, hi, 0, 10);
+            assertThat(q.fetch(recording.client(), USER, keys)).hasSameSizeAs(keys).isNotEmpty();
 
             assertThat(executed).as(q.view() + " fetch statements").hasSize(1);
-            String sql = executed.get(0).getSQL();
+            String sql = executed.get(0).sql();
             assertThat(sql).as(q.view() + " sql").contains("unnest(cast(? as bigint[]))")
                     .doesNotContainIgnoringCase("any (").doesNotContain("::cstring");
-            String plan = String.join("\n", readerDsl.fetch(org.jooq.impl.DSL.resultQuery("explain {0}", executed.get(0)))
-                    .getValues(0, String.class));
+            String plan = String.join("\n", recording.rerun("explain", executed.get(0)));
             assertThat(plan).as(q.view() + " plan").contains("Function Scan on unnest").doesNotContain("ANY (");
         }
     }
@@ -141,10 +141,10 @@ class Level0QueryTest extends Level0TestSupport {
                 item(TRANSACTION, "feb1", "2034-02-01T01:00:00Z", "P11", null, null),
                 item(TRANSACTION, "feb2", "2034-02-02T01:00:00Z", "P11", null, null));
         Level0Filter f = new Level0Filter(USER, false);
-        List<ItemKey> keys = web.keys(readerDsl, f, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"), 0, 10);
+        List<ItemKey> keys = web.keys(readerJdbc, f, t("2034-01-01T00:00:00Z"), t("2034-03-01T00:00:00Z"), 0, 10);
         assertThat(keys).hasSize(3);
 
-        List<ItemEntry> entries = web.fetch(readerDsl, USER, keys);
+        List<ItemEntry> entries = web.fetch(readerJdbc, USER, keys);
         assertThat(entries).extracting(ItemEntry::sourceId).containsExactly("feb2", "feb1", "jan");
         ItemEntry jan = entries.get(2);
         assertThat(jan.kind()).isEqualTo("TRANSACTION");
@@ -154,9 +154,9 @@ class Level0QueryTest extends Level0TestSupport {
         assertThat(entries.get(0).detail()).isNull();
 
         List<ItemKey> reversed = List.of(keys.get(2), keys.get(0));
-        assertThat(web.fetch(readerDsl, USER, reversed)).extracting(ItemEntry::sourceId)
+        assertThat(web.fetch(readerJdbc, USER, reversed)).extracting(ItemEntry::sourceId)
                 .containsExactly("jan", "feb2");
-        assertThat(web.fetch(readerDsl, USER, List.of())).isEmpty();
+        assertThat(web.fetch(readerJdbc, USER, List.of())).isEmpty();
     }
 
     @Test
@@ -165,9 +165,9 @@ class Level0QueryTest extends Level0TestSupport {
         Level0Filter f = new Level0Filter(USER, false);
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
-        assertThat(web.count(readerDsl, f, lo, hi)).isZero();
-        assertThat(cc.count(readerDsl, f, lo, hi)).isEqualTo(1);
-        assertThat(cc.fetch(readerDsl, USER, cc.keys(readerDsl, f, lo, hi, 0, 10)))
+        assertThat(web.count(readerJdbc, f, lo, hi)).isZero();
+        assertThat(cc.count(readerJdbc, f, lo, hi)).isEqualTo(1);
+        assertThat(cc.fetch(readerJdbc, USER, cc.keys(readerJdbc, f, lo, hi, 0, 10)))
                 .extracting(ItemEntry::kind).containsExactly("PAYMENT");
     }
 
@@ -186,16 +186,16 @@ class Level0QueryTest extends Level0TestSupport {
         Instant lo = t("2034-02-01T00:00:00Z");
         Instant hi = t("2034-03-01T00:00:00Z");
         for (Level0Query q : List.of(web, cc)) {
-            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of("keno"), java.util.Set.of(), false), lo, hi))
+            assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of("keno"), java.util.Set.of(), false), lo, hi))
                     .as(q.view() + " productTypes").isEqualTo(2);
-            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of(), java.util.Set.of(TxTypes.PLAY), false), lo, hi))
+            assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of(), java.util.Set.of(TxTypes.PLAY), false), lo, hi))
                     .as(q.view() + " typeIds").isEqualTo(3);
-            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of("keno", "lottery"),
+            assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of("keno", "lottery"),
                     java.util.Set.of(TxTypes.PLAY), false), lo, hi)).as(q.view() + " both").isEqualTo(2);
-            assertThat(q.count(readerDsl, new Level0Filter(USER, java.util.Set.of("nope"), java.util.Set.of(), false), lo, hi))
+            assertThat(q.count(readerJdbc, new Level0Filter(USER, java.util.Set.of("nope"), java.util.Set.of(), false), lo, hi))
                     .as(q.view() + " unknown product type matches nothing").isZero();
             Level0Filter f = new Level0Filter(USER, java.util.Set.of("keno"), java.util.Set.of(TxTypes.WIN), false);
-            List<ItemEntry> got = q.fetch(readerDsl, USER, q.keys(readerDsl, f, lo, hi, 0, 10));
+            List<ItemEntry> got = q.fetch(readerJdbc, USER, q.keys(readerJdbc, f, lo, hi, 0, 10));
             assertThat(got).extracting(ItemEntry::sourceId).containsExactly("b");
             assertThat(got.get(0).productType()).isEqualTo("keno");
             assertThat(got.get(0).productId()).isEqualTo("id-b");
@@ -209,7 +209,7 @@ class Level0QueryTest extends Level0TestSupport {
      * filter columns ride in INCLUDE -- not a seq scan.
      */
     @Test
-    void list_filters_use_covering_index() {
+    void list_filters_use_covering_index() throws Exception {
         partitionManager.ensurePartitionsAhead(java.time.YearMonth.of(2034, 5), 0);
         try {
             // 60 users x 2000 rows over May 2034; USER is one of them. Set-based, like the bulk test.
@@ -225,13 +225,11 @@ class Level0QueryTest extends Level0TestSupport {
             dsl().execute("vacuum (analyze) \"wqWebItem\"");
             Level0Filter f = new Level0Filter(USER, java.util.Set.of("keno", "bingo"),
                     java.util.Set.of(TxTypes.PLAY), false);
-            List<org.jooq.Query> executed = new java.util.ArrayList<>();
-            org.jooq.DSLContext recording = org.jooq.impl.DSL.using(readerDsl.configuration().derive(
-                    org.jooq.ExecuteListener.onExecuteStart(ctx -> executed.add(ctx.query()))));
-            web.keys(recording, f, t("2034-05-10T00:00:00Z"), t("2034-05-17T00:00:00Z"), 0, 50);
+            StatementRecorder recording = new StatementRecorder(readerDataSource);
+            List<StatementRecorder.Executed> executed = recording.executed();
+            web.keys(recording.client(), f, t("2034-05-10T00:00:00Z"), t("2034-05-17T00:00:00Z"), 0, 50);
             assertThat(executed).hasSize(1);
-            String plan = String.join("\n", readerDsl.fetch(org.jooq.impl.DSL.resultQuery("explain {0}", executed.get(0)))
-                    .getValues(0, String.class));
+            String plan = String.join("\n", recording.rerun("explain", executed.get(0)));
             assertThat(plan).containsPattern("Index Only Scan using \"wqWebItem_\\d+_\\d+_userId_occurredAt_itemId_cancelled_produc").doesNotContain("Seq Scan");
         } finally {
             clearProjection();

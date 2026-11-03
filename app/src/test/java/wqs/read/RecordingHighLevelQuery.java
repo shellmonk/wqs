@@ -3,7 +3,7 @@ package wqs.read;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import org.jooq.DSLContext;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.domain.ViewKind;
 import wqs.read.RecordingLevel0Query.KeysCall;
 
@@ -24,13 +24,13 @@ final class RecordingHighLevelQuery implements HighLevelQuery {
     }
 
     @Override
-    public long count(DSLContext tx, HighLevelFilter f, Instant lo, Instant hi) {
+    public long count(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi) {
         countCalls++;
         return delegate.count(tx, f, lo, hi);
     }
 
     @Override
-    public List<HighLevelKey> keys(DSLContext tx, HighLevelFilter f, Instant lo, Instant hi, long offset, int limit) {
+    public List<HighLevelKey> keys(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi, long offset, int limit) {
         keysCalls.add(new KeysCall(lo, hi, offset, limit));
         return delegate.keys(tx, f, lo, hi, offset, limit);
     }

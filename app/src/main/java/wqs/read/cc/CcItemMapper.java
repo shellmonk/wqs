@@ -1,41 +1,35 @@
 package wqs.read.cc;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
-import org.jooq.JSONB;
-import org.mapstruct.Context;
-import org.mapstruct.Mapper;
-import org.mapstruct.Mapping;
-import org.mapstruct.Named;
-import wqs.db.generated.tables.records.WqCcItemRecord;
+import org.springframework.stereotype.Component;
 import wqs.domain.SourceKind;
 import wqs.read.ItemEntry;
 import wqs.read.TypeCodes;
 
-@Mapper(componentModel = "spring")
-public interface CcItemMapper {
+/** Maps one "wqCcItem" row of the current result-set position to its wire entry. */
+@Component
+public class CcItemMapper {
 
-    @Mapping(target = "kind", source = "source", qualifiedByName = "kindName")
-    @Mapping(target = "occurredAt", source = "occurredAt")
-    @Mapping(target = "detail", source = "detail", qualifiedByName = "detailJson")
-    @Mapping(target = "transactionType", source = "type", qualifiedByName = "typeCode")
-    ItemEntry toEntry(WqCcItemRecord r, @Context TypeCodes codes);
-
-    @Named("typeCode")
-    default String typeCode(Short type, @Context TypeCodes codes) {
-        return codes.codeOf(type);
-    }
-
-    @Named("kindName")
-    default String kindName(Short source) {
-        return SourceKind.ofCode(source).name();
-    }
-
-    default java.time.Instant instant(OffsetDateTime t) {
-        return t == null ? null : t.toInstant();
-    }
-
-    @Named("detailJson")
-    default String detailJson(JSONB d) {
-        return d == null ? null : d.data();
+    /** The row's entry; its "type" id resolves through {@code codes}. */
+    public ItemEntry toEntry(ResultSet rs, TypeCodes codes) throws SQLException {
+        OffsetDateTime occurredAt = rs.getObject("occurredAt", OffsetDateTime.class);
+        return new ItemEntry(
+                SourceKind.ofCode(rs.getShort("source")).name(),
+                rs.getString("sourceId"),
+                occurredAt == null ? null : occurredAt.toInstant(),
+                rs.getString("productId"),
+                rs.getString("productType"),
+                rs.getString("batchId"),
+                rs.getString("subBatchId"),
+                codes.codeOf(rs.getShort("type")),
+                rs.getBigDecimal("amount"),
+                rs.getString("currency"),
+                rs.getBigDecimal("balanceAfter"),
+                rs.getBoolean("cancelled"),
+                rs.getString("cancelledBy"),
+                rs.getString("cancels"),
+                rs.getString("detail"));
     }
 }

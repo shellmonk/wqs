@@ -1,14 +1,10 @@
 package wqs.read.cc;
 
-import static wqs.db.generated.Tables.WQ_CC_HIGH_LEVEL;
-
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
-import org.jooq.Condition;
-import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import wqs.domain.ViewKind;
 import wqs.read.HighLevelFilter;
@@ -16,7 +12,7 @@ import wqs.read.HighLevelKey;
 import wqs.read.HighLevelQuery;
 
 /**
- * Level-1/2 reads of the cc view's page index (spec 5.6); touches only WQ_CC_HIGH_LEVEL. Every
+ * Level-1/2 reads of the cc view's page index (spec 5.6); touches only "wqCcHighLevel". Every
  * predicate and sort column is in "wqCcHighLevel_cover" -- key ("userId", "occurredAt" desc,
  * "kind" desc, "refId" desc), INCLUDE ("productType", "visibleExclCancelled") -- so both queries
  * are covering index scans.
@@ -24,44 +20,61 @@ import wqs.read.HighLevelQuery;
 @Component
 public class CcHighLevelQuery implements HighLevelQuery {
 
+    private static final String COUNT = """
+            select count(*) from "wqCcHighLevel"
+            where %s
+            """;
+
+    private static final String KEYS = """
+            select "wqCcHighLevel"."occurredAt", "wqCcHighLevel"."kind", "wqCcHighLevel"."refId"
+            from "wqCcHighLevel"
+            where %s
+            order by "wqCcHighLevel"."occurredAt" desc, "wqCcHighLevel"."kind" desc, "wqCcHighLevel"."refId" desc
+            offset :offset rows fetch next :limit rows only
+            """;
+
     @Override
     public ViewKind view() {
         return ViewKind.CC;
     }
 
     @Override
-    public long count(DSLContext tx, HighLevelFilter f, Instant lo, Instant hi) {
-        Long n = tx.select(DSL.count())
-                .from(WQ_CC_HIGH_LEVEL)
-                .where(range(f, lo, hi))
-                .fetchOne(0, Long.class);
-        return n == null ? 0 : n;
+    public long count(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi) {
+        return range(tx.sql(COUNT.formatted(range(f))), f, lo, hi).query(Long.class).single();
     }
 
     @Override
     public List<HighLevelKey> keys(
-            DSLContext tx, HighLevelFilter f, Instant lo, Instant hi, long offset, int limit) {
-        return tx.select(WQ_CC_HIGH_LEVEL.occurredAt, WQ_CC_HIGH_LEVEL.kind, WQ_CC_HIGH_LEVEL.refId)
-                .from(WQ_CC_HIGH_LEVEL)
-                .where(range(f, lo, hi))
-                .orderBy(WQ_CC_HIGH_LEVEL.occurredAt.desc(), WQ_CC_HIGH_LEVEL.kind.desc(),
-                        WQ_CC_HIGH_LEVEL.refId.desc())
-                .offset(offset)
-                .limit(limit)
-                .fetch(r -> new HighLevelKey(r.value1().toInstant(), r.value2(), r.value3()));
+            JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi, long offset, int limit) {
+        return range(tx.sql(KEYS.formatted(range(f))), f, lo, hi)
+                .param("offset", offset)
+                .param("limit", limit)
+                .query((rs, n) -> new HighLevelKey(rs.getObject("occurredAt", OffsetDateTime.class).toInstant(),
+                        rs.getShort("kind"), rs.getString("refId")))
+                .list();
     }
 
-    private static Condition range(HighLevelFilter f, Instant lo, Instant hi) {
-        Condition c = WQ_CC_HIGH_LEVEL.userId.eq(f.userId())
-                .and(WQ_CC_HIGH_LEVEL.occurredAt.ge(utc(lo)))
-                .and(WQ_CC_HIGH_LEVEL.occurredAt.lt(utc(hi)));
+    /** The key-range predicate, value-free: the filter only decides which fixed fragments appear. */
+    private static String range(HighLevelFilter f) {
+        StringBuilder c = new StringBuilder("""
+                ("wqCcHighLevel"."userId" = :userId and "wqCcHighLevel"."occurredAt" >= cast(:lo as timestamptz) \
+                and "wqCcHighLevel"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c = c.and(WQ_CC_HIGH_LEVEL.visibleExclCancelled.isTrue());
+            c.append(" and \"wqCcHighLevel\".\"visibleExclCancelled\" = true");
         }
         if (!f.productTypes().isEmpty()) {
-            c = c.and(WQ_CC_HIGH_LEVEL.productType.in(f.productTypes()));
+            c.append(" and \"wqCcHighLevel\".\"productType\" in (:productTypes)");
         }
-        return c;
+        return c.append(')').toString();
+    }
+
+    private static JdbcClient.StatementSpec range(
+            JdbcClient.StatementSpec spec, HighLevelFilter f, Instant lo, Instant hi) {
+        spec = spec.param("userId", f.userId()).param("lo", utc(lo)).param("hi", utc(hi));
+        if (!f.productTypes().isEmpty()) {
+            spec = spec.param("productTypes", f.productTypes());
+        }
+        return spec;
     }
 
     private static OffsetDateTime utc(Instant i) {

@@ -1,7 +1,5 @@
 package wqs.read.cc;
 
-import static wqs.db.generated.Tables.WQ_CC_ITEM;
-
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -10,11 +8,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.jooq.Condition;
-import org.jooq.DSLContext;
-import org.jooq.Table;
-import org.jooq.impl.DSL;
-import org.jooq.impl.SQLDataType;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import wqs.db.TxTypeRegistry;
 import wqs.domain.ViewKind;
@@ -24,9 +18,33 @@ import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
 import wqs.read.TypeCodes;
 
-/** Level-0 reads of the cc view; touches only WQ_CC_ITEM. */
+/** Level-0 reads of the cc view; touches only "wqCcItem". */
 @Component
 public class CcLevel0Query implements Level0Query {
+
+    private static final String COUNT = """
+            select count(*) from "wqCcItem"
+            where %s
+            """;
+
+    private static final String KEYS = """
+            select "wqCcItem"."occurredAt", "wqCcItem"."itemId" from "wqCcItem"
+            where %s
+            order by "wqCcItem"."occurredAt" desc, "wqCcItem"."itemId" desc
+            offset :offset rows fetch next :limit rows only
+            """;
+
+    private static final String FETCH = """
+            select "wqCcItem"."userId", "wqCcItem"."itemId", "wqCcItem"."source", "wqCcItem"."sourceId",
+                   "wqCcItem"."occurredAt", "wqCcItem"."productId", "wqCcItem"."batchId",
+                   "wqCcItem"."subBatchId", "wqCcItem"."type", "wqCcItem"."amount", "wqCcItem"."currency",
+                   "wqCcItem"."balanceAfter", "wqCcItem"."cancelled", "wqCcItem"."cancelledBy",
+                   "wqCcItem"."cancels", "wqCcItem"."detail", "wqCcItem"."ingestedAt", "wqCcItem"."productType"
+            from "wqCcItem"
+            join unnest(cast(:ids as bigint[])) as "wanted" ("id") on "wqCcItem"."itemId" = "wanted"."id"
+            where ("wqCcItem"."userId" = :userId
+                   and "wqCcItem"."occurredAt" between cast(:min as timestamptz) and cast(:max as timestamptz))
+            """;
 
     private final CcItemMapper mapper;
     private final TxTypeRegistry txTypes;
@@ -42,28 +60,23 @@ public class CcLevel0Query implements Level0Query {
     }
 
     @Override
-    public long count(DSLContext tx, Level0Filter f, Instant lo, Instant hi) {
-        Long n = tx.select(DSL.count())
-                .from(WQ_CC_ITEM)
-                .where(range(f, lo, hi))
-                .fetchOne(0, Long.class);
-        return n == null ? 0 : n;
+    public long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi) {
+        return range(tx.sql(COUNT.formatted(range(f))), f, lo, hi).query(Long.class).single();
     }
 
     @Override
     public List<ItemKey> keys(
-            DSLContext tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
-        return tx.select(WQ_CC_ITEM.occurredAt, WQ_CC_ITEM.itemId)
-                .from(WQ_CC_ITEM)
-                .where(range(f, lo, hi))
-                .orderBy(WQ_CC_ITEM.occurredAt.desc(), WQ_CC_ITEM.itemId.desc())
-                .offset(offset)
-                .limit(limit)
-                .fetch(r -> new ItemKey(r.value1().toInstant(), r.value2()));
+            JdbcClient tx, Level0Filter f, Instant lo, Instant hi, long offset, int limit) {
+        return range(tx.sql(KEYS.formatted(range(f))), f, lo, hi)
+                .param("offset", offset)
+                .param("limit", limit)
+                .query((rs, n) -> new ItemKey(
+                        rs.getObject("occurredAt", OffsetDateTime.class).toInstant(), rs.getLong("itemId")))
+                .list();
     }
 
     @Override
-    public List<ItemEntry> fetch(DSLContext tx, long userId, List<ItemKey> keys) {
+    public List<ItemEntry> fetch(JdbcClient tx, long userId, List<ItemKey> keys) {
         if (keys.isEmpty()) {
             return List.of();
         }
@@ -73,19 +86,19 @@ public class CcLevel0Query implements Level0Query {
         // unnest(?), which Postgres evaluates once; "itemId" = any(?) re-evaluates the text-bound
         // array per row (array_in is not constant-folded), O(rows x keys). itemId comes from a
         // global sequence, so within the user and the occurredAt window it identifies one row.
-        Long[] ids = keys.stream().map(ItemKey::itemId).toArray(Long[]::new);
-        Table<?> wanted = DSL.unnest(DSL.val(ids, SQLDataType.BIGINT.getArrayDataType())).as("wanted", "id");
-        // Codes resolve through the caller's transaction (M2), never the registry's writer DSL.
+        long[] ids = keys.stream().mapToLong(ItemKey::itemId).toArray();
+        // Codes resolve through the caller's transaction (M2), never the registry's writer client.
         TypeCodes codes = id -> txTypes.codeOf(tx, id);
         Map<ItemKey, ItemEntry> byKey = new HashMap<>();
-        tx.select(WQ_CC_ITEM.fields())
-                .from(WQ_CC_ITEM)
-                .join(wanted).on(WQ_CC_ITEM.itemId.eq(wanted.field("id", Long.class)))
-                .where(WQ_CC_ITEM.userId.eq(userId))
-                .and(WQ_CC_ITEM.occurredAt.between(utc(min), utc(max)))
-                .fetchInto(WQ_CC_ITEM)
-                .forEach(r -> byKey.put(
-                        new ItemKey(r.getOccurredAt().toInstant(), r.getItemId()), mapper.toEntry(r, codes)));
+        tx.sql(FETCH)
+                .param("ids", ids)
+                .param("userId", userId)
+                .param("min", utc(min))
+                .param("max", utc(max))
+                .query(rs -> {
+                    byKey.put(new ItemKey(rs.getObject("occurredAt", OffsetDateTime.class).toInstant(),
+                            rs.getLong("itemId")), mapper.toEntry(rs, codes));
+                });
         List<ItemEntry> out = new ArrayList<>(keys.size());
         for (ItemKey k : keys) {
             ItemEntry e = byKey.get(k);
@@ -96,20 +109,35 @@ public class CcLevel0Query implements Level0Query {
         return out;
     }
 
-    private static Condition range(Level0Filter f, Instant lo, Instant hi) {
-        Condition c = WQ_CC_ITEM.userId.eq(f.userId())
-                .and(WQ_CC_ITEM.occurredAt.ge(utc(lo)))
-                .and(WQ_CC_ITEM.occurredAt.lt(utc(hi)));
+    /**
+     * The key-range predicate, value-free: the filter only decides which fixed fragments appear,
+     * and {@link #range(JdbcClient.StatementSpec, Level0Filter, Instant, Instant)} binds them.
+     */
+    private static String range(Level0Filter f) {
+        StringBuilder c = new StringBuilder("""
+                ("wqCcItem"."userId" = :userId and "wqCcItem"."occurredAt" >= cast(:lo as timestamptz) \
+                and "wqCcItem"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
-            c = c.and(DSL.not(WQ_CC_ITEM.cancelled));
+            c.append(" and not (\"wqCcItem\".\"cancelled\")");
         }
         if (!f.productTypes().isEmpty()) {
-            c = c.and(WQ_CC_ITEM.productType.in(f.productTypes()));
+            c.append(" and \"wqCcItem\".\"productType\" in (:productTypes)");
         }
         if (!f.typeIds().isEmpty()) {
-            c = c.and(WQ_CC_ITEM.type.in(f.typeIds()));
+            c.append(" and \"wqCcItem\".\"type\" in (:typeIds)");
         }
-        return c;
+        return c.append(')').toString();
+    }
+
+    private static JdbcClient.StatementSpec range(JdbcClient.StatementSpec spec, Level0Filter f, Instant lo, Instant hi) {
+        spec = spec.param("userId", f.userId()).param("lo", utc(lo)).param("hi", utc(hi));
+        if (!f.productTypes().isEmpty()) {
+            spec = spec.param("productTypes", f.productTypes());
+        }
+        if (!f.typeIds().isEmpty()) {
+            spec = spec.param("typeIds", f.typeIds());
+        }
+        return spec;
     }
 
     private static OffsetDateTime utc(Instant i) {

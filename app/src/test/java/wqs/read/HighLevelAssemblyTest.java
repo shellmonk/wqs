@@ -7,12 +7,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
-import org.jooq.DSLContext;
-import org.jooq.ExecuteContext;
-import org.jooq.ExecuteListener;
-import org.jooq.impl.DSL;
-import org.jooq.impl.DefaultExecuteListenerProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -54,6 +48,8 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     @Autowired WebHighLevelAssembly webAssembly;
     @Autowired CcHighLevelAssembly ccAssembly;
     @Autowired wqs.db.TxTypeRegistry txTypes;
+    @Autowired @org.springframework.beans.factory.annotation.Qualifier("readerDataSource")
+    javax.sql.DataSource readerDataSource;
 
     @BeforeEach
     void seed() {
@@ -315,18 +311,17 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
         for (ViewKind v : ViewKind.values()) {
             HighLevelItemQuery items = v == ViewKind.WEB ? webAssembly : ccAssembly;
             for (AggregationLevel level : List.of(AggregationLevel.L1, AggregationLevel.L2)) {
-                List<org.jooq.Query> executed = new ArrayList<>();
+                StatementRecorder recording = new StatementRecorder(readerDataSource);
                 HighLevelAssembler.Nesting n = new HighLevelAssembler.Nesting(level, Set.of(), false, TO);
                 // 3001 entries, pageSize 7 -> page 429 holds n3..n0 and L
                 HighLevelPage<HighLevelEntry> page = reader.readHighLevel(
                         new HighLevelRequest(v, level, new HighLevelFilter(USER, false), FROM, TO, 429, 7),
-                        (tx, keys) -> assembler.assemble(DSL.using(tx.configuration().derive(
-                                ExecuteListener.onExecuteStart(ctx -> executed.add(ctx.query())))), items, USER, n, keys));
+                        (tx, keys) -> assembler.assemble(recording.client(), items, USER, n, keys));
                 assertThat(ids(page.entries())).containsExactly("n3", "n2", "n1", "n0", "L");
                 assertThat(((SessionView) page.entries().get(4)).endedAt()).isEqualTo("2034-02-27T00:00:00Z");
                 long examined = 0;
-                for (org.jooq.Query q : executed) {
-                    String plan = String.valueOf(readerDsl.fetch(DSL.resultQuery("explain (analyze, format json) {0}", q)).getValue(0, 0));
+                for (StatementRecorder.Executed q : recording.executed()) {
+                    String plan = recording.rerun("explain (analyze, format json)", q).get(0);
                     examined += examinedItemRows(json.readTree(plan));
                 }
                 assertThat(examined).as(v + " " + level + " item and play rows examined").isLessThanOrEqualTo(40);
@@ -414,23 +409,15 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
     /** Statements the assembler ran for page 1 of {@code pageSize}, which must hold both kinds of entry. */
     private int assemblyStatements(ViewKind v, HighLevelItemQuery items, AggregationLevel level,
                                    Set<String> types, int pageSize) {
-        AtomicInteger statements = new AtomicInteger();
-        ExecuteListener counting = new ExecuteListener() {
-            @Override
-            public void executeStart(ExecuteContext ctx) {
-                statements.incrementAndGet();
-            }
-        };
+        // JDBC-level: every statement the assembler sends, joined to the reader transaction.
+        StatementRecorder counting = new StatementRecorder(readerDataSource);
         HighLevelAssembler.Nesting n = new HighLevelAssembler.Nesting(level, types, false, TO);
         HighLevelPage<HighLevelEntry> page = reader.readHighLevel(
                 new HighLevelRequest(v, level, new HighLevelFilter(USER, false), FROM, TO, 1, pageSize),
-                (tx, keys) -> {
-                    DSLContext observed = DSL.using(tx.configuration().derive(new DefaultExecuteListenerProvider(counting)));
-                    return assembler.assemble(observed, items, USER, n, keys);
-                });
+                (tx, keys) -> assembler.assemble(counting.client(), items, USER, n, keys));
         assertThat(page.entries()).hasSize(pageSize);
         assertThat(page.entries()).hasAtLeastOneElementOfType(SessionView.class).hasAtLeastOneElementOfType(TxView.class);
-        return statements.get();
+        return counting.count();
     }
 
     private ProjectionResponse<HighLevelEntry> read(ViewKind v, AggregationLevel level, boolean excl,
