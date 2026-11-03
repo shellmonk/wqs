@@ -266,7 +266,39 @@ an item whose currency differs from its session's is dead-lettered (O-4).
 
 ### Delta endpoint contract
 
-`GET /wallet/delta` accepts a timestamp and returns up to **1000** changed rows.
+`GET /wallet/delta` accepts a timestamp and returns up to **1000** changed rows. It is **open** (no
+authentication) and returns **one mixed feed**: a JSON array of objects with one identical
+structure — the union of the fields of the four polled tables — plus a `"source"` field naming
+the table (user, 2026-11-03). Field names are **assumed** to be the source DDL columns in camelCase
+(`paymentId`, `ownerId`, `prizeAmount`, …); the cursor parameter name (`wqs.delta.cursor-param`,
+default `from`), the base URL, the page limit and the `source` value → source mapping
+(`wqs.delta.sources`, default `walPayments`, `walClaimablePrizes`, `walManualAdjustmentRequests`,
+`walLimits`) are configuration, so a real sample changes only the decoder, its fixtures and
+config.
+
+**Polled row → item** (phase 6):
+
+| | Payments | Claimable prizes | Adjustment requests | Limits |
+|---|---|---|---|---|
+| `sourceId` | `paymentId` | `id` | `id` | `id` |
+| owner | `ownerType`/`ownerId` | `playerId` (a player) | `userType`/`userId` | `userType`/`userId` |
+| `occurredAt` | `created` | `created` | `issued` | `created` |
+| version | `updated` | `updated` | `statusDate` | `updated` |
+| amount | `amount`, + IN / − OUT (`paymentInOut`) | `prizeAmount` | `amount`, + DEPOSIT / − WITHDRAWAL | `amount`, null → 0 |
+| type code | `paymentType` (null → `PAYMENT`) | `CLAIMABLE_PRIZE` | `transactionType` | `limitType` |
+| product, batch | — | `productId`, `productType`, `batchId`, `subBatchId` | — | — |
+
+Currency null → `XXX`. Only players are projected. Polled rows are never zero-amount-hidden and
+never cancel anything. Timestamps without a zone are read as UTC; all are truncated to µs. Detail
+is a per-source allowlist (no card, bank, email or XML data).
+
+**Versioned apply.** First sight inserts like a stream item and records the version in the
+locator (`"versionAt"`). A strictly newer version updates only `"detail"` (which carries the
+status) in every view the source feeds; equal is a duplicate; older is ignored and counted
+(`wqs.delta.stale`). A newer version that changes any immutable field (`occurredAt`, amount,
+currency, type, product, batch, user) is dead-lettered `immutable-field-changed` — the O-15
+default says only status changes, and refusing anything else loudly is safer than an untested
+retract-and-reapply.
 
 Two hazards follow from a timestamp-only cursor:
 
@@ -299,7 +331,7 @@ Two hazards follow from a timestamp-only cursor:
 | `"wqGroupLocator"` | `(userId, batchId, subBatchId)` → `"startedAt"` of the session / play row (§5.5) | not partitioned |
 | `"wqPendingCancel"` | Cancels whose original has not yet arrived | not partitioned |
 | `"wqDeadLetter"` | Events that repeatedly failed to project | not partitioned |
-| `"wqIngestWatermark"` | Delta cursor per source | not partitioned |
+| `"wqIngestWatermark"` | Delta cursor (one row, `wallet-delta`, monotonic) | not partitioned |
 | `"wqStreamOffset"` | RabbitMQ stream offset | not partitioned |
 | `"wqTxType"` | Transaction-type code table (code → id, PLAY/WIN/NEUTRAL); `"wqProduct"` was dropped in V10 | not partitioned |
 
@@ -781,7 +813,7 @@ follow §3. Those tables therefore live in a **separate `quartz` schema**, keepi
 
 | Job | Purpose | Reference |
 |---|---|---|
-| `deltaPoll` (one per source) | Poll `/wallet/delta` with watermark and overlap | §4, §6 |
+| `deltaPoll` (one job — the feed is mixed) | Poll `/wallet/delta` with watermark and overlap; disabled by default | §4, §6 |
 | `partitionRollover` | Ensure N months of partitions exist ahead | §5.8 |
 | `counterReconciliation` | Sample counters against actual counts, emit drift | §8.7 |
 | `highLevelReconciliation` | Sample the high-level index against its sources | §8.7 |
@@ -797,12 +829,16 @@ same watermark row.
 ```yaml
 wqs:
   jobs:
-    delta-payments:
-      enabled: true
+    delta-poll:
+      enabled: false                   # closed by default, like the stream
       intervalSeconds: 5
-      misfirePolicy: do-nothing        # never queue catch-up fires
-      overlapWindowSeconds: 120
-      pageLimit: 1000
+      misfirePolicy: DO_NOTHING        # never queue catch-up fires
+  delta:                               # poller settings (phase 6)
+    base-url: http://wallet:8080       # no default; WQS_DELTA_BASE_URL
+    cursor-param: from
+    page-limit: 1000
+    overlap: 120s
+    max-pages-per-run: 20
     partition-rollover:
       enabled: true
       cron: "0 0 3 * * ?"
@@ -1559,7 +1595,7 @@ anything is broken, and it is the only failure whose impact is total.
 | O-5 | Which of the five sources can actually be cancelled? | No; the locator covers all sources regardless |
 | O-6 | ~~The remaining "few other" query parameters~~ **Answered: `docs/reference/api-contract.md`, interpreted in §4.1** | —
 | O-7 | ~~Exact response field contracts per view~~ **Answered: `docs/reference/api-contract.md`, interpreted in §4.1 (`status` deferred)** | —
-| O-13 | Full field lists from the RabbitMQ stream and from each `/wallet/delta` source | **Stream: answered (§4.1).** Delta sources still open. Structural columns are known; unenumerated source fields land in `"detail" jsonb` (§5.3) and are promoted to real columns only if they need indexing or filtering |
+| O-13 | Full field lists from the RabbitMQ stream and from each `/wallet/delta` source | **Stream: answered (§4.1). Delta: structure answered (one union feed + `source`, §4); JSON field names assumed from the DDL.** Structural columns are known; unenumerated source fields land in `"detail" jsonb` (§5.3) and are promoted to real columns only if they need indexing or filtering |
 | O-8 | Aurora PostgreSQL major version | Assumed 16; affects Testcontainers pinning |
 | O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
 | O-10 | ~~How does a client select the eInstant view — explicit product ids, or a category parameter?~~ **Answered: a `productTypes` list matching the item's product type string** | —
@@ -1628,7 +1664,7 @@ Each phase ends with its named properties passing — not with code merely compi
 | 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
 | 4 *(done)* | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (`none` / `trusted-header`, pending O-2); covering indexes; reader/writer datasources; consumer start self-heal; broker end-to-end test | **P-3**, **P-5**, **P-6**, security test (§9) |
 | 5 *(done)* | Source contract (§4.1): real stream decoder, V10/V11 string product dimensions and `"wqTxType"`, product-type × type counters, ingest rules; API reshaped to the contract with list filters; levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | Fixed-dataset tests for P-3/P-5/P-6 at both page units, P-4 at the response, P-7; property tests made opt-in |
-| 6 | Delta pollers for the four polled sources (mutable: versioned upsert that retracts the old version's counter/rollup contributions, §4); watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
+| 6 *(done)* | Delta poller for the four polled sources (mutable: versioned upsert of status/detail, immutable-field changes dead-lettered, §4); watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
 | 7 | Reconciliation jobs, SLO dashboards and alarms, benchmark harness and recorded baselines | Drift metrics at zero; alarms firing on injected faults; baseline capture |
 
 **Observability is not phase 7.** Each phase ships the metrics for what it builds — ingest lag and
