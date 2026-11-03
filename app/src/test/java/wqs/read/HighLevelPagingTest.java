@@ -171,9 +171,9 @@ class HighLevelPagingTest extends ReadPropertyBase {
     }
 
     /**
-     * The optimisation itself (spec 7.6), as in phase 4's P-6: a non-empty page runs ONE key
-     * query from {@code from} to the end of a decomposition segment, with an offset that is a
-     * residual strictly inside that segment. Naive OFFSET -- [from, to) with the full offset --
+     * The optimisation itself (spec 7.6, plan D4), as in phase 4's P-6: a non-empty page runs ONE
+     * key query from the start of the segment holding its last unit to the end of a decomposition
+     * segment, with an offset that is a residual strictly inside that segment. Naive OFFSET -- [from, to) with the full offset --
      * fails this whenever the page starts below the newest segment.
      */
     private void assertWalkRan(ViewKind v, HighLevelFilter f, Range r, boolean emptyPage,
@@ -184,7 +184,19 @@ class HighLevelPagingTest extends ReadPropertyBase {
         }
         assertThat(recording.keysCalls).as(as).hasSize(1);
         RecordingLevel0Query.KeysCall call = recording.keysCalls.get(0);
-        assertThat(call.lo()).as(as).isEqualTo(r.from());
+        // Plan D4: the lower bound is the start of the segment holding the page's last unit --
+        // the oldest segment the page needs, never below from.
+        Segment bottom = RangeDecomposition.newestFirst(r.from(), r.to()).stream()
+                .filter(s -> s.start().equals(call.lo()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(as + ": key query lo " + call.lo() + " is no segment start"));
+        assertThat(call.lo()).as(as).isAfterOrEqualTo(r.from());
+        long need = call.offset() + call.limit();
+        assertThat(oracle.highLevelCount(v, f, call.lo(), call.hi())).as(as + " page inside [lo, hi)").isGreaterThanOrEqualTo(need);
+        if (bottom.end().isBefore(call.hi())) {
+            assertThat(oracle.highLevelCount(v, f, bottom.end(), call.hi())).as(as + " lo is the oldest segment needed")
+                    .isLessThan(need);
+        }
         Segment target = RangeDecomposition.newestFirst(r.from(), r.to()).stream()
                 .filter(s -> s.end().equals(call.hi()))
                 .findFirst()

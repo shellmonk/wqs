@@ -210,10 +210,15 @@ public class ProjectionReader {
     private record Outcome<E>(Walk<?> walk, List<E> entries) {}
 
     /**
-     * The counter-assisted offset walk (spec 7.6), inside the caller's transaction: count every
-     * segment of [from, to), walk them newest-first to the segment holding the page's first unit,
-     * then run ONE ordered key query from that segment's end down to {@code from}, skipping only
-     * the residual inside it. A page past the end runs no key query.
+     * The counter-assisted offset walk (spec 7.6, plan D4), inside the caller's transaction:
+     * count every segment of [from, to) and walk them newest-first, to the segment holding the
+     * page's first unit and on to the segment holding its last (where the running count from the
+     * first reaches residual + limit). ONE ordered key query then runs over exactly those
+     * segments -- from the first's end down to the last's start, never below {@code from} --
+     * skipping only the residual. Segment counts are exact, so the bounded range holds the
+     * page's units in the same order as [from, end) would; units tied on one instant share a day,
+     * and so a segment, so the bound never splits a tie. Only the partitions of the page's own
+     * days are opened. A page past the end runs no key query.
      */
     private <K> Walk<K> walk(JdbcClient tx, Unit<K> u, Instant from, Instant to, long page, long pageSize) {
         SegmentCounts sc = segmentCounts(tx, u, from, to);
@@ -231,12 +236,24 @@ public class ProjectionReader {
             i++;
         }
         int limit = (int) Math.min(Math.min(pageSize, total - offset), Integer.MAX_VALUE);
-        List<K> keys = u.keys().keys(tx, from, sc.segments().get(i).end(), residual, limit);
+        // residual + limit <= the units from segment i to the oldest, so j stays inside the array.
+        int j = i;
+        long through = counts[i];
+        while (through < residual + limit) {
+            j++;
+            through += counts[j];
+        }
+        Instant lo = max(from, sc.segments().get(j).start());
+        List<K> keys = u.keys().keys(tx, lo, sc.segments().get(i).end(), residual, limit);
         Set<YearMonth> months = new HashSet<>();
         for (K k : keys) {
             months.add(YearMonth.from(u.occurredAt().apply(k).atOffset(ZoneOffset.UTC)));
         }
         return new Walk<>(total, sc.counterRows(), residual, keys, months.size());
+    }
+
+    private static Instant max(Instant a, Instant b) {
+        return a.isAfter(b) ? a : b;
     }
 
     private void record(int level, ViewKind view, long effective, Walk<?> w) {

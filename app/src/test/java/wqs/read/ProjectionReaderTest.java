@@ -69,18 +69,18 @@ class ProjectionReaderTest extends ReadPropertyBase {
      * plus a live count of the two partial boundary days, and equals a live COUNT -- at both page
      * units, in both views, with and without excludeCancelled. Rows sit on both sides of each
      * bound inside the partial days, sessions span midnight, payments are /cc only, and some
-     * transactions are cancelled.
+     * transactions are cancelled. (2037-2040: years no other test drops partitions of.)
      */
     @Test
     void totals_over_more_than_1000_days_equal_a_live_count() {
-        Instant from = Instant.parse("2031-03-10T13:00:00Z");
-        Instant to = Instant.parse("2034-06-20T05:00:00Z");
+        Instant from = Instant.parse("2037-03-10T13:00:00Z");
+        Instant to = Instant.parse("2040-06-20T05:00:00Z");
         List<ProjectionTransaction> d = new ArrayList<>(List.of(
-                transaction("lo-out", "2031-03-10T12:59:59Z"),
-                transaction("lo-in", "2031-03-10T13:00:00Z"),
-                transaction("hi-in", "2034-06-20T04:59:59Z"),
-                transaction("hi-out", "2034-06-20T05:00:00Z")));
-        Instant t = Instant.parse("2031-03-11T08:00:00Z");
+                transaction("lo-out", "2037-03-10T12:59:59Z"),
+                transaction("lo-in", "2037-03-10T13:00:00Z"),
+                transaction("hi-in", "2040-06-20T04:59:59Z"),
+                transaction("hi-out", "2040-06-20T05:00:00Z")));
+        Instant t = Instant.parse("2037-03-11T08:00:00Z");
         for (int n = 0; t.isBefore(to); n++, t = t.plus(java.time.Duration.ofHours(4 * 24 + 7))) {
             if (n % 3 == 0) {
                 d.add(sessioned("s" + n + "a", t.toString(), "b" + n));
@@ -256,9 +256,10 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
     /**
      * Spec 7.6: the walk skips whole segments by their counts, so the key query starts at the
-     * target segment's end with only the residual. Page 3 of size 2 is offset 4; the four newer
-     * days hold one transaction each, so the walk lands in the Jan 5 day with residual 0 -- naive
-     * OFFSET would query [from, to) with offset 4.
+     * target segment's end with only the residual, down to the start of the segment holding the
+     * page's last row (plan D4). Page 3 of size 2 is offset 4; the four newer days hold one
+     * transaction each, so the walk lands in the Jan 5 day with residual 0 and the one-row page
+     * ends there too -- naive OFFSET would query [from, to) with offset 4.
      */
     @Test
     void walk_lands_in_the_target_segment_with_a_small_residual() {
@@ -273,12 +274,15 @@ class ProjectionReaderTest extends ReadPropertyBase {
         ProjectionPage page = probe.readLevel0(recording, new Level0Request(ALL, from, to, 3, 2));
 
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
-                from, Instant.parse("2034-01-06T00:00:00Z"), 0, 1));
+                Instant.parse("2034-01-05T00:00:00Z"), Instant.parse("2034-01-06T00:00:00Z"), 0, 1));
         assertThat(registry.get("wqs.read.residual.offset").summary().max()).isZero();
         assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("j1");
     }
 
-    /** Zero-count segments are walked past: Feb is empty, so offset 3 skips Mar's days (3) and Feb's (0). */
+    /**
+     * Zero-count segments are walked past: Feb is empty, so offset 3 skips Mar's days (3) and
+     * Feb's (0); the page's two rows end on Jan 5, the key query's lower bound (plan D4).
+     */
     @Test
     void walk_skips_an_empty_middle_segment() {
         applyBatches(List.of(
@@ -294,9 +298,61 @@ class ProjectionReaderTest extends ReadPropertyBase {
         ProjectionPage page = reader.readLevel0(recording, new Level0Request(ALL, from, to, 2, 3));
 
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
-                from, Instant.parse("2034-01-26T00:00:00Z"), 0, 2));
+                Instant.parse("2034-01-05T00:00:00Z"), Instant.parse("2034-01-26T00:00:00Z"), 0, 2));
         assertThat(page.transactions()).extracting(TransactionEntry::sourceId).containsExactly("j2", "j1");
         assertThat(page.transactions()).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3));
+    }
+
+    /**
+     * Plan D4 edge cases: the key query's lower bound is the start of the segment holding the
+     * page's last row, clamped to {@code from}. (1) A page ending in the LIVE upper boundary
+     * segment is bounded below by that partial day's start. (2) Rows tied on one instant across
+     * the page end: the bound is a day boundary, so the whole tie group is inside it and the page
+     * equals naive OFFSET. (3) The last page ends in the LIVE lower boundary segment, whose start
+     * is {@code from}: the bound never goes below it, and a row before {@code from} on that same
+     * day is not returned.
+     */
+    @Test
+    void the_key_query_is_bounded_by_the_days_the_page_covers() {
+        applyBatches(List.of(
+                transaction("before-from", "2034-01-05T07:00:00Z"),
+                transaction("lo-live", "2034-01-05T10:00:00Z"),
+                transaction("tie-a", "2034-01-20T10:00:00Z"),
+                transaction("tie-b", "2034-01-20T10:00:00Z"),
+                transaction("tie-c", "2034-01-20T10:00:00Z"),
+                transaction("tie-d", "2034-01-20T10:00:00Z"),
+                transaction("day21", "2034-01-21T10:00:00Z"),
+                transaction("hi-1", "2034-02-10T09:00:00Z"),
+                transaction("hi-2", "2034-02-10T10:00:00Z"),
+                transaction("hi-3", "2034-02-10T11:00:00Z")));
+        Instant from = Instant.parse("2034-01-05T08:00:00Z");
+        Instant to = Instant.parse("2034-02-10T12:00:00Z");
+
+        // (1) Page 1 of 2: both rows in the upper LIVE segment [Feb 10 00:00, to).
+        RecordingLevel0Query upper = new RecordingLevel0Query(webQuery);
+        assertThat(reader.readLevel0(upper, new Level0Request(ALL, from, to, 1, 2)).transactions())
+                .isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 0, 2));
+        assertThat(upper.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
+                Instant.parse("2034-02-10T00:00:00Z"), to, 0, 2));
+
+        // (2) Size 3, page 2 of 3: day21 and two of the four tied rows -- the tie group straddles
+        // the page end, and the bound (Jan 20 00:00) holds all of it.
+        RecordingLevel0Query ties = new RecordingLevel0Query(webQuery);
+        assertThat(reader.readLevel0(ties, new Level0Request(ALL, from, to, 2, 3)).transactions())
+                .isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 3, 3))
+                .extracting(TransactionEntry::sourceId).startsWith("day21");
+        assertThat(ties.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
+                Instant.parse("2034-01-20T00:00:00Z"), Instant.parse("2034-01-22T00:00:00Z"), 0, 3));
+
+        // (3) Size 3, the last page: the other two tied rows, then lo-live in the lower LIVE
+        // segment [from, Jan 6 00:00).
+        RecordingLevel0Query last = new RecordingLevel0Query(webQuery);
+        ProjectionPage lastPage = reader.readLevel0(last, new Level0Request(ALL, from, to, 3, 3));
+        assertThat(lastPage.transactions()).isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, 6, 3))
+                .extracting(TransactionEntry::sourceId).endsWith("lo-live").doesNotContain("before-from");
+        assertThat(lastPage.totalItems()).isEqualTo(9);
+        assertThat(last.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
+                from, Instant.parse("2034-01-21T00:00:00Z"), 2, 3));
     }
 
     /**
@@ -474,7 +530,7 @@ class ProjectionReaderTest extends ReadPropertyBase {
                 (tx, keys) -> keys);
 
         assertThat(recording.keysCalls).containsExactly(new RecordingLevel0Query.KeysCall(
-                from, Instant.parse("2034-01-06T00:00:00Z"), 0, 1));
+                Instant.parse("2034-01-05T00:00:00Z"), Instant.parse("2034-01-06T00:00:00Z"), 0, 1));
         assertThat(recording.countCalls).as("whole days need no live count").isZero();
         assertThat(page.totalRowCount()).isEqualTo(5);
         assertThat(page.entries()).extracting(HighLevelKey::refId).containsExactly("jb");

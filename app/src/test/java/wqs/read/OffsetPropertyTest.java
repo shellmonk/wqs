@@ -85,8 +85,8 @@ class OffsetPropertyTest extends ReadPropertyBase {
     }
 
     /**
-     * The optimisation itself (spec 7.6), not just its result: a non-empty page runs ONE key
-     * query from {@code from} to the end of a decomposition segment, and its offset is a residual
+     * The optimisation itself (spec 7.6, plan D4), not just its result: a non-empty page runs ONE
+     * key query from the start of the segment holding its last unit to the end of a decomposition segment, and its offset is a residual
      * strictly inside that segment -- checked against an independent oracle count of the segment.
      * Naive OFFSET (key query over [from, to) with the full offset) fails this.
      */
@@ -99,7 +99,19 @@ class OffsetPropertyTest extends ReadPropertyBase {
         }
         assertThat(keysCalls).as(as).hasSize(1);
         RecordingLevel0Query.KeysCall call = keysCalls.get(0);
-        assertThat(call.lo()).as(as).isEqualTo(q.from());
+        // Plan D4: the lower bound is the start of the segment holding the page's last unit --
+        // the oldest segment the page needs, never below from.
+        Segment bottom = RangeDecomposition.newestFirst(q.from(), q.to()).stream()
+                .filter(s -> s.start().equals(call.lo()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(as + ": key query lo " + call.lo() + " is no segment start"));
+        assertThat(call.lo()).as(as).isAfterOrEqualTo(q.from());
+        long need = call.offset() + call.limit();
+        assertThat(oracleCount.apply(call.lo(), call.hi())).as(as + " page inside [lo, hi)").isGreaterThanOrEqualTo(need);
+        if (bottom.end().isBefore(call.hi())) {
+            assertThat(oracleCount.apply(bottom.end(), call.hi())).as(as + " lo is the oldest segment needed")
+                    .isLessThan(need);
+        }
         Segment target = RangeDecomposition.newestFirst(q.from(), q.to()).stream()
                 .filter(s -> s.end().equals(call.hi()))
                 .findFirst()
