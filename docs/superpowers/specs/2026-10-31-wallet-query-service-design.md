@@ -311,6 +311,10 @@ Two hazards follow from a timestamp-only cursor:
 
 ### 5.1 Tables
 
+**One migration.** Because WQS is not live yet, the whole schema is a single Flyway baseline,
+`db/src/main/resources/db/migration/V1__baseline.sql` (collapsed 2026-11-03 from V1–V13; verified
+by comparing `pg_dump` of both). New changes after go-live are added as `V2__…` onwards.
+
 | Table | Purpose | Partitioning |
 |---|---|---|
 | `"wqWebItem"` | Level-0 rows for user views (transactions + prizes) | monthly on `"occurredAt"` |
@@ -327,7 +331,7 @@ Two hazards follow from a timestamp-only cursor:
 | `"wqDeadLetter"` | Events that repeatedly failed to project | not partitioned |
 | `"wqIngestWatermark"` | Delta cursor (one row, `wallet-delta`, monotonic) | not partitioned |
 | `"wqStreamOffset"` | RabbitMQ stream offset | not partitioned |
-| `"wqTxType"` | Transaction-type code table (code → id, PLAY/WIN/NEUTRAL); `"wqProduct"` was dropped in V10 | not partitioned |
+| `"wqTxType"` | Transaction-type code table (code → id, PLAY/WIN/NEUTRAL); there is no product table (product id and type are text on each row) | not partitioned |
 
 Monthly partitions are named from the parent with a period suffix: `"wqWebItem_2026_10"`.
 Partition names are generated programmatically, so consistency matters more than aesthetics.
@@ -573,7 +577,7 @@ Design notes:
   session inserts no row and so increments nothing — which is the correct behaviour, and getting
   it wrong would inflate page counts by the number of transactions per session.
 - **Two count columns, not two rows**, because `excludeCancelledTransactions` is boolean.
-- **Two dimensions, each with an ALL sentinel (phase 5, V10).** An `ITEM` row is counted under
+- **Two dimensions, each with an ALL sentinel (phase 5).** An `ITEM` row is counted under
   four keys — `(pt,t)`, `(pt,ALL)`, `(ALL,t)`, `(ALL,ALL)`; a null product type only under the two
   ALL-product keys. `HIGH_LEVEL` rows use `typeId = 0` only — `(pt,0)`, `('',0)` — because
   `transactionTypes` never changes level-1/2 page counts (§4.1). A total for request lists `P`, `T`
@@ -934,7 +938,7 @@ request URI.
   invariant of §7.4.
 - **Unified data** is served from `"wqCcItem"`.
 
-`"wqProduct"` and the integer product id were dropped in phase 5 (V10); product id and type are
+There is no product table and no integer product id (phase 5); product id and type are
 stored as text on every row (§4.1). Counter totals for a list of product types sum one counter row
 per listed type (§5.7).
 
@@ -1065,17 +1069,17 @@ wider" is bounded to one user-month.
 Crucially, the index never has to serve a `COUNT`; counters do that. Totals and slicing being
 served by **different structures** is what lets each stay simple.
 
-**As created (phase 4, V9).** Item tables:
+**As created in phase 4.** Item tables:
 `("userId", "occurredAt" desc, "itemId" desc) include ("cancelled", "productId")` — only the
 columns level 0 filters by; the `"itemId"` key column makes the tie-break index-ordered. The
 high-level tables follow §5.6: `("userId", "occurredAt" desc, "kind" desc, "refId" desc) include
 ("productId", "visibleExclCancelled")`, the key columns again giving a total order. A test asserts the level-0 key query is an index-only scan on it.
 
-**Rebuilt in phase 5 (V10).** Items: `("userId", "occurredAt" desc, "itemId" desc) include
+**Final shape (phase 5), in the baseline migration.** Items: `("userId", "occurredAt" desc, "itemId" desc) include
 ("cancelled", "productType", "type")`; high-level: same key, `include ("productType",
 "visibleExclCancelled")`.
 
-**Added in phase 5 (V12)** for level 1–2 assembly, so each session's items are fetched by its own
+**Added in phase 5** for level 1–2 assembly, so each session's items are fetched by its own
 key rather than by the page's time span: partial `("userId", "batchId", "occurredAt") where
 "batchId" is not null` on both item tables, and `("userId", "batchId", "startedAt")` on `"wqPlay"`.
 They cost one extra B-tree write per sessioned item — the measured need this section requires (a
@@ -1605,7 +1609,7 @@ Each phase ends with its named properties passing — not with code merely compi
 | 2 | Stream consumer, `ProjectionWriter`, idempotency gate, offset store in Postgres | **P-1** |
 | 3 | `"wqSession"` / `"wqPlay"` rollups; high-level page index and `"visibleExclCancelled"`; `"wqCountDay"` / `"wqCountMonth"`; cancellation and `"wqPendingCancel"` | **P-2**, **P-4**, **P-8** |
 | 4 *(done)* | Range decomposition; counter-assisted offset; `/web` + `/cc` at level 0; `PrincipalResolver` (`none` / `trusted-header`, pending O-2); covering indexes; reader/writer datasources; consumer start self-heal; broker end-to-end test | **P-3**, **P-5**, **P-6**, security test (§9) |
-| 5 *(done)* | Source contract (§4.1): real stream decoder, V10/V11 string product dimensions and `"wqTxType"`, product-type × type counters, ingest rules; API reshaped to the contract with list filters; levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | Fixed-dataset tests for P-3/P-5/P-6 at both page units, P-4 at the response, P-7; property tests made opt-in |
+| 5 *(done)* | Source contract (§4.1): real stream decoder, string product dimensions and `"wqTxType"`, product-type × type counters, ingest rules; API reshaped to the contract with list filters; levels 1 and 2: paging the high-level index, session/play assembly, interleaved response | Fixed-dataset tests for P-3/P-5/P-6 at both page units, P-4 at the response, P-7; property tests made opt-in |
 | 6 *(done)* | Delta poller for the four polled sources (mutable: versioned upsert of status/detail, immutable-field changes dead-lettered, §4); watermarks with overlap; timestamp-cliff alarm; dead-letter path | P-1 extended across both ingestion paths |
 | 7 | Reconciliation jobs, SLO dashboards and alarms, benchmark harness and recorded baselines | Drift metrics at zero; alarms firing on injected faults; baseline capture |
 
