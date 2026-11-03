@@ -240,7 +240,7 @@ class DeltaRowDecoderTest extends PostgresTestBase {
     void missing_required_field_is_poison_naming_it() {
         for (String[] c : new String[][] {
                 {"payment", "paymentId"}, {"payment", "created"}, {"payment", "updated"}, {"payment", "amount"},
-                {"payment", "paymentType"}, {"claimable-prize", "prizeAmount"}, {"claimable-prize", "id"},
+                {"claimable-prize", "prizeAmount"}, {"claimable-prize", "id"},
                 {"manual-adjustment", "statusDate"}, {"manual-adjustment", "issued"},
                 {"manual-adjustment", "operation"}, {"limit", "limitType"}, {"limit", "userId"}}) {
             ObjectNode json = fixture(c[0]);
@@ -268,6 +268,62 @@ class DeltaRowDecoderTest extends PostgresTestBase {
         ObjectNode type = fixture("limit");
         type.put("limitType", "play count");
         assertThatThrownBy(() -> decoder.decode(type, txTypes())).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /** Ruling R-a: adjustment requests have no "created"; "issued" is the occurredAt. */
+    @Test
+    void adjustment_occurredAt_is_issued() {
+        ObjectNode json = fixture("manual-adjustment");
+        json.put("created", "2030-01-01T00:00:00Z");   // not a column of the table: ignored
+        assertThat(decoder.decode(json, txTypes()).item().occurredAt()).isEqualTo(Instant.parse("2026-10-28T12:00:00Z"));
+    }
+
+    /** Ruling R-b: a null or blank paymentType is the synthetic PAYMENT type, not poison. */
+    @Test
+    void null_or_blank_payment_type_is_PAYMENT() {
+        ObjectNode none = fixture("payment");
+        none.putNull("paymentType");
+        assertThat(txTypes().codeOf(decoder.decode(none, txTypes()).item().type())).isEqualTo("PAYMENT");
+        ObjectNode blank = fixture("payment");
+        blank.put("paymentType", "  ");
+        assertThat(txTypes().codeOf(decoder.decode(blank, txTypes()).item().type())).isEqualTo("PAYMENT");
+        ObjectNode absent = fixture("payment");
+        absent.remove("paymentType");
+        assertThat(txTypes().codeOf(decoder.decode(absent, txTypes()).item().type())).isEqualTo("PAYMENT");
+    }
+
+    /** Ruling R-c: zoneless source timestamps are UTC; zoned ones keep working; garbage is poison. */
+    @Test
+    void zoneless_timestamps_are_utc() {
+        Instant expected = Instant.parse("2026-10-29T11:22:04.465648Z");
+        ObjectNode t = fixture("claimable-prize");
+        t.put("created", "2026-10-29T11:22:04.465648");
+        t.put("updated", "2026-10-29 11:22:04.465");
+        DeltaRow row = decoder.decode(t, txTypes());
+        assertThat(row.item().occurredAt()).isEqualTo(expected);
+        assertThat(row.version()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465Z"));
+
+        ObjectNode offset = fixture("claimable-prize");
+        offset.put("created", "2026-10-29T13:22:04.465648+02:00");
+        assertThat(decoder.decode(offset, txTypes()).item().occurredAt()).isEqualTo(expected);
+
+        for (String bad : new String[] {"2026-10-29", "2026-10-29T25:00:00", "29/10/2026 11:22", "2026-10-29X11:22:04"}) {
+            ObjectNode g = fixture("claimable-prize");
+            g.put("created", bad);
+            assertThatThrownBy(() -> decoder.decode(g, txTypes()))
+                    .as(bad).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("created");
+        }
+    }
+
+    /** Sub-microsecond wire values are truncated to timestamptz precision (occurredAt and version). */
+    @Test
+    void timestamps_are_truncated_to_microseconds() {
+        ObjectNode t = fixture("limit");
+        t.put("created", "2026-10-29T11:22:04.465648999Z");
+        t.put("updated", "2026-10-29T11:22:04.465648501");
+        DeltaRow row = decoder.decode(t, txTypes());
+        assertThat(row.item().occurredAt()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
+        assertThat(row.version()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
     }
 
     @Test

@@ -161,6 +161,49 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(deadLetterErrors()).containsExactly(RejectedItemDeadLetters.IMMUTABLE_FIELD_CHANGED);
     }
 
+    /** D6: every immutable field other than amount/occurredAt (tested above), one at a time. */
+    @Test
+    void newer_version_changing_any_other_immutable_field_dead_letters() {
+        ProjectionItem base = prize("pr1", "b1", V1, DETAIL_V1).item();
+        java.util.Map<String, ProjectionItem> changes = new java.util.LinkedHashMap<>();
+        changes.put("currency", copy(base, base.userId(), base.productId(), base.productType(), base.batchId(),
+                base.type(), "USD"));
+        changes.put("type", copy(base, base.userId(), base.productId(), base.productType(), base.batchId(),
+                TxTypes.PLAY, base.currency()));
+        changes.put("productId", copy(base, base.userId(), "P99", base.productType(), base.batchId(),
+                base.type(), base.currency()));
+        changes.put("productType", copy(base, base.userId(), base.productId(), "instants", base.batchId(),
+                base.type(), base.currency()));
+        changes.put("batchId", copy(base, base.userId(), base.productId(), base.productType(), "b2",
+                base.type(), base.currency()));
+        changes.put("userId", copy(base, 2L, base.productId(), base.productType(), base.batchId(),
+                base.type(), base.currency()));
+
+        for (var change : changes.entrySet()) {
+            clearProjection();
+            writer.applyDelta(batch(V1, prize("pr1", "b1", V1, DETAIL_V1)));
+            ProjectionSnapshot before = ProjectionSnapshot.of(dsl());
+
+            ProjectionItem item = change.getValue();
+            DeltaResult result = writer.applyDelta(batch(V2,
+                    new DeltaRow(item.source(), 1, item.userId(), V2, item)));
+
+            assertThat(result.deadLettered()).as(change.getKey()).isEqualTo(1);
+            assertThat(result.updated()).as(change.getKey()).isZero();
+            assertThat(ProjectionSnapshot.of(dsl())).as(change.getKey()).isEqualTo(before);
+            assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).as(change.getKey()).isEqualTo(V1);
+            assertThat(detail("wqCcItem", "pr1")).as(change.getKey()).isEqualTo(DETAIL_V1);
+            assertThat(deadLetterErrors()).as(change.getKey())
+                    .containsExactly(RejectedItemDeadLetters.IMMUTABLE_FIELD_CHANGED);
+        }
+    }
+
+    private static ProjectionItem copy(ProjectionItem base, long userId, String productId, String productType,
+            String batchId, short type, String currency) {
+        return new ProjectionItem(userId, base.source(), base.sourceId(), base.occurredAt(), productId, productType,
+                batchId, base.subBatchId(), type, base.amount(), currency, null, null, DETAIL_V2);
+    }
+
     @Test
     void newer_version_with_an_equal_amount_at_another_scale_is_an_update() {
         writer.applyDelta(batch(V1, prize("pr1", null, V1, DETAIL_V1)));

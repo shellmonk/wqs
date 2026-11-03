@@ -1,7 +1,6 @@
 package wqs.ingest.delta;
 
 import static wqs.ingest.StrictJson.detailScalar;
-import static wqs.ingest.StrictJson.instant;
 import static wqs.ingest.StrictJson.integral;
 import static wqs.ingest.StrictJson.money;
 import static wqs.ingest.StrictJson.optional;
@@ -15,6 +14,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,7 +52,13 @@ public class DeltaRowDecoder {
     /** ISO 4217 "no currency", for a row whose currency is null (a count-based limit). */
     public static final String NO_CURRENCY = "XXX";
 
+    /** The synthetic type code of a payment whose {@code paymentType} is null or blank (ruling R-b). */
+    public static final String PAYMENT_TYPE_FALLBACK = "PAYMENT";
+
     private static final int PLAYER = 1;
+
+    /** A zoneless source {@code timestamp} (ruling R-c), read as UTC. */
+    private static final DateTimeFormatter LOCAL_TIMESTAMP = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
     private static final ObjectMapper DETAIL_MAPPER = new ObjectMapper();
 
     private static final List<String> PAYMENT_DETAIL = List.of(
@@ -101,7 +111,7 @@ public class DeltaRowDecoder {
             throw new IllegalArgumentException("paymentInOut must be 1 (IN) or 2 (OUT)");
         }
         return row(SourceKind.PAYMENT, ownerType, userId, row, "paymentId", "created", "updated",
-                amount, typeCode(textual(required(row, "paymentType"), "paymentType"), "paymentType"),
+                amount, paymentType(row),
                 null, null, null, null, PAYMENT_DETAIL, registry);
     }
 
@@ -145,8 +155,8 @@ public class DeltaRowDecoder {
             String productId, String productType, String batchId, String subBatchId,
             List<String> detailFields, TxTypeRegistry registry) {
         String sourceId = Long.toString(id(row, idField));
-        Instant occurredAt = instant(required(row, occurredAtField), occurredAtField);
-        Instant version = instant(required(row, versionField), versionField);
+        Instant occurredAt = timestamp(row, occurredAtField);
+        Instant version = timestamp(row, versionField);
         String currency = text(row, "currency");
         String detail = detail(row, detailFields);
         ProjectionItem item = new ProjectionItem(
@@ -154,6 +164,37 @@ public class DeltaRowDecoder {
                 registry.idOf(typeCode), amount, currency == null ? NO_CURRENCY : currency,
                 null, null, detail);
         return new DeltaRow(source, ownerType, userId, version, item);
+    }
+
+    private static String paymentType(JsonNode row) {
+        String code = text(row, "paymentType");
+        return code == null || code.isBlank() ? PAYMENT_TYPE_FALLBACK : typeCode(code, "paymentType");
+    }
+
+    /**
+     * A delta timestamp: an instant with {@code Z} or an offset, or a zoneless source
+     * {@code timestamp} read as UTC (ruling R-c); anything else is poison. Truncated to
+     * microseconds -- the precision of timestamptz -- so a stored value always compares equal to a
+     * re-read of the same wire value (never rounded differently by the driver).
+     */
+    static Instant timestamp(JsonNode row, String field) {
+        JsonNode node = required(row, field);
+        String text = textual(node, field);
+        Instant at;
+        try {
+            at = Instant.parse(text);
+        } catch (DateTimeParseException zoned) {
+            try {
+                // "2026-10-29 11:22:04.465": a space separator is accepted as the ISO 'T'.
+                String iso = text.length() > 10 && text.charAt(10) == ' '
+                        ? text.substring(0, 10) + 'T' + text.substring(11) : text;
+                LocalDateTime local = LocalDateTime.parse(iso, LOCAL_TIMESTAMP);
+                at = local.toInstant(ZoneOffset.UTC);
+            } catch (DateTimeParseException e) {
+                throw new IllegalArgumentException(field + " is not a valid timestamp", e);
+            }
+        }
+        return at.truncatedTo(ChronoUnit.MICROS);
     }
 
     private static int ownerType(JsonNode row, String field) {
