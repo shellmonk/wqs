@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import wqs.db.TxTypeRegistry;
 import wqs.domain.ProjectionItem;
 import wqs.ingest.DeadLetterStore;
+import wqs.ingest.TransientFailures;
 import wqs.metrics.CachedGaugeValue;
 import wqs.projection.IngestSkipMetrics;
 import wqs.projection.ProjectionBatch;
@@ -209,14 +210,16 @@ public class StreamConsumer {
             ProjectionItem item;
             try {
                 item = payloadMapper.toItem(payload, txTypes);
-            } catch (IllegalArgumentException | org.springframework.dao.DataIntegrityViolationException e) {
-                // Poison: bad input (the mapper and the domain reject it with IAE), or a
-                // DataIntegrityViolationException from the type registry's first-sighting insert --
-                // the DATA is rejected and would be on every retry, stalling the stream for good.
-                // Deliberately NOT all of NonTransientDataAccessException: that also covers
-                // CannotGetJdbcConnectionException and PermissionDeniedDataAccessException, which
-                // are outages, not bad data. Every other failure is infrastructure: it falls to the
-                // outer catch and retries via recovery, never dead-lettering.
+            } catch (RuntimeException e) {
+                if (TransientFailures.isTransient(e)) {
+                    // Infrastructure (a pool timeout, a lost connection, a lock conflict): falls to the
+                    // outer catch and retries via recovery, never dead-lettering.
+                    throw e;
+                }
+                // Poison: bad input (the mapper and the domain reject it with IAE), a DataIntegrity-
+                // ViolationException from the type registry's first-sighting insert, or a bug -- each
+                // would fail the same way on every retry and stall the stream for good. One rule for
+                // every path: TransientFailures.
                 deadLetterUnmappable(payload, offset, e);
                 return;
             }
@@ -421,11 +424,14 @@ public class StreamConsumer {
                         batch.stream(), List.of(item), null, itemOffset == null ? null : List.of(itemOffset)));
                 count(result);
                 return true;
-            } catch (IllegalArgumentException | org.springframework.dao.DataIntegrityViolationException e) {
-                // Only a rejection of the data is poison (the Phase 5 rule, final review I-C). Anything
-                // else -- a 40P01 deadlock with the concurrent delta poller, a lock timeout, a pool
-                // timeout -- escapes: the consumer enters recovery and re-applies from the stored
-                // offset after the backoff, so the conflict is retried, never dead-lettered (ruling I2).
+            } catch (RuntimeException e) {
+                if (TransientFailures.isTransient(e)) {
+                    // A 40P01 deadlock with the concurrent delta poller, a lock or pool timeout: escapes,
+                    // the consumer enters recovery and re-applies from the stored offset after the
+                    // backoff -- retried, never dead-lettered (ruling I2). Anything else, a bug
+                    // included, is dead-lettered below rather than looping in recovery (last fix T).
+                    throw e;
+                }
                 lastError = e;
                 log.warn("Item {} attempt {}/{} failed", item.sourceId(), attempt, properties.maxAttempts(), e);
             }

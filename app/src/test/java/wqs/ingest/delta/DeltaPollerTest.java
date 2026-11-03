@@ -264,7 +264,7 @@ class DeltaPollerTest extends PostgresTestBase {
         }
         expect(v(8), page(bulk));
         expect(v(9), page(bulk));
-        expect(v(10), page(prizeAt("6", v(11)), prizeAt("7", v(12))));
+        expect(v(9).plusNanos(1_000), page(prizeAt("6", v(11)), prizeAt("7", v(12))));
 
         PollOutcome outcome = poller.runOnce();
 
@@ -273,6 +273,59 @@ class DeltaPollerTest extends PostgresTestBase {
         assertThat(meters.counter(DeltaPollMetrics.TIMESTAMP_CLIFF).count()).isEqualTo(cliffs);
         assertThat(watermarks.read()).contains(v(12));
         assertThat(count("wqCcItem")).isEqualTo(PAGE_LIMIT + 2);
+    }
+
+    /**
+     * Last fix J: more than page-limit rows at one version V below W, a late commit L with
+     * V < L < W, and newer rows above W. The run steps past V by 1 µs, not to W, so L is read in this
+     * run; only the overflow AT exactly V is unreachable (O-1).
+     */
+    @Test
+    void full_page_at_one_version_steps_past_it_by_a_microsecond_not_to_the_watermark() {
+        seedWatermark(v(10));
+        double overflows = meters.counter(DeltaPollMetrics.VERSION_OVERFLOW).count();
+        double overlapSaturated = meters.counter(DeltaPollMetrics.OVERLAP_SATURATED).count();
+        List<String> bulk = new ArrayList<>();
+        for (int i = 0; i < PAGE_LIMIT; i++) {
+            bulk.add(prizeAt(Integer.toString(300 + i), v(9)));
+        }
+        expect(v(8), page(bulk));
+        expect(v(9), page(bulk));
+        expect(v(9).plusNanos(1_000), page(prizeAt("999", v(9).plusSeconds(30)) /* L, late */,
+                prizeAt("6", v(11)), prizeAt("7", v(12))));
+
+        PollOutcome outcome = poller.runOnce();
+
+        server.verify();
+        assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 3, false));
+        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqCcItem\"").where("\"sourceId\" = '999'"))).isEqualTo(1);
+        assertThat(count("wqCcItem")).isEqualTo(PAGE_LIMIT + 3);
+        assertThat(watermarks.read()).contains(v(12));
+        assertThat(meters.counter(DeltaPollMetrics.VERSION_OVERFLOW).count()).isEqualTo(overflows + 1);
+        assertThat(meters.counter(DeltaPollMetrics.OVERLAP_SATURATED).count())
+                .as("only the walk from v(8) to v(9)").isEqualTo(overlapSaturated + 1);
+    }
+
+    /** An endpoint that ignores sub-millisecond cursors returns the same page at V: then fall back to W. */
+    @Test
+    void the_same_version_again_after_the_microsecond_step_falls_back_to_the_watermark() {
+        properties = new DeltaProperties(BASE, null, PAGE_LIMIT, OVERLAP, 5, null, null, null); // 4 pages needed
+        poller = pollerWith(writer);
+        seedWatermark(v(10));
+        List<String> bulk = new ArrayList<>();
+        for (int i = 0; i < PAGE_LIMIT; i++) {
+            bulk.add(prizeAt(Integer.toString(300 + i), v(9)));
+        }
+        expect(v(8), page(bulk));
+        expect(v(9), page(bulk));
+        expect(v(9).plusNanos(1_000), page(bulk));
+        expect(v(10), page(prizeAt("6", v(11))));
+
+        PollOutcome outcome = poller.runOnce();
+
+        server.verify();
+        assertThat(outcome).isEqualTo(new PollOutcome(4, 3 * PAGE_LIMIT + 1, false));
+        assertThat(watermarks.read()).contains(v(11));
     }
 
     /** Final review M-1: re-reading the same poison row in the overlap does not dead-letter it twice. */
@@ -518,19 +571,25 @@ class DeltaPollerTest extends PostgresTestBase {
 
     /** A data-integrity rejection in the per-row fallback is still poison: dead-lettered alone. */
     @Test
-    void data_integrity_violation_in_the_row_fallback_is_dead_lettered() {
-        DeltaPoller flaky = pollerWith(failingAlone("1", new org.springframework.dao.DataIntegrityViolationException("bad"), 9));
-        expect(Instant.EPOCH, page(prizeAt("1", v(1)),
-                prize("2", USER, Instant.parse("2001-01-01T00:00:00Z"), v(4), "UNCLAIMED", "lotto", null),
-                limit("21", USER, T0, v(2))));
+    void data_integrity_violation_or_a_bug_in_the_row_fallback_is_dead_lettered() {
+        for (RuntimeException failure : List.<RuntimeException>of(
+                new org.springframework.dao.DataIntegrityViolationException("bad"),
+                new NullPointerException("bug"), new IllegalStateException("bug"))) {
+            clearProjection();
+            server.reset();
+            DeltaPoller flaky = pollerWith(failingAlone("1", failure, 9));
+            expect(Instant.EPOCH, page(prizeAt("1", v(1)),
+                    prize("2", USER, Instant.parse("2001-01-01T00:00:00Z"), v(4), "UNCLAIMED", "lotto", null),
+                    limit("21", USER, T0, v(2))));
 
-        flaky.runOnce();
+            flaky.runOnce();
 
-        server.verify();
-        assertThat(count("wqCcItem")).isEqualTo(1);
-        assertThat(dsl().fetch("select \"sourceId\" from \"wqDeadLetter\" order by \"sourceId\"")
-                .getValues(0, String.class)).containsExactly("1", "2");
-        assertThat(watermarks.read()).contains(v(4));
+            server.verify();
+            assertThat(count("wqCcItem")).as("%s", failure).isEqualTo(1);
+            assertThat(dsl().fetch("select \"sourceId\" from \"wqDeadLetter\" order by \"sourceId\"")
+                    .getValues(0, String.class)).containsExactly("1", "2");
+            assertThat(watermarks.read()).contains(v(4));
+        }
     }
 
     /** {@code n} prizes with ids and versions (minutes after T0) {@code first .. first + n - 1}. */

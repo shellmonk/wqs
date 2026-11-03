@@ -443,6 +443,52 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(count("wqWebItem")).isZero();
     }
 
+    /**
+     * Last fix T: an unknown bug (NPE, IllegalStateException) applying an item alone is not on the
+     * transient allowlist: dead-lettered, offset advanced -- never a recovery loop stalling the stream.
+     */
+    @Test
+    void a_bug_applying_an_item_alone_is_dead_lettered_and_the_offset_advances() {
+        long offset = 20;
+        for (RuntimeException bug : java.util.List.<RuntimeException>of(
+                new NullPointerException("bug"), new IllegalStateException("bug"))) {
+            clearProjection();
+            source = new FakeStreamSource();
+            StreamConsumer consumer = new StreamConsumer(source,
+                    new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
+                    payloadMapper, txTypes, failing(bug, 99), offsetStore, registry,
+                    Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
+            consumer.start();
+
+            source.queue(payload("tx-bug"), offset);
+            source.deliverAll();
+
+            assertThat(count("wqDeadLetter")).as("%s", bug).isEqualTo(1);
+            assertThat(offsetStore.read("wallet-transactions")).contains(offset);
+            assertThat(source.subscribeCount()).as("no recovery re-subscribe").isEqualTo(1);
+            offset++;
+        }
+    }
+
+    /** Last fix T: a bug while MAPPING (not data, not infrastructure) is dead-lettered too. */
+    @Test
+    void a_bug_in_mapping_is_dead_lettered_and_the_offset_advances() {
+        wqs.db.TxTypeRegistry buggy = org.mockito.Mockito.spy(txTypes);
+        org.mockito.Mockito.doThrow(new NullPointerException("bug")).when(buggy).idOf("TT_BUY");
+        StreamConsumer consumer = new StreamConsumer(source,
+                new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
+                payloadMapper, buggy, writer, offsetStore, registry,
+                Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
+        consumer.start();
+
+        source.queue(payload("tx-npe"), 8);
+        source.deliverAll();
+
+        assertThat(count("wqDeadLetter")).isEqualTo(1);
+        assertThat(offsetStore.read("wallet-transactions")).contains(8L);
+        assertThat(source.subscribeCount()).as("no recovery re-subscribe").isEqualTo(1);
+    }
+
     /** The real writer, except that the first {@code times} calls throw {@code failure}. */
     private ProjectionWriter failing(RuntimeException failure, int times) {
         ProjectionWriter mock = org.mockito.Mockito.mock(ProjectionWriter.class);

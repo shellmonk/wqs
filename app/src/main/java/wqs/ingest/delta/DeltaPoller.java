@@ -7,10 +7,10 @@ import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Component;
 import wqs.db.TxTypeRegistry;
 import wqs.ingest.DeadLetterStore;
+import wqs.ingest.TransientFailures;
 import wqs.projection.DeltaBatch;
 import wqs.projection.DeltaWatermarkStore;
 import wqs.projection.ProjectionWriter;
@@ -32,14 +32,14 @@ import wqs.projection.source.DeltaRow;
  *
  * <p><b>Overlap saturation.</b> A full page that does not get past the watermark lies inside the
  * overlap window ({@code wqs.delta.overlap.saturated}): the run walks the window, each next cursor
- * the previous page's max inclusive, and jumps to the watermark if one version below it fills a
- * page (see {@link #poll()}).
+ * the previous page's max inclusive, and steps 1 µs past a version below it that fills a page
+ * ({@code wqs.delta.version.overflow}; see {@link #poll()}).
  *
  * <p><b>Poison.</b> A row that does not decode is dead-lettered alone and the rest of the page
- * applies. If the writer rejects the page's data ({@code IllegalArgumentException},
- * {@code DataIntegrityViolationException}), each row is applied alone, a row rejected alone is
- * dead-lettered, and the watermark is then written on its own. Any other failure is transient
- * (pool timeout, 40P01 deadlock) and fails the run; nothing is dead-lettered for it.
+ * applies. If the writer fails the page with anything not on the transient allowlist
+ * ({@link TransientFailures}), each row is applied alone, a row failing alone is dead-lettered, and
+ * the watermark is then written on its own. A transient failure (pool timeout, 40P01 deadlock)
+ * fails the run; nothing is dead-lettered for it.
  *
  * <p><b>Failure.</b> Any exception escaping a run (fetch failure, timeout, non-2xx, garbage body,
  * database) counts {@code wqs.delta.poll.failures} and fails the job; the next fire retries from
@@ -88,8 +88,9 @@ public class DeltaPoller {
      * <ul>
      *   <li>the page's max, inclusive, while that max is not past W: the run walks the overlap
      *       window page by page, so a late commit inside it is read in this run;</li>
-     *   <li>W itself, when the page could not move the cursor but the cursor is below W (more
-     *       than page-limit rows share one version V below W, a bulk update): not a cliff;</li>
+     *   <li>V + 1 µs, when the page could not move the cursor but the cursor is below W (more
+     *       than page-limit rows share one version V below W, a bulk update): not a cliff, and late
+     *       commits in (V, W) are still read; W only if the page from V + 1 µs is again at V;</li>
      *   <li>the new W - overlap once a page got past W: the normal D7 repoll.</li>
      * </ul>
      * The timestamp cliff is a full page that cannot move the cursor (min = max = cursor) with the
@@ -99,6 +100,7 @@ public class DeltaPoller {
         int pages = 0;
         int fetched = 0;
         Instant cursor = since(watermarks.read().orElse(null));
+        Instant overflowAt = null; // the version last stepped past by 1 µs
         while (true) {
             Instant stored = watermarks.read().orElse(null);
             ArrayNode page = client.fetch(cursor);
@@ -133,12 +135,24 @@ public class DeltaPoller {
                 return new PollOutcome(pages, fetched, false);
             }
             if (stuck) {
-                // Below W (not a cliff): one version V < W fills the page. Its rows were seen when W
-                // passed V; get past them to W.
-                metrics.overlapSaturated();
-                log.warn("Delta page of {} rows all at version {} below watermark {}; continuing from the watermark",
-                        page.size(), decoded.maxVersion, stored);
-                cursor = stored;
+                if (decoded.maxVersion.equals(overflowAt)) {
+                    // The step past V came back at V again (an endpoint that ignores sub-millisecond
+                    // cursors): only W is left to move to.
+                    log.warn("Delta page from {} returned version {} again; continuing from the watermark {}",
+                            cursor, overflowAt, stored);
+                    cursor = stored;
+                } else {
+                    // Below W (not a cliff): one version V < W fills the page. Step past V by 1 µs --
+                    // versions are µs-truncated -- not to W, so late commits in (V, W) are still read
+                    // (last fix J). Rows at exactly V beyond this page are unreachable without a
+                    // tiebreaker (O-1).
+                    metrics.versionOverflow();
+                    log.warn("Delta page of {} rows all at version {} below watermark {}; rows at exactly {} "
+                            + "beyond the page are not read (O-1); continuing from {} + 1 µs",
+                            page.size(), decoded.maxVersion, stored, decoded.maxVersion, decoded.maxVersion);
+                    overflowAt = decoded.maxVersion;
+                    cursor = decoded.maxVersion.plus(1, java.time.temporal.ChronoUnit.MICROS);
+                }
             } else if (stored != null && !decoded.maxVersion.isAfter(stored)) {
                 // A full page inside the overlap window: walk it.
                 metrics.overlapSaturated();
@@ -169,9 +183,12 @@ public class DeltaPoller {
                 DeltaRow row = decoder.decode(node, txTypes);
                 rows.add(row);
                 version = row.version();
-            } catch (IllegalArgumentException | DataIntegrityViolationException e) {
-                // Poison data (as on the stream): the type registry's first-sighting insert can
-                // reject the data too. Anything else is infrastructure and fails the run.
+            } catch (RuntimeException e) {
+                if (TransientFailures.isTransient(e)) {
+                    throw e; // infrastructure (e.g. the type registry's insert): fails the run
+                }
+                // Poison (as on the stream, one rule: TransientFailures): bad data, a data-integrity
+                // rejection from the type registry's first-sighting insert, or a bug.
                 DeltaRowDecoder.Identity identity = decoder.identify(node);
                 log.error("Cannot decode delta row {} (source {}); dead-lettering it",
                         identity.sourceId(), identity.source(), e);
@@ -194,10 +211,10 @@ public class DeltaPoller {
         try {
             writer.applyDelta(new DeltaBatch(rows, newWatermark));
             return;
-        } catch (IllegalArgumentException | DataIntegrityViolationException pageError) {
-            // Data the writer rejects (as on the stream, Phase 5): find the row(s) alone. Any other
-            // failure -- a pool timeout, a 40P01 deadlock -- is transient and fails the run.
-            if (rows.isEmpty()) {
+        } catch (RuntimeException pageError) {
+            // A transient failure -- a pool timeout, a 40P01 deadlock -- fails the run. Anything
+            // else is looked for row by row (one rule: TransientFailures).
+            if (rows.isEmpty() || TransientFailures.isTransient(pageError)) {
                 throw pageError;
             }
             log.warn("Delta page of {} rows was rejected; applying row by row", rows.size(), pageError);
@@ -211,15 +228,18 @@ public class DeltaPoller {
     }
 
     /**
-     * Only a rejection of the data is dead-lettered (review I1, the Phase 5 rule): anything else is
-     * rethrown, so the run fails with the watermark unchanged and the next fire retries -- rows
-     * already applied alone are then duplicates. If the dead-letter write itself fails, that
+     * A failure on the transient allowlist ({@link TransientFailures}) is rethrown, so the run fails with the watermark unchanged and the next fire retries -- rows
+     * already applied alone are then duplicates. Anything else -- bad data, a bug -- is
+     * dead-lettered rather than retried forever (last fix T). If the dead-letter write itself fails, that
      * escapes too.
      */
     private void applyAlone(DeltaRow row) {
         try {
             writer.applyDelta(new DeltaBatch(List.of(row), null));
-        } catch (IllegalArgumentException | DataIntegrityViolationException e) {
+        } catch (RuntimeException e) {
+            if (TransientFailures.isTransient(e)) {
+                throw e;
+            }
             deadLetters.record(STREAM, null, row.item(), e, 1);
             metrics.deadLettered();
             log.error("Dead-lettered delta row {} (source {})", row.item().sourceId(), row.source(), e);

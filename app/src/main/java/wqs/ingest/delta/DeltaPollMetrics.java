@@ -27,6 +27,7 @@ public class DeltaPollMetrics {
     public static final String TIMESTAMP_CLIFF = "wqs.delta.timestampcliff";
     public static final String POLL_FAILURES = "wqs.delta.poll.failures";
     public static final String OVERLAP_SATURATED = "wqs.delta.overlap.saturated";
+    public static final String VERSION_OVERFLOW = "wqs.delta.version.overflow";
 
     private static final Duration WATERMARK_AGE_TTL = Duration.ofSeconds(15);
 
@@ -36,6 +37,7 @@ public class DeltaPollMetrics {
     private final Counter failures;
     private final Counter deadLettered;
     private final Counter overlapSaturated;
+    private final Counter versionOverflow;
     private final CachedGaugeValue watermarkAge;
 
     public DeltaPollMetrics(MeterRegistry registry, DeltaWatermarkStore watermarks, Clock clock) {
@@ -54,6 +56,10 @@ public class DeltaPollMetrics {
         this.overlapSaturated = Counter.builder(OVERLAP_SATURATED)
                 .description("Full pages that did not advance the watermark (more than page-limit rows inside "
                         + "the overlap window), refetched from the watermark itself")
+                .register(registry);
+        this.versionOverflow = Counter.builder(VERSION_OVERFLOW)
+                .description("Full pages at one version below the watermark, stepped past by 1 µs; rows "
+                        + "at exactly that version beyond the page were not read (O-1)")
                 .register(registry);
         this.deadLettered = Counter.builder(wqs.projection.DeltaMetrics.ROWS)
                 .tag("outcome", "dead-lettered")
@@ -89,6 +95,10 @@ public class DeltaPollMetrics {
 
     void overlapSaturated() {
         overlapSaturated.increment();
+    }
+
+    void versionOverflow() {
+        versionOverflow.increment();
     }
 
     void deadLettered() {
