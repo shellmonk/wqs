@@ -29,7 +29,7 @@ WQS serves two consumers over two endpoints, with three logical views and three 
 | Language | Java 21 (virtual threads enabled) |
 | Framework | Spring Boot 3.x, MVC (not WebFlux) |
 | Build | Gradle, two subprojects |
-| SQL | jOOQ |
+| SQL | Spring `JdbcClient`, hand-written SQL (jOOQ removed 2026-11-03, §2.1) |
 | Migrations | Flyway |
 | Property testing | Jqwik |
 | Architecture testing | ArchUnit |
@@ -42,84 +42,61 @@ WQS serves two consumers over two endpoints, with three logical views and three 
 | Metrics | Micrometer → Prometheus / Amazon Managed Prometheus |
 | Tracing | OpenTelemetry → collector |
 
-**Virtual threads over WebFlux.** jOOQ is blocking JDBC. Virtual threads
+**Virtual threads over WebFlux.** JDBC is blocking. Virtual threads
 (`spring.threads.virtual.enabled=true`) deliver the concurrency benefit without WebFlux's
-pervasive reactive types. R2DBC is explicitly rejected: it would force either a reactive jOOQ
+pervasive reactive types. R2DBC is explicitly rejected: it would force either a reactive data-access
 dialect or a split persistence stack, for no benefit at this read volume.
 
-### 2.1 Why jOOQ (decision reviewed 2026-11-01)
+### 2.1 Data access: Spring `JdbcClient` with hand-written SQL (decision 2026-11-03)
 
-The choice was challenged and reaffirmed. The reasons, strongest first:
+WQS originally used jOOQ with build-time code generation (decision of 2026-11-01). On 2026-11-03
+the project owner replaced it with Spring's `JdbcClient` and hand-written SQL, and the Gradle build
+moved from the Kotlin DSL to the Groovy DSL. The port was behaviour-preserving: every statement was
+translated from the SQL jOOQ rendered, and the full test suite stayed green throughout.
 
-1. **Index-only scans stay enforceable.** §7.7 stakes read performance on a single covering index
-   with `INCLUDE` columns, which only works if queries select exactly the covered columns.
-   Selecting one extra column silently degrades to heap fetches — no error, no test failure. jOOQ
-   makes the projection list explicit at the call site, so the invariant is visible and reviewable.
-   An ORM hydrating entities selects whatever the entity declares, making a core performance
-   invariant invisible and breakable by an unrelated field addition.
-2. **One source of schema truth.** Generating from Flyway migrations (§8.3) means a schema change
-   that breaks a query fails the **build**, not a rarely-hit runtime branch. There are no entities
-   to drift and no query strings to drift.
-3. **Dynamic composition is the dominant query shape.** The read path is a filter matrix across
-   three aggregation levels and two view tables, and it will grow (O-6). Composing that with
-   strings is where both injection and malformed-SQL defects originate; composing it with a typed
-   DSL is checked.
-4. **camelCase quoting is handled structurally** (§3) rather than by per-query discipline.
-5. **No ORM semantics are needed.** WQS persists no mutable object graph — it projects immutable
-   events into denormalized tables and reads them back flat. Hibernate's dirty checking, L1 cache,
-   lazy loading and cascades are overhead with no corresponding benefit, and `@Entity` mapping
-   fights partitioned tables and composite keys for nothing.
+What this keeps and what it trades:
 
-**Organizational context.** The team's existing codebase uses Spring Data JPA alongside largely
-raw SQL, which has produced two unchecked descriptions of the same schema. WQS is a deliberate
-pilot of a single-model alternative: self-contained, no legacy entities, a twelve-table schema, and
-performance-critical enough that the benefits are observable. jOOQ coexists with JPA, so no other
-service is forced to migrate.
+1. **Index-only scans stay enforceable** — every query names its columns explicitly in SQL, and
+   the EXPLAIN tests (§7.7) pin the plans.
+2. **No ORM semantics are needed.** WQS projects immutable events into denormalized, partitioned
+   tables and reads them back flat; there is no object graph to manage.
+3. **Traded: build-time schema checking.** A renamed column no longer breaks compilation; it breaks
+   the integration tests, which execute every statement against real Flyway DDL on Testcontainers.
+   No Docker is needed at build time any more — only for tests.
+4. **camelCase quoting is per-statement discipline** (§3), checked by review and by the tests
+   (Postgres folds unquoted identifiers, so a missed quote fails at the first execution).
 
-**Accepted risk (R-6).** An unfamiliar data-access library is being introduced on the service with
-the strictest performance requirements. Mitigated by build-time codegen catching schema drift and
-by properties P-2, P-5 and P-6 catching logic errors against oracles.
+### 2.2 SQL usage rules
 
-**Serious alternative considered.** `JdbcClient` with handwritten SQL was the only real contender —
-simpler build, no Docker dependency, full control. Rejected because the query set is neither small
-nor static, and because it would reproduce the unchecked-string problem the pilot exists to solve.
-Spring Data JPA, MyBatis, QueryDSL and R2DBC were each rejected on the grounds above.
-
-### 2.2 jOOQ usage rules
-
-These exist because jOOQ codebases have their own failure modes, all of which recreate the problem
-it was adopted to solve:
-
-1. **`DSL.field(String)` and `.sql(...)` are prohibited** without an explicit, commented
-   justification. They reintroduce unchecked strings *inside* jOOQ while appearing safe. Always use
-   generated table and field constants. Enforced by review, and by an ArchUnit rule where
-   practical.
-2. **jOOQ types stay inside the query layer** (`read/`, `projection/`). Neither `DSLContext` nor
-   generated types may appear in `api/` or `domain/`.
-3. **Generated `Record` types are never returned upward.** Map to domain types or DTOs at the
-   query-layer boundary, or the API contract becomes coupled to table shape — forfeiting the
-   freedom to reshape tables that this design depends on.
+1. **Every value is bound**, never concatenated; `formatted()`/concatenation may insert only fixed
+   constants (table names chosen in code, column lists). Arrays are bound natively.
+2. **SQL stays inside the query layer** (`read/`, `projection/`, `db/`, `ingest/` stores).
+   `wqs.api..` and `wqs.domain..` do not depend on `org.springframework.jdbc..` or `java.sql..`.
+3. **Rows are mapped to domain types or DTOs at the query-layer boundary**; result sets never
+   escape it.
 4. **One query class per (view, aggregation level)**, not a single builder parameterized by
-   booleans. The combinatorial filter space is the most likely thing to rot into unreadable
-   conditionals.
+   booleans.
+5. **Reads use the reader pool inside one transaction:** a `wqs.read..` class that injects
+   `@ReaderJdbc JdbcClient` also injects `@ReaderTx TransactionTemplate`, and every statement of a
+   request runs inside one `@ReaderTx` callback (§7.10).
 
-Rules 2–4 concern layering rather than jOOQ specifically, and would apply to any data-access
-choice. All four are enforced by ArchUnit (§8.5) rather than by review alone.
+Rules 2, 4 and 5 are enforced by ArchUnit (§8.5); a source scan keeps the operator tables
+(`wqCc*`) out of the `/web` packages and `wqWeb*` out of the `/cc` packages.
 
 ### 2.3 Mapping layer (MapStruct)
 
-Mappings exist at two boundaries: source payload → item on the write side, and jOOQ `Record` →
+Mappings exist at two boundaries: source payload → item on the write side, and a JDBC row →
 domain → response DTO on the read side. Both use **MapStruct**, generating mappers at compile
 time.
 
-The reason it fits here is the same reason jOOQ does: **an unmapped field fails the build.** Adding
+The reason it fits here: **an unmapped field fails the build.** Adding
 a column breaks compilation twice — once at the query, once at the mapper — so schema knowledge
 stays checked rather than assumed.
 
 Rules:
 
 1. **Mappers live in the query layer** (`read/`, `projection/`), never in `api/`. A mapper
-   necessarily touches both jOOQ types and DTOs, so placing one in `api/` would violate §2.2 rule
+   necessarily touches both persistence and API shapes, so placing one in `api/` would violate §2.2 rule
    2 and fail the ArchUnit check. The mapper *is* the boundary; it belongs on the inside of it.
 2. **Unmapped target properties are an error, not a warning**
    (`unmappedTargetPolicy = ReportingPolicy.ERROR`). Downgrading this discards the entire benefit.
@@ -144,7 +121,7 @@ in order: `lombok`, `lombok-mapstruct-binding`, `mapstruct-processor`. Omitting 
 artifact is the classic failure, and its symptom is a compiling mapper that drops properties rather
 than a build error.
 
-The full clean-build chain is therefore: **Testcontainers → Flyway → jOOQ codegen → Lombok →
+The full clean-build chain is therefore: **Lombok →
 MapStruct → compile.** A failure can surface several steps downstream of its cause.
 
 ---
@@ -162,8 +139,7 @@ tables live in a separate `quartz` schema (§6.5) so the exception stays contain
 create table "wqWebItem" ( "userId" bigint not null, "occurredAt" timestamptz not null, ... );
 ```
 
-jOOQ quotes identifiers by default, so **quoting** needs no special handling in generated classes
-or jOOQ-built queries. Flyway migrations are raw SQL and are the only surface where a missing
+Every SQL statement — in Flyway migrations and in Java — must **double-quote** camelCase identifiers. In migrations a missing
 quote pair can ship silently.
 
 Identifier **naming** in generated code does need configuration, however: the default generator
@@ -825,7 +801,7 @@ skew produces duplicate or missed fires.
 
 **Schema exception.** Quartz owns its DDL and uses fixed `QRTZ_*` uppercase names, which cannot
 follow §3. Those tables therefore live in a **separate `quartz` schema**, keeping them out of the
-`wq*` namespace and excluded from jOOQ code generation (§8.3). The DDL ships as a Flyway migration.
+`wq*` namespace. The DDL ships as a Flyway migration.
 
 **The jobs:**
 
@@ -1162,12 +1138,12 @@ horizontally without touching the write path.
 transaction may briefly not be visible to a query. For a retrospective history view this is
 acceptable, and it is recorded here so it is not later triaged as a bug.
 
-**As implemented (phase 4).** The writer is the `@Primary` `DataSource` and `DSLContext` (built over
-Boot's jOOQ configuration, so Spring-managed transactions are unchanged); the reader has its own
-Hikari pool. Pools are named `writer` and `reader`. The reader pool is **read-only, REPEATABLE
+**As implemented.** The writer is the `@Primary` `DataSource`, `JdbcClient`, transaction manager
+and `TransactionTemplate` (so `@Transactional` binds to it); the reader has its own Hikari pool
+with `@ReaderJdbc JdbcClient` and a read-only REPEATABLE READ `@ReaderTx TransactionTemplate`. Pools are named `writer` and `reader`. The reader pool is **read-only, REPEATABLE
 READ**, and each request runs in a **single reader transaction**, so counters and items come from
-one snapshot. Every `DSLContext` injected into `wqs.read..` must be `@ReaderDsl` (§8.5), so a read
-cannot silently land on the writer.
+one snapshot. Every `JdbcClient` injected into `wqs.read..` must be `@ReaderJdbc` (§8.5), so a
+read cannot silently land on the writer.
 
 Connection pools are sized separately — a small writer pool (≈10–16) and a larger reader pool — so
 a burst of operator queries cannot starve ingestion.
@@ -1208,76 +1184,17 @@ already-projected months.
 ### 8.2 Integration testing
 
 Testcontainers runs Postgres (pinned to the Aurora major version) and RabbitMQ with the stream
-plugin. Every integration test executes real Flyway DDL and real jOOQ queries. Repositories are
+plugin. Every integration test executes real Flyway DDL and real SQL. Repositories are
 not mocked, because the component most likely to be wrong is the SQL.
 
 **Stated limitation.** Testcontainers Postgres is not Aurora. It does not reproduce Aurora's
 storage layer, reader-endpoint replica lag, or planner behaviour at scale. Correctness is proven
 locally; absolute performance is not.
 
-### 8.3 jOOQ code generation
+### 8.3 Code generation (removed)
 
-Gradle spins a throwaway Testcontainers Postgres, runs Flyway, generates jOOQ classes from the
-migrated schema, then compiles. Generated code therefore cannot drift from migrations, and the
-build requires no external database. Docker is consequently a **build** dependency, not merely a
-test dependency; confirmed available in CI and locally.
-
-**Partition children must be excluded from code generation.** jOOQ generates a class per table,
-and partitions are tables — left unconfigured, codegen emits `WqWebItem_2026_10`,
-`WqWebItem_2026_11` and so on, with the generated source growing every month in perpetuity.
-Queries target the parent table and let Postgres route, so the children are never referenced in
-code. The codegen configuration must therefore exclude them by pattern:
-
-```
-excludes = .*_\d{4}_\d{2}
-```
-
-`flyway_schema_history` and the entire `quartz` schema (§6.5) must also be excluded; both are
-infrastructure bookkeeping with no place in generated code.
-
-Use the **official `jooq-codegen-gradle` plugin** (available since jOOQ 3.19), not the older
-third-party Gradle plugin.
-
-**Generator strategy — decided in phase 1 and never revisited.** `DefaultGeneratorStrategy`
-uppercases identifiers, which flattens camelCase word boundaries: `"occurredAt"` would generate
-the identifier `OCCURREDAT`. A custom strategy preserving database names verbatim is therefore
-required, so generated identifiers read exactly like the schema:
-
-```java
-public class AsInDatabaseStrategy extends DefaultGeneratorStrategy {
-    @Override
-    public String getJavaIdentifier(Definition definition) {
-        return definition.getOutputName();   // "occurredAt" stays occurredAt
-    }
-    // Deliberately does NOT override getJavaGetterName / getJavaSetterName — see below.
-}
-```
-
-**Override only `getJavaIdentifier`.** jOOQ's documented `AsInDatabaseStrategy` example also
-overrides `getJavaGetterName` and `getJavaSetterName` to return `"get" + outputName`, which for
-`"occurredAt"` yields `getoccurredAt()` — not a JavaBean accessor. MapStruct (§2.3) would fail to
-recognise it as a property. Overriding the identifier alone gives identifiers that read like the
-schema *and* conventional accessors: `WqWebItem.occurredAt` with `getOccurredAt()`. Copying the
-whole documented example is the trap here.
-
-jOOQ's declarative matcher strategy is an equivalent alternative if regex configuration is
-preferred over a Java class. Either way the choice is effectively a second naming convention
-layered on §3, and changing it later renames every identifier in every query — so it is fixed in
-phase 1.
-
-**Where the schema is visible.** The migrations are the authoritative, reviewable, diffable
-definition. The generated classes mirror them in Java: a `Tables` class, a `TableImpl` subclass per
-table with a typed `TableField` per column, a `Record` type per table, plus `Keys` and `Indexes`.
-Generated sources live under `db/build/` and are **not** committed, so they appear in the IDE but
-not in code review; schema changes are reviewed as migration diffs instead. This is acceptable
-precisely because codegen reconciles the two at build time — a renamed column breaks compilation
-at every usage, which is what reviewing generated code would otherwise be for. The practical
-friction is that a migration edit requires re-running codegen and a Gradle sync before the IDE
-sees new columns.
-
-Licensing note: the jOOQ **Open Source Edition** covers PostgreSQL in full and is the correct
-edition here. Commercial licensing applies only to commercial databases. Aurora PostgreSQL speaks
-PostgreSQL, so the `POSTGRES` dialect applies directly.
+jOOQ code generation was removed with jOOQ on 2026-11-03 (§2.1). There is no generated code; the
+Flyway migrations are the schema, and the integration tests execute every statement against them.
 
 ### 8.4 Benchmark harness
 
@@ -1300,13 +1217,13 @@ them from prose into build failures.
 
 | Rule | Enforces |
 |---|---|
-| `api/` must not depend on `org.jooq..` or the generated package | §2.2 rules 2, 3 |
+| `api/` and `domain/` do not depend on `org.springframework.jdbc..` or `java.sql..`; nothing depends on `org.jooq..` | §2.2 rules 2, 3 |
 | No call to `DSL.field(String)` or `.sql(..)` outside an explicitly annotated allowlist | §2.2 rule 1 |
 | `api/web` and web query classes must not depend on `WqCcItem` | §9 control 3 — security by schema |
 | Nothing depends on `org.springframework.data.jpa..` | Prevents regression to the superseded pattern |
 | Layering: `api` → `read`/`projection` → `domain`; `ingest` → `projection`; nothing depends on `api` | §10 |
 | ~~Production code must not depend on the naive-`OFFSET` oracle~~ — **not added (phase 4)** | the oracle lives in test sources, which main cannot compile against; the rule could never fail |
-| Every `DSLContext` injection point in `wqs.read..` is `@ReaderDsl` (constructor, `@Autowired`/`@Inject`/`@Bean` parameters and fields; plain methods taking a `DSLContext tx` are exempt) | §10 — a read never silently lands on the writer. Replaces "only `projection/` may inject the writer" (the writer is the unqualified primary and ingest, db and jobs also write) |
+| Every `JdbcClient` injected into `wqs.read..` is `@ReaderJdbc`, and a class injecting `@ReaderJdbc` also injects `@ReaderTx` | §10 — reads on the reader pool, in one transaction |
 | `wqs.api..` other than `wqs.api.cc..` must not call `ServletRequest`/`WebRequest` `getParameter*`/`getQueryString` or use `ServletUriComponentsBuilder` | §9 control 1 |
 | MapStruct mappers must not reside in `api/` | §2.3 rule 1 |
 | `jobs/` classes must not be depended on by anything else | §10 — jobs are entry points, never collaborators |
@@ -1367,7 +1284,7 @@ when the merge moved to write time, and this job is how the cost is managed.
 rollups and group locators, the page index and cancellation state from the item rows is one
 class, used by the CI properties (P-2, P-4, P-8) and, in phase 7, by both reconciliation jobs —
 so CI and production check the same thing. It lives in test code today; phase 7 moves it to main
-code (its string SQL then needs a `@RawSqlJustified`).
+code.
 
 Both emit **drift as a gauge, alarmed at any non-zero value** (§11). Correctness is not a
 percentage target — pagination that silently lies about page counts is an incident, not a
@@ -1411,10 +1328,10 @@ WARN and must be used only on a trusted network.
 
 ```
 wqs/
-├── settings.gradle.kts
-├── db/                          # Flyway migrations + generated jOOQ classes
+├── settings.gradle
+├── db/                          # Flyway migrations
 │   ├── src/main/resources/db/migration/V*__*.sql
-│   └── build.gradle.kts         # Testcontainers-backed codegen task
+│   └── build.gradle
 └── app/
     └── src/main/java/<pkg>/
         ├── api/web|cc/          # controllers, DTOs, OpenAPI, parameter validation
@@ -1431,7 +1348,7 @@ wqs/
 ```
 
 **MapStruct mappers live in `read/` and `projection/`, never in `api/`** (§2.3). A mapper touches
-both jOOQ types and DTOs by definition, so putting one in `api/` would violate §2.2 rule 2 and
+both persistence rows and DTOs by definition, so putting one in `api/` would violate §2.2 rule 2 and
 fail the ArchUnit check. The mapper is the boundary and belongs on the inside of it.
 
 **`jobs/` holds Quartz job classes only** — thin wrappers that delegate to `ingest/`,
@@ -1442,7 +1359,7 @@ Two modules rather than one or six. `db` isolates code generation because genera
 build artifact, so a migration change rebuilds exactly one jar. Splitting further would add Gradle
 ceremony without isolation that packages do not already provide at this size.
 
-**Datasource routing is explicit.** Read services receive a reader-bound `DSLContext`; the
+**Datasource routing is explicit.** Read services receive a reader-bound `@ReaderJdbc JdbcClient` and `@ReaderTx TransactionTemplate`; the
 projection writer receives a writer-bound one. AOP routing on `@Transactional(readOnly = true)` is
 rejected as implicit and easy to get wrong silently — a read accidentally landing on the writer
 would not surface until load.
@@ -1605,7 +1522,7 @@ anything is broken, and it is the only failure whose impact is total.
 | R-3 | Benchmarks run only on Testcontainers Postgres, not Aurora (§8.4) | Accepted; results documented as relative signals |
 | R-4 | Aurora replica lag makes very recent transactions briefly invisible (§7.10) | Accepted as a property of the design |
 | R-5 | Delta timestamp cliff is unhandleable until the tiebreaker field exists (§4) | Mitigated by loud alarm; resolution depends on O-1 |
-| R-6 | jOOQ is new to the team and is being introduced on the most performance-critical service (§2.1) | Accepted; mitigated by build-time codegen and oracle-based properties |
+| R-6 | ~~jOOQ is new to the team~~ — **closed 2026-11-03**: jOOQ replaced by `JdbcClient` (§2.1); the residual risk is schema drift caught only by integration tests | Accepted |
 
 ---
 
@@ -1624,7 +1541,7 @@ anything is broken, and it is the only failure whose impact is total.
 | O-8 | Aurora PostgreSQL major version | Assumed 16; affects Testcontainers pinning |
 | O-9 | Backfill strategy for the existing 150M+ rows | Deferred by decision; `ProjectionWriter` is loader-agnostic so any loader can drive it |
 | O-10 | ~~How does a client select the eInstant view — explicit product ids, or a category parameter?~~ **Answered: a `productTypes` list matching the item's product type string** | —
-| O-11 | Gradle DSL: Kotlin or Groovy | Assumed Kotlin DSL |
+| O-11 | ~~Gradle DSL: Kotlin or Groovy~~ **Answered 2026-11-03: Groovy DSL; buildSrc in Java** | — |
 | O-12 | ~~Do claimable prizes carry a `"batchId"`?~~ **Answered:** `walClaimablePrizes` has nullable `batchId` / `subBatchId`, so prizes may be sessioned or not (§7.4) | — |
 | O-15 | ~~Which fields of each polled source can change between versions — status only, or also amount, product, type? And is a `walPayments` row with status CANCELLED / REJECTED / EXPIRED "cancelled" for `excludeCancelledTransactions`?~~ **Default adopted (§4.1): only status changes; cancelled/rejected/expired payments stay visible** | —
 | O-16 | ~~Source user ids are `varchar(64)`; WQS uses `bigint`. Are player ids always numeric? Should rows with `userType` ≠ 1 (non-players) be projected?~~ **Answered: `ownerId` = `"{userType}-{userId}"`, numeric; only userType 1 is projected** | —
@@ -1639,9 +1556,9 @@ Decisions made during design, with their rationale in brief.
 
 | Decision | Rationale |
 |---|---|
-| Virtual threads, not WebFlux | jOOQ is blocking; virtual threads give concurrency without reactive types |
-| jOOQ over JPA and over `JdbcClient` (§2.1) | Keeps index-only scans enforceable; one source of schema truth; no ORM semantics needed |
-| camelCase tables **and** columns | Explicit requirement; jOOQ quotes by default so only Flyway needs care |
+| Virtual threads, not WebFlux | JDBC is blocking; virtual threads give concurrency without reactive types |
+| ~~jOOQ over JPA and over `JdbcClient`~~ → **`JdbcClient` with hand-written SQL** (§2.1, 2026-11-03) | Owner decision; explicit SQL keeps index-only scans visible; no ORM semantics needed; schema drift caught by integration tests instead of codegen |
+| camelCase tables **and** columns | Explicit requirement; every SQL statement double-quotes them |
 | Per-view tables with duplication | Keeps the hot user-facing index small and cache-resident; security by schema |
 | `"wqItemLocator"` unpartitioned, all sources | One-probe cancel resolution; doubles as the idempotency gate |
 | Children assembled on read | Aggregates are precomputed; nesting assembly is microseconds and keeps filters in SQL |
@@ -1656,14 +1573,14 @@ Decisions made during design, with their rationale in brief.
 | Naive `OFFSET` kept as test oracle | The clever path's speed with the obvious path's confidence |
 | Explicit datasource qualifiers | Implicit AOP routing fails silently |
 | ArchUnit, from phase 1 (§8.5) | Converts §2.2 and §10 prose rules into build failures, including the §9 security boundary |
-| Custom `AsInDatabaseStrategy` for codegen, fixed in phase 1 (§8.3) | The default strategy flattens camelCase identifiers; changing this later renames every identifier in every query |
+| *(superseded 2026-11-03: jOOQ removed)* Custom `AsInDatabaseStrategy` for codegen, fixed in phase 1 (§8.3) | The default strategy flattens camelCase identifiers; changing this later renames every identifier in every query |
 | Rollups carry total wins, total plays and a play count at both levels (§5.5) | Required metrics; "total plays" is a monetary amount, and at play level the count is of transactions |
 | Unenumerated source fields go to `"detail" jsonb`, promoted later if needed | Lets phases 1–3 proceed before O-13 is answered, without guessing at columns |
 | Quartz with a clustered JDBC JobStore, not `@Scheduled` (§6.5) | `@Scheduled` fires on every instance; scaling out would race the delta watermarks. Silent when wrong |
 | Jobs declared in application properties, reconciled against stored triggers at startup (§6.5) | A persistent JobStore ignores config changes otherwise, which is a confusing failure to diagnose |
 | Quartz `QRTZ_*` tables in a separate `quartz` schema | Quartz owns its DDL and cannot follow §3; a separate schema contains the exception and keeps codegen clean |
 | MapStruct for all boundary mapping (§2.3) | Unmapped fields fail the build, extending the one-source-of-truth property into the mapping layer |
-| Override only `getJavaIdentifier` in the generator strategy (§8.3) | jOOQ's own documented example breaks JavaBean accessors and therefore MapStruct |
+| *(superseded 2026-11-03: jOOQ removed)* Override only `getJavaIdentifier` in the generator strategy (§8.3) | jOOQ's own documented example breaks JavaBean accessors and therefore MapStruct |
 | Lombok where it removes real boilerplate; records preferred (§2.4) | Records cover immutable types more clearly; `lombok-mapstruct-binding` is mandatory or mappers silently drop fields |
 | Observability instrumented per phase, not as a closing phase (§11) | Each component is observable the day it exists; alarms and SLOs defined rather than deferred |
 | Reconciliation jobs for both counters and the high-level index (§8.7) | A materialised merge can drift from its sources; this is the managed cost of moving the merge to write time |
