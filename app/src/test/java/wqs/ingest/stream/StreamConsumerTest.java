@@ -384,6 +384,78 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(count("wqDeadLetter")).isZero();
     }
 
+    /**
+     * Final review I-C: a deadlock (40P01) or other lock conflict while applying an item alone is a
+     * transient conflict with a concurrent writer (the delta poller, ruling I2), not poison: no dead
+     * letter, no offset advance, and the item is applied after recovery.
+     */
+    @Test
+    void a_lock_conflict_applying_an_item_alone_recovers_instead_of_dead_lettering() {
+        for (RuntimeException conflict : java.util.List.<RuntimeException>of(
+                new org.springframework.dao.CannotAcquireLockException("ERROR: deadlock detected (40P01)"),
+                new org.springframework.dao.PessimisticLockingFailureException("ERROR: deadlock detected (40P01)"))) {
+            clearProjection();
+            source = new FakeStreamSource();
+            // Fails every attempt the old code would make (3 as a batch, 3 alone), then succeeds.
+            ProjectionWriter conflicted = failing(conflict, 6);
+            MutableClock clock = new MutableClock(WHEN.plusSeconds(5));
+            StreamConsumer consumer = new StreamConsumer(source,
+                    new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
+                    payloadMapper, txTypes, conflicted, offsetStore, registry, clock, deadLetterStore);
+            consumer.start();
+
+            source.queue(payload("tx-locked"), 5);
+            source.deliverAll();
+
+            assertThat(count("wqDeadLetter")).as("%s is not poison", conflict).isZero();
+            assertThat(offsetStore.read("wallet-transactions")).as("offset not advanced").isEmpty();
+
+            for (int round = 0; round < 3 && count("wqWebItem") == 0; round++) {
+                clock.advance(Duration.ofSeconds(6));
+                consumer.poll();
+                source.redeliverFromSubscription();
+                consumer.poll();
+            }
+
+            assertThat(count("wqWebItem")).as("applied after recovery").isEqualTo(1);
+            assertThat(offsetStore.read("wallet-transactions")).contains(5L);
+            assertThat(count("wqDeadLetter")).isZero();
+            consumer.stop();
+        }
+    }
+
+    /** A data-integrity rejection applying an item alone is still poison: dead-lettered, offset advanced. */
+    @Test
+    void a_data_integrity_violation_applying_an_item_alone_is_dead_lettered() {
+        ProjectionWriter rejecting = failing(new org.springframework.dao.DataIntegrityViolationException("bad"), 99);
+        StreamConsumer consumer = new StreamConsumer(source,
+                new StreamProperties(true, "wallet-transactions", 1, Duration.ofMillis(200), 3, null, null),
+                payloadMapper, txTypes, rejecting, offsetStore, registry,
+                Clock.fixed(WHEN.plusSeconds(5), ZoneOffset.UTC), deadLetterStore);
+        consumer.start();
+
+        source.queue(payload("tx-rejected"), 7);
+        source.deliverAll();
+
+        assertThat(dsl().fetchOne("select \"sourceId\" from \"wqDeadLetter\"").get(0, String.class))
+                .isEqualTo("tx-rejected");
+        assertThat(offsetStore.read("wallet-transactions")).contains(7L);
+        assertThat(count("wqWebItem")).isZero();
+    }
+
+    /** The real writer, except that the first {@code times} calls throw {@code failure}. */
+    private ProjectionWriter failing(RuntimeException failure, int times) {
+        ProjectionWriter mock = org.mockito.Mockito.mock(ProjectionWriter.class);
+        java.util.concurrent.atomic.AtomicInteger left = new java.util.concurrent.atomic.AtomicInteger(times);
+        org.mockito.Mockito.when(mock.apply(org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+            if (left.getAndDecrement() > 0) {
+                throw failure;
+            }
+            return writer.apply(call.getArgument(0));
+        });
+        return mock;
+    }
+
     private StreamConsumer consumerWith(Clock clock, int batchSize) {
         StreamProperties properties =
                 new StreamProperties(true, "wallet-transactions", batchSize, Duration.ofMillis(200), 3, null, null);

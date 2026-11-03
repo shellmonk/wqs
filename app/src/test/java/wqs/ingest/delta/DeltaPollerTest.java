@@ -199,9 +199,13 @@ class DeltaPollerTest extends PostgresTestBase {
         assertThat(meters.counter(DeltaPollMetrics.PAGE_SATURATED).count()).isEqualTo(saturated + 1);
     }
 
+    /**
+     * The cliff is raised only when the run's cursor cannot move and stands at (or past) the stored
+     * watermark: a full page all at W, fetched again from W, is the same page.
+     */
     @Test
     void timestamp_cliff_alarms_and_does_not_advance() {
-        expect(Instant.EPOCH, page(prizeAt("1", v(1))));
+        expect(Instant.EPOCH, page(prizeAt("1", v(9))));
         poller.runOnce();
         nextRun();
         double cliffs = meters.counter(DeltaPollMetrics.TIMESTAMP_CLIFF).count();
@@ -209,17 +213,85 @@ class DeltaPollerTest extends PostgresTestBase {
         for (int i = 0; i < PAGE_LIMIT; i++) {
             oneVersion.add(prizeAt(Integer.toString(200 + i), v(9)));
         }
-        // Exactly one request: the run ends on the cliff instead of polling the same page again.
-        expect(v(1).minus(OVERLAP), page(oneVersion));
+        expect(v(9).minus(OVERLAP), page(oneVersion)); // walks the window to its max, v(9) = W
+        expect(v(9), page(oneVersion));                // the cursor cannot move: the cliff
 
         PollOutcome outcome = poller.runOnce();
 
         server.verify();
-        assertThat(outcome).isEqualTo(new PollOutcome(1, PAGE_LIMIT, true));
+        assertThat(outcome).isEqualTo(new PollOutcome(2, 2 * PAGE_LIMIT, true));
         assertThat(meters.counter(DeltaPollMetrics.TIMESTAMP_CLIFF).count()).isEqualTo(cliffs + 1);
-        assertThat(watermarks.read()).as("the cliff does not advance the watermark").contains(v(1));
+        assertThat(watermarks.read()).as("the cliff does not advance the watermark").contains(v(9));
         // The page's rows are still applied: versioned upserts are idempotent.
         assertThat(count("wqCcItem")).isEqualTo(1 + PAGE_LIMIT);
+    }
+
+    /**
+     * Final review I-A: more than page-limit rows already applied in [W - overlap, W], and a row
+     * inside that window that committed late. The run walks the window page by page (each next
+     * cursor = the previous page's max, inclusive) and applies the late row in the same run.
+     */
+    @Test
+    void late_row_inside_a_saturated_overlap_window_is_applied_in_the_same_run() {
+        seedWatermark(v(10));
+        Instant w = v(8); // W - overlap
+        expect(w, page(prizeAt("10", w), prizeAt("11", w.plusSeconds(20)), prizeAt("12", w.plusSeconds(40)),
+                prizeAt("13", w.plusSeconds(60)), prizeAt("14", w.plusSeconds(80))));
+        expect(w.plusSeconds(80), page(prizeAt("14", w.plusSeconds(80)), prizeAt("999", w.plusSeconds(90)) /* the late commit */,
+                prizeAt("15", w.plusSeconds(100)), prizeAt("16", w.plusSeconds(110)), prizeAt("17", v(10))));
+        expect(v(10), page(prizeAt("17", v(10)), prizeAt("18", v(11))));
+
+        PollOutcome outcome = poller.runOnce();
+
+        server.verify();
+        assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 2, false));
+        assertThat(dsl().fetchCount(dsl().selectFrom("\"wqCcItem\"").where("\"sourceId\" = '999'"))).isEqualTo(1);
+        assertThat(watermarks.read()).contains(v(11));
+    }
+
+    /**
+     * Final review I-B: a bulk update gave more than page-limit rows one version V below W. That is
+     * not the timestamp cliff (the cliff is only at the watermark): the run gets past it to W and
+     * applies the newer rows.
+     */
+    @Test
+    void one_version_below_the_watermark_is_not_a_cliff() {
+        seedWatermark(v(10));
+        double cliffs = meters.counter(DeltaPollMetrics.TIMESTAMP_CLIFF).count();
+        List<String> bulk = new ArrayList<>();
+        for (int i = 0; i < PAGE_LIMIT; i++) {
+            bulk.add(prizeAt(Integer.toString(300 + i), v(9)));
+        }
+        expect(v(8), page(bulk));
+        expect(v(9), page(bulk));
+        expect(v(10), page(prizeAt("6", v(11)), prizeAt("7", v(12))));
+
+        PollOutcome outcome = poller.runOnce();
+
+        server.verify();
+        assertThat(outcome).isEqualTo(new PollOutcome(3, 2 * PAGE_LIMIT + 2, false));
+        assertThat(meters.counter(DeltaPollMetrics.TIMESTAMP_CLIFF).count()).isEqualTo(cliffs);
+        assertThat(watermarks.read()).contains(v(12));
+        assertThat(count("wqCcItem")).isEqualTo(PAGE_LIMIT + 2);
+    }
+
+    /** Final review M-1: re-reading the same poison row in the overlap does not dead-letter it twice. */
+    @Test
+    void the_same_poison_row_read_twice_is_dead_lettered_once() {
+        String poison = payment("42", 1, USER, T0, v(5), 3, 7);
+        expect(Instant.EPOCH, page(prizeAt("1", v(5)), poison, "\"a-scalar\""));
+        poller.runOnce();
+        nextRun();
+        expect(v(5).minus(OVERLAP), page(prizeAt("1", v(5)), poison, "\"a-scalar\""));
+
+        poller.runOnce();
+
+        server.verify();
+        assertThat(count("wqDeadLetter")).isEqualTo(2);
+    }
+
+    private void seedWatermark(Instant at) {
+        writer.applyDelta(new wqs.projection.DeltaBatch(List.of(), at));
     }
 
     /**

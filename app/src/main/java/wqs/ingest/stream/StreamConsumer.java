@@ -421,7 +421,11 @@ public class StreamConsumer {
                         batch.stream(), List.of(item), null, itemOffset == null ? null : List.of(itemOffset)));
                 count(result);
                 return true;
-            } catch (RuntimeException e) {
+            } catch (IllegalArgumentException | org.springframework.dao.DataIntegrityViolationException e) {
+                // Only a rejection of the data is poison (the Phase 5 rule, final review I-C). Anything
+                // else -- a 40P01 deadlock with the concurrent delta poller, a lock timeout, a pool
+                // timeout -- escapes: the consumer enters recovery and re-applies from the stored
+                // offset after the backoff, so the conflict is retried, never dead-lettered (ruling I2).
                 lastError = e;
                 log.warn("Item {} attempt {}/{} failed", item.sourceId(), attempt, properties.maxAttempts(), e);
             }

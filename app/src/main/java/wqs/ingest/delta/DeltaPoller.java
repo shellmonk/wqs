@@ -26,13 +26,14 @@ import wqs.projection.source.DeltaRow;
  * could be read -- poison included, so one bad row cannot pin the cursor -- and the writer keeps
  * it monotonic. An empty page leaves it unchanged.
  *
- * <p><b>Timestamp cliff.</b> A saturated page whose versions are all equal cannot be paged past by
- * a timestamp cursor (O-1): {@code wqs.delta.timestampcliff} is incremented, an ERROR logged, the
- * rows applied (idempotent) without advancing, and the run ends.
+ * <p><b>Timestamp cliff.</b> A saturated page that cannot move the run's cursor, with the cursor at
+ * the watermark, cannot be paged past by a timestamp cursor (O-1): {@code wqs.delta.timestampcliff}
+ * is incremented, an ERROR logged, the rows applied (idempotent) without advancing, and the run ends.
  *
- * <p><b>Overlap saturation.</b> A full page that does not advance the watermark lies inside the
- * overlap window; it is refetched once from the watermark itself ({@code wqs.delta.overlap.saturated}),
- * and the run ends if that does not advance either.
+ * <p><b>Overlap saturation.</b> A full page that does not get past the watermark lies inside the
+ * overlap window ({@code wqs.delta.overlap.saturated}): the run walks the window, each next cursor
+ * the previous page's max inclusive, and jumps to the watermark if one version below it fills a
+ * page (see {@link #poll()}).
  *
  * <p><b>Poison.</b> A row that does not decode is dead-lettered alone and the rest of the page
  * applies. If the writer rejects the page's data ({@code IllegalArgumentException},
@@ -82,13 +83,25 @@ public class DeltaPoller {
         }
     }
 
+    /**
+     * The run's cursor starts at W - overlap. After a full page it moves to (review I-A, I-B):
+     * <ul>
+     *   <li>the page's max, inclusive, while that max is not past W: the run walks the overlap
+     *       window page by page, so a late commit inside it is read in this run;</li>
+     *   <li>W itself, when the page could not move the cursor but the cursor is below W (more
+     *       than page-limit rows share one version V below W, a bulk update): not a cliff;</li>
+     *   <li>the new W - overlap once a page got past W: the normal D7 repoll.</li>
+     * </ul>
+     * The timestamp cliff is a full page that cannot move the cursor (min = max = cursor) with the
+     * cursor at or past W (or no W): the same page would come back forever.
+     */
     private PollOutcome poll() {
         int pages = 0;
         int fetched = 0;
-        boolean exact = false;
+        Instant cursor = since(watermarks.read().orElse(null));
         while (true) {
             Instant stored = watermarks.read().orElse(null);
-            ArrayNode page = client.fetch(exact ? stored : since(stored));
+            ArrayNode page = client.fetch(cursor);
             pages++;
             fetched += page.size();
             metrics.fetched(page.size());
@@ -98,11 +111,12 @@ public class DeltaPoller {
             if (saturated) {
                 metrics.saturated();
             }
-            boolean cliff = saturated && decoded.minVersion != null && decoded.minVersion.equals(decoded.maxVersion);
+            boolean stuck = saturated && decoded.maxVersion != null && !decoded.maxVersion.isAfter(cursor);
+            boolean cliff = stuck && (stored == null || !cursor.isBefore(stored));
             if (cliff) {
                 metrics.cliff();
-                log.error("Delta timestamp cliff: a full page of {} rows all at version {}; the watermark cannot "
-                        + "advance past it (O-1). Rows applied, run ended.", page.size(), decoded.maxVersion);
+                log.error("Delta timestamp cliff: a full page of {} rows all at version {}, the watermark; it "
+                        + "cannot be paged past (O-1). Rows applied, run ended.", page.size(), decoded.maxVersion);
             }
             apply(decoded.rows, cliff ? null : decoded.maxVersion);
             metrics.watermarkMoved();
@@ -113,24 +127,25 @@ public class DeltaPoller {
             if (!saturated || pages >= properties.maxPagesPerRun()) {
                 return new PollOutcome(pages, fetched, false);
             }
-            boolean advanced = decoded.maxVersion != null && (stored == null || decoded.maxVersion.isAfter(stored));
-            if (advanced) {
-                exact = false;
-                continue;
-            }
-            if (exact || stored == null) {
-                // Polling again would fetch the same page: no readable version, or the exact refetch
-                // from the watermark did not get past it either.
-                log.warn("Delta page of {} rows did not advance the watermark {}; ending the run", page.size(), stored);
+            if (decoded.maxVersion == null) {
+                // No readable version: polling again would fetch the same page (review M2).
+                log.warn("Delta page of {} rows has no readable version; ending the run", page.size());
                 return new PollOutcome(pages, fetched, false);
             }
-            // Review C1: more than page-limit rows inside [W - overlap, W]. Re-polling with the overlap
-            // would fetch this same page forever; refetch once from W itself. A full page all at W is
-            // then the timestamp cliff; anything newer advances.
-            metrics.overlapSaturated();
-            log.warn("Delta page of {} rows lies inside the overlap window below watermark {}; refetching from "
-                    + "the watermark without overlap", page.size(), stored);
-            exact = true;
+            if (stuck) {
+                // Below W (not a cliff): one version V < W fills the page. Its rows were seen when W
+                // passed V; get past them to W.
+                metrics.overlapSaturated();
+                log.warn("Delta page of {} rows all at version {} below watermark {}; continuing from the watermark",
+                        page.size(), decoded.maxVersion, stored);
+                cursor = stored;
+            } else if (stored != null && !decoded.maxVersion.isAfter(stored)) {
+                // A full page inside the overlap window: walk it.
+                metrics.overlapSaturated();
+                cursor = decoded.maxVersion;
+            } else {
+                cursor = since(decoded.maxVersion);
+            }
         }
     }
 

@@ -20,6 +20,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import wqs.domain.ProjectionItem;
 import wqs.domain.SourceKind;
 import wqs.projection.source.StreamPayload;
+import wqs.projection.DeltaWatermarkStore;
 import wqs.projection.DrainedCancelDeadLetters;
 import wqs.projection.RejectedItemDeadLetters;
 
@@ -145,8 +146,12 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
             String stream, Long offset, Short source, String sourceId,
             Object payload, String errorText, int attempts) {
         try {
-            requiresNew.executeWithoutResult(status ->
-                    insert(stream, offset, source, sourceId, JSONB.valueOf(serialize(payload)), errorText, attempts));
+            requiresNew.executeWithoutResult(status -> {
+                JSONB json = JSONB.valueOf(serialize(payload));
+                if (!isRepeatedPolledRow(stream, source, sourceId, json)) {
+                    insert(stream, offset, source, sourceId, json, errorText, attempts);
+                }
+            });
         } catch (RuntimeException normalFailure) {
             log.warn("Dead-letter row for {} at offset {} could not be stored as is; storing the raw bytes",
                     sanitise(String.valueOf(sourceId)), offset, normalFailure);
@@ -155,6 +160,23 @@ public class DeadLetterStore implements DrainedCancelDeadLetters, RejectedItemDe
                     insert(stream, offset, source, null, JSONB.valueOf(serialize(rawBase64(rawBytes(payload)))),
                             fallbackError, attempts));
         }
+    }
+
+    /**
+     * The delta poll re-reads its overlap window every run, so the same poison row would be
+     * dead-lettered on every poll (final review M-1). A polled row is skipped when a dead letter with
+     * the same source, sourceId and payload exists -- the payload carries the row's version field,
+     * or for a non-object row its SHA-256 -- so a new version of the row is still recorded.
+     */
+    private boolean isRepeatedPolledRow(String stream, Short source, String sourceId, JSONB payload) {
+        if (!DeltaWatermarkStore.WALLET_DELTA.equals(stream)) {
+            return false;
+        }
+        return dsl.fetchExists(dsl.selectOne().from(WQ_DEAD_LETTER).where(
+                WQ_DEAD_LETTER.stream.eq(stream),
+                WQ_DEAD_LETTER.source.isNotDistinctFrom(source),
+                WQ_DEAD_LETTER.sourceId.isNotDistinctFrom(sourceId),
+                WQ_DEAD_LETTER.payload.eq(payload)));
     }
 
     private void insert(
