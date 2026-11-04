@@ -21,10 +21,11 @@ public abstract class IntegrationTest {
 
     /**
      * A stream client connects to the address the broker advertises, not the one it dialled, so
-     * the broker must advertise an address the test JVM can reach. A fixed host port (not 5552,
-     * so a local `docker compose` broker does not clash) makes that address known before start.
+     * the broker must advertise an address the test JVM can reach: a host port chosen before the
+     * container starts. A free one is picked each run, so back-to-back runs (whose previous broker
+     * may still hold its port for a few seconds) and a local `docker compose` broker never clash.
      */
-    protected static final int STREAM_PORT = 15552;
+    protected static final int STREAM_PORT = freePort();
 
     protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16");
 
@@ -46,6 +47,14 @@ public abstract class IntegrationTest {
         try (com.rabbitmq.stream.Environment env = com.rabbitmq.stream.Environment.builder()
                 .uri("rabbitmq-stream://localhost:" + STREAM_PORT).build()) {
             env.streamCreator().stream(STREAM).create();
+        }
+    }
+
+    private static int freePort() {
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+            return socket.getLocalPort();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("no free local port", e);
         }
     }
 

@@ -10,6 +10,18 @@ spring:
     password: wqs
     hikari:
       maximum-pool-size: 12
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only checks that the entities match it.
+      ddl-auto: validate
+      naming:
+        # Column and table names are the entity's own camelCase names, quoted.
+        physical-strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
+    properties:
+      hibernate:
+        globally_quoted_identifiers: true
+        jdbc.time_zone: UTC
   flyway:
     enabled: true
     locations: classpath:db/migration

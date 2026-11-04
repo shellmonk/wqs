@@ -14,23 +14,19 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.support.TransactionTemplate;
 import wqs.config.StreamProperties;
 import wqs.dto.StreamMessage;
 import wqs.exception.DecodeException;
 import wqs.exception.RejectedException;
-import wqs.mapper.TransactionMapper;
-import wqs.repository.DeadLetterRepository;
-import wqs.repository.IngestCursorRepository;
+import wqs.service.StreamIngestService;
 import wqs.service.TransactionIngestService;
 import wqs.util.TransientFailures;
 
 /**
- * Consumes {@code walAccountTransactions} from the RabbitMQ stream through {@link TransactionIngestService}.
- *
- * <p>Each message is handled in ONE database transaction that also stores its offset in
- * {@code "wqIngestCursor"}, so a crash replays from the last committed message and never skips
- * one. The broker's own offset tracking is not used. A redelivered message hits the unique key and
+ * Consumes {@code walAccountTransactions} from the RabbitMQ stream. Transactions are the service
+ * layer's: each {@link StreamIngestService} call is ONE database transaction that also stores the
+ * message's offset in {@code "wqIngestCursor"}, so a crash replays from the last committed message
+ * and never skips one. The broker's own offset tracking is not used. A redelivered message hits the unique key and
  * is counted as a duplicate.
  *
  * <ul>
@@ -55,11 +51,7 @@ public class StreamConsumer implements SmartLifecycle {
     private final Environment environment;
     private final StreamProperties properties;
     private final StreamMessageDecoder decoder;
-    private final TransactionMapper mapper;
-    private final TransactionIngestService ingest;
-    private final IngestCursorRepository cursor;
-    private final DeadLetterRepository deadLetters;
-    private final TransactionTemplate tx;
+    private final StreamIngestService ingest;
     private final MeterRegistry meters;
 
     private volatile boolean running;
@@ -69,16 +61,11 @@ public class StreamConsumer implements SmartLifecycle {
     private volatile long lastOffset = -1;
 
     public StreamConsumer(Environment environment, StreamProperties properties, StreamMessageDecoder decoder,
-                          TransactionMapper mapper, TransactionIngestService ingest, IngestCursorRepository cursor,
-                          DeadLetterRepository deadLetters, TransactionTemplate tx, MeterRegistry meters) {
+                          StreamIngestService ingest, MeterRegistry meters) {
         this.environment = environment;
         this.properties = properties;
         this.decoder = decoder;
-        this.mapper = mapper;
         this.ingest = ingest;
-        this.cursor = cursor;
-        this.deadLetters = deadLetters;
-        this.tx = tx;
         this.meters = meters;
     }
 
@@ -119,7 +106,7 @@ public class StreamConsumer implements SmartLifecycle {
         Duration backoff = Duration.ofSeconds(1);
         while (running) {
             try {
-                OptionalLong stored = cursor.streamOffset(properties.name());
+                OptionalLong stored = ingest.lastOffset(properties.name());
                 lastOffset = stored.orElse(-1);
                 OffsetSpecification from = stored.isPresent()
                         ? OffsetSpecification.offset(stored.getAsLong() + 1)
@@ -174,24 +161,14 @@ public class StreamConsumer implements SmartLifecycle {
         try {
             m = decoder.decode(body);
         } catch (DecodeException e) {
-            tx.executeWithoutResult(status -> {
-                deadLetters.unreadable(feed, offset, body, "unreadable", e.getMessage());
-                cursor.saveStreamOffset(feed, offset);
-            });
+            ingest.recordUnreadable(feed, offset, body, "unreadable", e.getMessage());
             return "dead_lettered";
         }
         try {
-            return tx.execute(status -> {
-                TransactionIngestService.Outcome outcome = ingest.ingest(mapper.fromStream(m));
-                cursor.saveStreamOffset(feed, offset);
-                return outcome == TransactionIngestService.Outcome.INSERTED ? "inserted" : "duplicate";
-            });
+            return ingest.ingest(feed, offset, m) == TransactionIngestService.Outcome.INSERTED ? "inserted" : "duplicate";
         } catch (RejectedException e) {
-            // The ingest transaction has rolled back; record the rejection in a fresh one.
-            tx.executeWithoutResult(status -> {
-                deadLetters.rejected(feed, offset, m.id(), e.reason(), e.getMessage(), m);
-                cursor.saveStreamOffset(feed, offset);
-            });
+            // The ingest transaction has rolled back; the rejection is recorded in a fresh one.
+            ingest.recordRejected(feed, offset, m, e.reason(), e.getMessage());
             return "dead_lettered";
         }
     }
@@ -214,15 +191,12 @@ public class StreamConsumer implements SmartLifecycle {
         while (running) {
             boolean fields = withFields;
             try {
-                tx.executeWithoutResult(status -> {
-                    if (fields) {
-                        StreamMessage m = decoder.decode(body); // it decoded before, so it decodes again
-                        deadLetters.rejected(feed, offset, m.id(), "write-failed", error, m);
-                    } else {
-                        deadLetters.unreadable(feed, offset, body, "write-failed", error);
-                    }
-                    cursor.saveStreamOffset(feed, offset);
-                });
+                if (fields) {
+                    StreamMessage m = decoder.decode(body); // it decoded before, so it decodes again
+                    ingest.recordRejected(feed, offset, m, "write-failed", error);
+                } else {
+                    ingest.recordUnreadable(feed, offset, body, "write-failed", error);
+                }
                 lastOffset = offset;
                 meters.counter("wqs.ingest.stream.messages", "outcome", "dead_lettered").increment();
                 return;

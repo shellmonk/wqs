@@ -1,4 +1,4 @@
-package wqs.repository;
+package wqs.service;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -7,36 +7,24 @@ import java.time.ZoneOffset;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.stereotype.Repository;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.stereotype.Service;
 import wqs.config.PartitionProperties;
 import wqs.exception.RejectedException;
 
 /**
- * Partition DDL: creates monthly partitions of a partitioned table on demand ({@code "wqPrjTransaction_2026_10"}
- * holds October 2026, UTC).
- *
- * <p>Each partition is created in its own short transaction (REQUIRES_NEW): creating one locks
- * the parent table, and that lock must not be held for the rest of an ingest transaction.
+ * Creates monthly partitions on demand ({@code "wqPrjTransaction_2026_10"} holds October 2026, UTC).
  * A concurrent creator that wins the race is fine: the partition exists either way.
  */
-@Repository
-public class PartitionRepository {
+@Service
+public class PartitionService {
 
-    private final JdbcClient jdbc;
-    private final TransactionTemplate ownTransaction;
+    private final PartitionDdlService ddl;
     private final PartitionProperties properties;
     private final Clock clock;
     private final Set<String> known = ConcurrentHashMap.newKeySet();
 
-    public PartitionRepository(JdbcClient jdbc, PlatformTransactionManager transactionManager,
-                      PartitionProperties properties, Clock clock) {
-        this.jdbc = jdbc;
-        this.ownTransaction = new TransactionTemplate(transactionManager);
-        this.ownTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    public PartitionService(PartitionDdlService ddl, PartitionProperties properties, Clock clock) {
+        this.ddl = ddl;
         this.properties = properties;
         this.clock = clock;
     }
@@ -58,22 +46,16 @@ public class PartitionRepository {
         }
         // DDL cannot take bind parameters. Every piece here is generated, never input: the table
         // name is a constant from the caller and the bounds are formatted from a YearMonth.
-        String ddl = "create table if not exists \"%s\" partition of \"%s\" for values from ('%s') to ('%s')"
+        String sql = "create table if not exists \"%s\" partition of \"%s\" for values from ('%s') to ('%s')"
                 .formatted(partition, table, month.atDay(1) + "T00:00:00Z", month.plusMonths(1).atDay(1) + "T00:00:00Z");
         try {
-            ownTransaction.executeWithoutResult(status -> jdbc.sql(ddl).update());
+            ddl.execute(sql);
         } catch (DataAccessException raced) {
             // Lost a race with another creator, or a real failure: the existence check tells which.
-            if (!exists(partition)) {
+            if (!ddl.exists(partition)) {
                 throw raced;
             }
         }
         known.add(partition);
-    }
-
-    private boolean exists(String partition) {
-        return jdbc.sql("select to_regclass(:name) is not null")
-                .param("name", "\"" + partition + "\"")
-                .query(Boolean.class).single();
     }
 }

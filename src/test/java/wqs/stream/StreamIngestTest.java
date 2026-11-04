@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.IntegrationTest;
-import wqs.repository.DeadLetterRepository;
+import wqs.util.Hashes;
 
 /**
  * Messages published to the real stream end up in Postgres. Tests share one stream and one
@@ -107,7 +107,7 @@ class StreamIngestTest extends IntegrationTest {
     @Test
     void an_unreadable_message_is_dead_lettered_by_hash_and_the_stream_moves_on() throws Exception {
         byte[] poison = ("{\"id\": \"" + nextId() + "\", \"toDescription\": \"WITHDRAWAL*5208\"").getBytes(StandardCharsets.UTF_8);
-        String sha = DeadLetterRepository.sha256(poison);
+        String sha = Hashes.sha256(poison);
         publish(poison);
         String after = nextId();
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-03T00:00:00Z"));
@@ -133,7 +133,7 @@ class StreamIngestTest extends IntegrationTest {
 
         awaitRow(after);
         assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetter\" where \"bodySha256\" = :sha")
-                .param("sha", DeadLetterRepository.sha256(body)).query(String.class).single()).isEqualTo("unreadable");
+                .param("sha", Hashes.sha256(body)).query(String.class).single()).isEqualTo("unreadable");
     }
 
     @Test
@@ -182,7 +182,7 @@ class StreamIngestTest extends IntegrationTest {
     @Test
     void after_a_restart_consumption_resumes_after_the_stored_offset() throws Exception {
         byte[] poison = ("not json " + nextId()).getBytes(StandardCharsets.UTF_8);
-        String sha = DeadLetterRepository.sha256(poison);
+        String sha = Hashes.sha256(poison);
         publish(poison);
         String before = nextId();
         publish(message("transfer-out.json", before, "1-" + before, "2026-09-05T00:00:00Z"));

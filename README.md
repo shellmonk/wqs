@@ -12,7 +12,7 @@ The wallet's inputs are documented in `docs/reference/`.
 
 ## Stack
 
-Java 21 · Spring Boot 3.4 (MVC, virtual threads) · Spring `JdbcClient` with hand-written SQL ·
+Java 21 · Spring Boot 3.4 (MVC, virtual threads) · Spring Data JPA (native queries for atomic writes) ·
 Flyway · Postgres 16 · Quartz (clustered JDBC store) · RabbitMQ Streams · MapStruct · Lombok ·
 Testcontainers. One Gradle build file (Groovy DSL).
 
@@ -40,12 +40,17 @@ Testcontainers at its socket in `~/.testcontainers.properties`:
 docker.host=unix:///Users/<you>/.colima/default/docker.sock
 ```
 
-The test broker binds host port 15552, so it does not clash with a `docker compose` broker on 5552.
+The test broker binds a free host port picked per run, so it never clashes with a `docker compose` broker on 5552.
 
 ## Conventions
 
 - Database identifiers are camelCase and always double-quoted in SQL (`"userId"`).
 - Every value is bound as a parameter; nothing is concatenated into SQL.
-- Writes use the primary (writer) pool. API reads use `@ReaderJdbc` inside one `@ReaderTx`
-  transaction (read-only, REPEATABLE READ), so a request sees one snapshot.
+- Spring layering: `config`, `dto`, `entity`, `exception`, `mapper`, `repository` (one Spring Data
+  JPA repository per table), `service`, `stream`, `util`.
+- Transactions are declared with `@Transactional` on service methods only. A
+  `@Transactional(readOnly = true)` method runs on the reader pool, anything else on the writer; a
+  read request uses one read-only REPEATABLE READ transaction, so it sees one snapshot.
+- Writes that must be atomic (insert-unless-present, session and play upserts) are native
+  `@Query` methods on the repositories; Hibernate validates the entities against the schema at startup.
 - One schema migration, `V1__baseline.sql`, edited in place until go-live.

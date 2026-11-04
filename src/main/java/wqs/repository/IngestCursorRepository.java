@@ -1,36 +1,21 @@
 package wqs.repository;
 
-import java.util.OptionalLong;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.stereotype.Repository;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import wqs.entity.IngestCursorEntity;
 
 /** {@code "wqIngestCursor"}: the last processed position of each feed, stored in the same transaction as what it produced. */
-@Repository
-public class IngestCursorRepository {
+public interface IngestCursorRepository extends JpaRepository<IngestCursorEntity, Long> {
 
-    private final JdbcClient jdbc;
+    Optional<IngestCursorEntity> findByFeed(String feed);
 
-    public IngestCursorRepository(JdbcClient jdbc) {
-        this.jdbc = jdbc;
-    }
-
-    public OptionalLong streamOffset(String feed) {
-        return jdbc.sql("select \"streamOffset\" from \"wqIngestCursor\" where \"feed\" = :feed")
-                .param("feed", feed)
-                .query(Long.class).optional()
-                .map(OptionalLong::of).orElse(OptionalLong.empty());
-    }
-
-    @Transactional(propagation = Propagation.MANDATORY)
-    public void saveStreamOffset(String feed, long offset) {
-        jdbc.sql("""
-                insert into "wqIngestCursor" ("feed", "streamOffset", "updatedAt") values (:feed, :offset, now())
-                on conflict ("feed") do update set "streamOffset" = excluded."streamOffset", "updatedAt" = now()
-                """)
-                .param("feed", feed)
-                .param("offset", offset)
-                .update();
-    }
+    @Modifying
+    @Query(nativeQuery = true, value = """
+            insert into "wqIngestCursor" ("feed", "streamOffset", "updatedAt") values (:feed, :offset, now())
+            on conflict ("feed") do update set "streamOffset" = excluded."streamOffset", "updatedAt" = now()
+            """)
+    int saveStreamOffset(@Param("feed") String feed, @Param("offset") long offset);
 }

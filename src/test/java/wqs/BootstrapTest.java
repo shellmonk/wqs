@@ -19,17 +19,16 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
-import wqs.config.ReaderJdbc;
-import wqs.config.ReaderTx;
 
 /** The empty service starts against real Postgres and RabbitMQ, and each piece of plumbing works. */
 class BootstrapTest extends IntegrationTest {
 
     @Autowired TestRestTemplate http;
-    @Autowired JdbcClient writer;
-    @Autowired @ReaderJdbc JdbcClient reader;
-    @Autowired @ReaderTx TransactionTemplate readerTx;
+    @Autowired JdbcClient jdbc;
+    @Autowired PlatformTransactionManager transactionManager;
     @Autowired Scheduler scheduler;
     @Autowired Environment streams;
 
@@ -41,7 +40,7 @@ class BootstrapTest extends IntegrationTest {
 
     @Test
     void flyway_applied_the_baseline() {
-        List<String> applied = writer.sql("select version from flyway_schema_history where success")
+        List<String> applied = jdbc.sql("select version from flyway_schema_history where success")
                 .query(String.class).list();
         assertThat(applied).containsExactly("1");
     }
@@ -55,24 +54,46 @@ class BootstrapTest extends IntegrationTest {
 
     @Test
     void writer_pool_can_write() {
-        writer.sql("create table if not exists \"bootstrapProbe\" (\"id\" int)").update();
-        writer.sql("insert into \"bootstrapProbe\" values (:id)").param("id", 1).update();
-        writer.sql("drop table \"bootstrapProbe\"").update();
+        jdbc.sql("create table if not exists \"bootstrapProbe\" (\"id\" int)").update();
+        jdbc.sql("insert into \"bootstrapProbe\" values (:id)").param("id", 1).update();
+        jdbc.sql("drop table \"bootstrapProbe\"").update();
     }
 
     @Test
-    void reader_pool_refuses_writes_even_outside_a_transaction() {
-        assertThatThrownBy(() -> reader.sql("create table \"readerProbe\" (\"id\" int)").update())
+    void a_read_write_transaction_runs_on_the_writer_pool() {
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        String name = tx.execute(status -> applicationName());
+        assertThat(name).isEqualTo("wqs-writer");
+    }
+
+    @Test
+    void a_read_only_transaction_runs_on_the_reader_pool_in_repeatable_read() {
+        TransactionTemplate tx = readOnlyRepeatableRead();
+        List<String> settings = tx.execute(status -> List.of(
+                applicationName(),
+                jdbc.sql("show transaction_isolation").query(String.class).single(),
+                jdbc.sql("show transaction_read_only").query(String.class).single()));
+        assertThat(settings).containsExactly("wqs-reader", "repeatable read", "on");
+    }
+
+    @Test
+    void the_reader_pool_refuses_writes() {
+        TransactionTemplate tx = readOnlyRepeatableRead();
+        assertThatThrownBy(() -> tx.executeWithoutResult(status ->
+                jdbc.sql("create table \"readerProbe\" (\"id\" int)").update()))
                 .isInstanceOf(DataAccessException.class)
                 .hasMessageContaining("read-only");
     }
 
-    @Test
-    void reader_transaction_is_read_only_repeatable_read() {
-        List<String> settings = readerTx.execute(status -> List.of(
-                reader.sql("show transaction_isolation").query(String.class).single(),
-                reader.sql("show transaction_read_only").query(String.class).single()));
-        assertThat(settings).containsExactly("repeatable read", "on");
+    private TransactionTemplate readOnlyRepeatableRead() {
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        tx.setReadOnly(true);
+        tx.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        return tx;
+    }
+
+    private String applicationName() {
+        return jdbc.sql("select current_setting('application_name')").query(String.class).single();
     }
 
     @Test

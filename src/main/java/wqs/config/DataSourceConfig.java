@@ -1,9 +1,12 @@
 package wqs.config;
 
 import com.zaxxer.hikari.HikariDataSource;
+import java.util.Map;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.flyway.FlywayDataSource;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
+import org.springframework.boot.autoconfigure.quartz.QuartzDataSource;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
@@ -11,31 +14,32 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.core.env.Environment;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.jdbc.support.JdbcTransactionManager;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy;
+import org.springframework.jdbc.datasource.lookup.AbstractRoutingDataSource;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Two connection pools. The writer is primary: Flyway, Quartz, ingest and every unqualified
- * {@code JdbcClient}, {@code @Transactional} or {@code TransactionTemplate} use it. The reader
- * serves the API through {@link ReaderJdbc} inside a {@link ReaderTx} transaction.
+ * Two connection pools behind one routing {@link DataSource}. A {@code @Transactional(readOnly = true)}
+ * service method runs on the reader pool; everything else runs on the writer. Flyway and Quartz
+ * always use the writer.
  *
- * <p>Declaring the reader beans switches off Boot's own DataSource, transaction-manager,
- * {@code TransactionTemplate} and {@code JdbcClient} auto-configuration, so the writer ones are
- * declared here too.
+ * <p>The routing proxy is lazy: the physical connection is taken at the first statement, after
+ * the transaction manager has marked the transaction read-only or not, so the choice is made
+ * per transaction.
  */
 @Configuration
 public class DataSourceConfig {
 
+    enum Pool { WRITER, READER }
+
     @Bean
-    @Primary
+    @FlywayDataSource
+    @QuartzDataSource
     @ConfigurationProperties("spring.datasource.hikari")
-    public HikariDataSource dataSource(DataSourceProperties properties) {
+    public HikariDataSource writerDataSource(DataSourceProperties properties) {
         HikariDataSource ds = properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
         ds.setPoolName("writer");
+        ds.addDataSourceProperty("ApplicationName", "wqs-writer");
         return ds;
     }
 
@@ -53,45 +57,24 @@ public class DataSourceConfig {
         ds.setPoolName("reader");
         ds.setReadOnly(true);
         ds.addDataSourceProperty("readOnlyMode", "always");
-        ds.setTransactionIsolation("TRANSACTION_REPEATABLE_READ");
+        ds.addDataSourceProperty("ApplicationName", "wqs-reader");
         return ds;
     }
 
+    /** The application's DataSource: JPA, JdbcClient and the transaction manager all use this one. */
     @Bean
     @Primary
-    public JdbcTransactionManager transactionManager(DataSource dataSource) {
-        return new JdbcTransactionManager(dataSource);
-    }
-
-    @Bean
-    @Primary
-    public TransactionTemplate transactionTemplate(PlatformTransactionManager transactionManager) {
-        return new TransactionTemplate(transactionManager);
-    }
-
-    @Bean
-    @Primary
-    public JdbcClient jdbcClient(NamedParameterJdbcTemplate jdbcTemplate) {
-        return JdbcClient.create(jdbcTemplate);
-    }
-
-    @Bean
-    public JdbcTransactionManager readerTransactionManager(@Qualifier("readerDataSource") DataSource readerDataSource) {
-        return new JdbcTransactionManager(readerDataSource);
-    }
-
-    @Bean
-    @ReaderJdbc
-    public JdbcClient readerJdbc(@Qualifier("readerDataSource") DataSource readerDataSource) {
-        return JdbcClient.create(readerDataSource);
-    }
-
-    @Bean
-    @ReaderTx
-    public TransactionTemplate readerTx(@Qualifier("readerTransactionManager") PlatformTransactionManager readerTransactionManager) {
-        TransactionTemplate tx = new TransactionTemplate(readerTransactionManager);
-        tx.setReadOnly(true);
-        tx.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
-        return tx;
+    public DataSource dataSource(@Qualifier("writerDataSource") DataSource writer,
+                                 @Qualifier("readerDataSource") DataSource reader) {
+        AbstractRoutingDataSource routing = new AbstractRoutingDataSource() {
+            @Override
+            protected Object determineCurrentLookupKey() {
+                return TransactionSynchronizationManager.isCurrentTransactionReadOnly() ? Pool.READER : Pool.WRITER;
+            }
+        };
+        routing.setTargetDataSources(Map.of(Pool.WRITER, writer, Pool.READER, reader));
+        routing.setDefaultTargetDataSource(writer);
+        routing.afterPropertiesSet();
+        return new LazyConnectionDataSourceProxy(routing);
     }
 }
