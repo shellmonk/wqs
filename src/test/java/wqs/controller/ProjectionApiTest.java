@@ -24,7 +24,7 @@ import wqs.IntegrationTest;
 import wqs.dto.IncomingTransaction;
 import wqs.dto.Source;
 import wqs.security.HeaderOwnerIdResolver;
-import wqs.service.TransactionIngestService;
+import wqs.service.ProjectionWriter;
 
 /** The /cc and /web projection endpoints over HTTP, against rows written by the real ingest service. */
 class ProjectionApiTest extends IntegrationTest {
@@ -33,7 +33,7 @@ class ProjectionApiTest extends IntegrationTest {
     private static final String RANGE = "from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z";
 
     @Autowired TestRestTemplate http;
-    @Autowired TransactionIngestService ingest;
+    @Autowired ProjectionWriter writer;
     @Autowired TransactionTemplate tx;
     @Autowired JdbcClient jdbc;
     @Autowired ObjectMapper mapper;
@@ -239,7 +239,7 @@ class ProjectionApiTest extends IntegrationTest {
     // --- helpers ---
 
     private String store(IncomingTransaction t) {
-        tx.executeWithoutResult(status -> ingest.ingest(t));
+        tx.executeWithoutResult(status -> writer.write(t));
         return t.sourceId();
     }
 

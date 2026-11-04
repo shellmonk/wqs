@@ -31,7 +31,7 @@ import wqs.exception.BatchItemRejectedException;
 import wqs.exception.DecodeException;
 import wqs.exception.RejectedException;
 import wqs.service.StreamIngestService;
-import wqs.service.TransactionIngestService;
+import wqs.service.ProjectionWriter;
 import wqs.util.TransientFailures;
 
 /**
@@ -43,7 +43,7 @@ import wqs.util.TransientFailures;
  * <p>Messages are committed in batches. The client's dispatch thread only puts each message on a
  * bounded queue (a full queue blocks it, so the broker slows down instead of memory filling up);
  * one worker takes up to {@code batch-size} messages, or what arrived within {@code batch-max-wait},
- * and commits them with the last offset in one transaction. A refused message rolls the batch back
+ * and commits them with the last offset in one transaction. A rejected message rolls the batch back
  * and that batch is handled one message per transaction; a transient failure retries the batch;
  * any other failure also falls back to one message per transaction. Messages queued but
  * not committed when stopping are read again from the stored offset on restart. The broker's own offset tracking is not used. A redelivered message hits the unique key and
@@ -386,9 +386,9 @@ public class StreamConsumer implements SmartLifecycle {
                 count("dead_lettered", result.deadLettered());
                 return;
             } catch (BatchItemRejectedException e) {
-                // Rolled back. Refusals are rare: rather than re-running the batch once per refused
+                // Rolled back. Refusals are rare: rather than re-running the batch once per rejected
                 // message, handle this batch one message per transaction.
-                log.info("Stream offset {} refused ({}); handling batch {}..{} one by one",
+                log.info("Stream offset {} rejected ({}); handling batch {}..{} one by one",
                         e.offset(), e.rejection().reason(), batch.getFirst().offset(), batch.getLast().offset());
                 batch.forEach(r -> handleOne(r.offset(), r.body()));
                 return;
@@ -452,7 +452,7 @@ public class StreamConsumer implements SmartLifecycle {
             return "dead_lettered";
         }
         try {
-            return ingest.ingest(feed, offset, m) == IngestResult.STORED ? "stored" : "already_stored";
+            return ingest.ingestOne(feed, offset, m) == IngestResult.STORED ? "stored" : "already_stored";
         } catch (RejectedException e) {
             // The ingest transaction has rolled back; the rejection is recorded in a fresh one.
             ingest.recordRejected(feed, offset, m, e.reason(), e.getMessage());

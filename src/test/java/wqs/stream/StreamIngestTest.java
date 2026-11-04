@@ -186,7 +186,7 @@ class StreamIngestTest extends IntegrationTest {
     }
 
     @Test
-    void a_refused_message_inside_a_batch_is_dead_lettered_once_and_the_rest_stored_once() throws Exception {
+    void a_rejected_message_inside_a_batch_is_dead_lettered_once_and_the_rest_stored_once() throws Exception {
         String owner = nextId();
         send(message("instants-prize.json", nextId(), "1-" + owner, "2026-09-09T00:00:00Z", "PRIZE", 5, "EUR"));
         List<String> ids = new java.util.ArrayList<>();

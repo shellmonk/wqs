@@ -20,11 +20,11 @@ import wqs.exception.RejectedException;
 import wqs.dto.IngestResult;
 
 /** Session and play totals are calculated as rows arrive. Each test uses its own owner and batch. */
-class SessionTotalsTest extends IntegrationTest {
+class ProjectionWriterTest extends IntegrationTest {
 
     private static final AtomicLong IDS = new AtomicLong(System.nanoTime() % 1_000_000_000L * 1000);
 
-    @Autowired TransactionIngestService ingest;
+    @Autowired ProjectionWriter writer;
     @Autowired TransactionTemplate tx;
     @Autowired JdbcClient jdbc;
 
@@ -143,7 +143,7 @@ class SessionTotalsTest extends IntegrationTest {
     // --- helpers ---
 
     private IngestResult ingest(IncomingTransaction t) {
-        return tx.execute(status -> ingest.ingest(t));
+        return tx.execute(status -> writer.write(t));
     }
 
     private IncomingTransaction row(String type, String amount, String at, String subBatch) {

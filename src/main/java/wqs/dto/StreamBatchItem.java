@@ -11,6 +11,6 @@ public sealed interface StreamBatchItem {
     /** A message that could not be read: recorded by offset and body hash only. */
     record Unreadable(long offset, byte[] body, String error) implements StreamBatchItem {}
 
-    /** A readable message already known to be refused: recorded with its allowlisted fields. */
-    record Refused(long offset, StreamMessage message, String reason, String error) implements StreamBatchItem {}
+    /** A readable message already known to be rejected: recorded with its allowlisted fields. */
+    record Rejected(long offset, StreamMessage message, String reason, String error) implements StreamBatchItem {}
 }

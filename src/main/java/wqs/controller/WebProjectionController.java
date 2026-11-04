@@ -30,7 +30,7 @@ public class WebProjectionController {
 
     @Operation(summary = "The signed-in owner's projection",
             description = "Transactions and claimable prizes. The player comes from the request's identity: for now the "
-                    + "placeholder X-Owner-Id header, honoured only while wqs.api.web-player-header is on (otherwise 401).")
+                    + "placeholder X-Owner-Id header, honoured only while wqs.api.web-owner-header is on (otherwise 401).")
     @Parameter(name = "X-Owner-Id", in = ParameterIn.HEADER, description = "PLACEHOLDER until token auth: the owner's id, \"{type}-{id}\".",
             example = "1-1717")
     @GetMapping

@@ -39,7 +39,7 @@ curl -H 'X-Owner-Id: 1-1717' "localhost:8080/web/wallet-data/rest/v1/projection?
   for running the app from the IDE or with `./gradlew bootRun`.
 
 **No authentication yet.** Both endpoints are closed by default: `/cc` answers 403 unless
-`wqs.api.cc-enabled=true`, `/web` answers 401 unless `wqs.api.web-player-header=true` (it then
+`wqs.api.cc-enabled=true`, `/web` answers 401 unless `wqs.api.web-owner-header=true` (it then
 trusts an `X-Owner-Id` header that any caller can set). The compose app turns both on: local use only.
 
 The stream consumer is off by default. `WQS_STREAM_ENABLED=true` may be set on every replica: a

@@ -21,7 +21,7 @@ import wqs.repository.TransactionRepository;
  * <p>Order of locks: session, then play. Every writer takes them in this order.
  */
 @Service
-public class TransactionIngestService {
+public class ProjectionWriter {
 
     private final PartitionService partitions;
     private final TransactionRepository transactions;
@@ -29,7 +29,7 @@ public class TransactionIngestService {
     private final PlayRepository plays;
     private final ObjectMapper objectMapper;
 
-    public TransactionIngestService(PartitionService partitions, TransactionRepository transactions,
+    public ProjectionWriter(PartitionService partitions, TransactionRepository transactions,
                                     SessionRepository sessions, PlayRepository plays, ObjectMapper objectMapper) {
         this.partitions = partitions;
         this.transactions = transactions;
@@ -39,7 +39,7 @@ public class TransactionIngestService {
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public IngestResult ingest(IncomingTransaction t) {
+    public IngestResult write(IncomingTransaction t) {
         if (t.batchId() != null && !t.source().carriesBatch()) {
             throw new RejectedException("batch-on-unbatched-source", t.source() + " rows cannot carry a batch id");
         }

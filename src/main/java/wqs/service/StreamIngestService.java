@@ -31,7 +31,7 @@ public class StreamIngestService {
 
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
 
-    private final TransactionIngestService ingest;
+    private final ProjectionWriter writer;
     private final PartitionService partitions;
     private final TransactionMapper mapper;
     private final IngestCursorRepository cursors;
@@ -39,10 +39,10 @@ public class StreamIngestService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
-    public StreamIngestService(TransactionIngestService ingest, PartitionService partitions, TransactionMapper mapper,
+    public StreamIngestService(ProjectionWriter writer, PartitionService partitions, TransactionMapper mapper,
                                IngestCursorRepository cursors, DeadLetterRepository deadLetters, ObjectMapper objectMapper,
                                Clock clock) {
-        this.ingest = ingest;
+        this.writer = writer;
         this.partitions = partitions;
         this.mapper = mapper;
         this.cursors = cursors;
@@ -81,9 +81,9 @@ public class StreamIngestService {
 
     /**
      * Projects a batch of messages in ONE transaction and stores the last offset. The batch's
-     * partitions must already exist ({@link #preparePartitions}). A refused message
+     * partitions must already exist ({@link #preparePartitions}). A rejected message
      * throws {@link BatchItemRejectedException} naming its offset, and the whole batch rolls back;
-     * the caller retries it with that message as {@link StreamBatchItem.Refused}.
+     * the caller retries it with that message as {@link StreamBatchItem.Rejected}.
      */
     @Transactional
     public StreamBatchResult ingestBatch(String feed, List<StreamBatchItem> items) {
@@ -93,7 +93,7 @@ public class StreamIngestService {
                 case StreamBatchItem.Readable r -> {
                     IngestResult result;
                     try {
-                        result = ingest.ingest(mapper.fromStream(r.message()));
+                        result = writer.write(mapper.fromStream(r.message()));
                     } catch (RejectedException e) {
                         throw new BatchItemRejectedException(r.offset(), e);
                     }
@@ -108,7 +108,7 @@ public class StreamIngestService {
                             u.error(), clock.instant()));
                     deadLettered++;
                 }
-                case StreamBatchItem.Refused f -> {
+                case StreamBatchItem.Rejected f -> {
                     deadLetters.save(DeadLetterEntity.rejected(feed, f.offset(), f.message().id(), f.reason(), f.error(),
                             objectMapper.convertValue(f.message(), MAP), clock.instant()));
                     deadLettered++;
@@ -121,8 +121,8 @@ public class StreamIngestService {
 
     /** Projects the message. A {@link wqs.exception.RejectedException} rolls everything back, offset included. */
     @Transactional
-    public IngestResult ingest(String feed, long offset, StreamMessage message) {
-        IngestResult result = ingest.ingest(mapper.fromStream(message));
+    public IngestResult ingestOne(String feed, long offset, StreamMessage message) {
+        IngestResult result = writer.write(mapper.fromStream(message));
         cursors.saveStreamOffset(feed, offset);
         return result;
     }
@@ -134,7 +134,7 @@ public class StreamIngestService {
         cursors.saveStreamOffset(feed, offset);
     }
 
-    /** A readable but refused message: kept with its decoded, allowlisted fields. */
+    /** A readable but rejected message: kept with its decoded, allowlisted fields. */
     @Transactional
     public void recordRejected(String feed, long offset, StreamMessage message, String reason, String error) {
         deadLetters.save(DeadLetterEntity.rejected(feed, offset, message.id(), reason, error,

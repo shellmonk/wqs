@@ -10,7 +10,7 @@ import wqs.util.OwnerIds;
 /**
  * PLACEHOLDER until access-token authentication exists: reads the owner id ({@code "{type}-{id}"})
  * from the {@code X-Owner-Id} header. Anyone who can reach /web can claim any owner this way, so it
- * must not be exposed beyond a trusted test setup. Off unless {@code wqs.api.web-player-header=true}:
+ * must not be exposed beyond a trusted test setup. Off unless {@code wqs.api.web-owner-header=true}:
  * then every /web request is 401.
  */
 @Component
@@ -26,7 +26,7 @@ public class HeaderOwnerIdResolver implements OwnerIdResolver {
 
     @Override
     public String ownerId(HttpServletRequest request) {
-        if (!access.webPlayerHeader()) {
+        if (!access.webOwnerHeader()) {
             throw new UnauthenticatedException();
         }
         String raw = request.getHeader(HEADER);

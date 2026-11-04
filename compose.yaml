@@ -42,7 +42,7 @@ services:
       WQS_STREAM_CONNECT_HOST: rabbitmq
       # Local and trusted only: there is no authentication yet.
       WQS_API_CC_ENABLED: "true"
-      WQS_API_WEB_PLAYER_HEADER: "true"
+      WQS_API_WEB_OWNER_HEADER: "true"
     ports:
       - "8080:8080"
     restart: on-failure
