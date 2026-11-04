@@ -15,6 +15,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 import wqs.config.StreamProperties;
+import wqs.dto.IngestResult;
 import wqs.dto.StreamMessage;
 import wqs.exception.DecodeException;
 import wqs.exception.RejectedException;
@@ -165,7 +166,7 @@ public class StreamConsumer implements SmartLifecycle {
             return "dead_lettered";
         }
         try {
-            return ingest.ingest(feed, offset, m) == TransactionIngestService.Outcome.INSERTED ? "inserted" : "duplicate";
+            return ingest.ingest(feed, offset, m) == IngestResult.STORED ? "stored" : "already_stored";
         } catch (RejectedException e) {
             // The ingest transaction has rolled back; the rejection is recorded in a fresh one.
             ingest.recordRejected(feed, offset, m, e.reason(), e.getMessage());

@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.OptionalLong;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import wqs.dto.IngestResult;
 import wqs.dto.StreamMessage;
 import wqs.entity.DeadLetterEntity;
 import wqs.entity.IngestCursorEntity;
@@ -51,10 +52,10 @@ public class StreamIngestService {
 
     /** Projects the message. A {@link wqs.exception.RejectedException} rolls everything back, offset included. */
     @Transactional
-    public TransactionIngestService.Outcome ingest(String feed, long offset, StreamMessage message) {
-        TransactionIngestService.Outcome outcome = ingest.ingest(mapper.fromStream(message));
+    public IngestResult ingest(String feed, long offset, StreamMessage message) {
+        IngestResult result = ingest.ingest(mapper.fromStream(message));
         cursors.saveStreamOffset(feed, offset);
-        return outcome;
+        return result;
     }
 
     /** An unreadable message: identified by offset and body hash only, never by its content. */

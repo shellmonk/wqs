@@ -4,8 +4,8 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Map;
 
-/** A row to store in {@code "wqPrjTransaction"}, whichever feed it came from. */
-public record NewTransaction(
+/** A transaction arriving from a feed, before it is stored in {@code "wqPrjTransaction"}; either feed maps to it. */
+public record IncomingTransaction(
         short ownerType,
         long userId,
         Instant occurredAt,
@@ -22,7 +22,7 @@ public record NewTransaction(
         String transactionReference,
         Map<String, String> detail) {
 
-    public NewTransaction {
+    public IncomingTransaction {
         detail = detail == null ? Map.of() : Map.copyOf(detail);
     }
 

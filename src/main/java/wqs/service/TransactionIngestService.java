@@ -5,8 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import wqs.dto.IngestResult;
 import wqs.dto.TotalsIncrement;
-import wqs.dto.NewTransaction;
+import wqs.dto.IncomingTransaction;
 import wqs.exception.RejectedException;
 import wqs.repository.PlayRepository;
 import wqs.repository.SessionRepository;
@@ -21,8 +22,6 @@ import wqs.repository.TransactionRepository;
  */
 @Service
 public class TransactionIngestService {
-
-    public enum Outcome { INSERTED, DUPLICATE }
 
     private final PartitionService partitions;
     private final TransactionRepository transactions;
@@ -40,7 +39,7 @@ public class TransactionIngestService {
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public Outcome ingest(NewTransaction t) {
+    public IngestResult ingest(IncomingTransaction t) {
         if (t.batchId() != null && !t.source().carriesBatch()) {
             throw new RejectedException("batch-on-unbatched-source", t.source() + " rows cannot carry a batch id");
         }
@@ -52,12 +51,12 @@ public class TransactionIngestService {
                 t.sourceId(), t.type(), t.amount(), t.currency(), t.balanceAfter(), t.productId(), t.productType(),
                 t.batchId(), t.subBatchId(), t.transactionReference(), json(t));
         if (inserted == 0) {
-            return Outcome.DUPLICATE; // already projected, totals included
+            return IngestResult.ALREADY_STORED; // already projected, totals included
         }
         if (t.batchId() != null && !t.zeroAmount()) {
             addToSessionAndPlay(TotalsIncrement.of(t));
         }
-        return Outcome.INSERTED;
+        return IngestResult.STORED;
     }
 
     private void addToSessionAndPlay(TotalsIncrement c) {
@@ -79,7 +78,7 @@ public class TransactionIngestService {
         return new RejectedException("currency-mismatch", "currency differs from the " + group + "'s currency");
     }
 
-    private String json(NewTransaction t) {
+    private String json(IncomingTransaction t) {
         try {
             return objectMapper.writeValueAsString(t.detail());
         } catch (JsonProcessingException e) {

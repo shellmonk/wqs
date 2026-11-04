@@ -13,10 +13,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.IntegrationTest;
-import wqs.dto.NewTransaction;
+import wqs.dto.IngestResult;
+import wqs.dto.IncomingTransaction;
 import wqs.dto.Source;
 import wqs.exception.RejectedException;
-import wqs.service.TransactionIngestService.Outcome;
+import wqs.dto.IngestResult;
 
 /** Session and play totals are calculated as rows arrive. Each test uses its own owner and batch. */
 class SessionTotalsTest extends IntegrationTest {
@@ -80,9 +81,9 @@ class SessionTotalsTest extends IntegrationTest {
 
     @Test
     void a_duplicate_is_not_counted_twice() {
-        NewTransaction bet = row("TT_BUY", "-2", "2026-10-26T11:00:00Z", "P1");
-        assertThat(ingest(bet)).isEqualTo(Outcome.INSERTED);
-        assertThat(ingest(bet)).isEqualTo(Outcome.DUPLICATE);
+        IncomingTransaction bet = row("TT_BUY", "-2", "2026-10-26T11:00:00Z", "P1");
+        assertThat(ingest(bet)).isEqualTo(IngestResult.STORED);
+        assertThat(ingest(bet)).isEqualTo(IngestResult.ALREADY_STORED);
 
         assertThat(session()).containsEntry("txCount", 1);
         assertMoney(session(), "totalPlays", "2");
@@ -118,7 +119,7 @@ class SessionTotalsTest extends IntegrationTest {
     @Test
     void a_row_in_another_currency_is_rejected_and_leaves_nothing_behind() {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
-        NewTransaction usd = withCurrency(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"), "USD");
+        IncomingTransaction usd = withCurrency(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"), "USD");
 
         assertThatThrownBy(() -> ingest(usd))
                 .isInstanceOf(RejectedException.class)
@@ -129,7 +130,7 @@ class SessionTotalsTest extends IntegrationTest {
 
     @Test
     void a_batch_id_on_a_source_that_cannot_carry_one_is_rejected() {
-        NewTransaction payment = withSource(row("PT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"), Source.PAYMENT);
+        IncomingTransaction payment = withSource(row("PT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"), Source.PAYMENT);
 
         assertThatThrownBy(() -> ingest(payment))
                 .isInstanceOf(RejectedException.class)
@@ -139,33 +140,33 @@ class SessionTotalsTest extends IntegrationTest {
 
     // --- helpers ---
 
-    private Outcome ingest(NewTransaction t) {
+    private IngestResult ingest(IncomingTransaction t) {
         return tx.execute(status -> ingest.ingest(t));
     }
 
-    private NewTransaction row(String type, String amount, String at, String subBatch) {
+    private IncomingTransaction row(String type, String amount, String at, String subBatch) {
         return row(type, amount, at, subBatch, "GAME");
     }
 
-    private NewTransaction row(String type, String amount, String at, String subBatch, String productId) {
-        return new NewTransaction((short) 1, user, Instant.parse(at), Source.TRANSACTION, UUID.randomUUID().toString(),
+    private IncomingTransaction row(String type, String amount, String at, String subBatch, String productId) {
+        return new IncomingTransaction((short) 1, user, Instant.parse(at), Source.TRANSACTION, UUID.randomUUID().toString(),
                 type, new BigDecimal(amount), "EUR", null, productId, "instants", batch, subBatch, null, Map.of());
     }
 
-    private static NewTransaction withOwnerType(NewTransaction t, short ownerType) {
-        return new NewTransaction(ownerType, t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
+    private static IncomingTransaction withOwnerType(IncomingTransaction t, short ownerType) {
+        return new IncomingTransaction(ownerType, t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
-    private static NewTransaction withCurrency(NewTransaction t, String currency) {
-        return new NewTransaction(t.ownerType(), t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
+    private static IncomingTransaction withCurrency(IncomingTransaction t, String currency) {
+        return new IncomingTransaction(t.ownerType(), t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
                 currency, t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
-    private static NewTransaction withSource(NewTransaction t, Source source) {
-        return new NewTransaction(t.ownerType(), t.userId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
+    private static IncomingTransaction withSource(IncomingTransaction t, Source source) {
+        return new IncomingTransaction(t.ownerType(), t.userId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }

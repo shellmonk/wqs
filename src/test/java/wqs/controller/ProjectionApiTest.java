@@ -21,7 +21,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.IntegrationTest;
-import wqs.dto.NewTransaction;
+import wqs.dto.IncomingTransaction;
 import wqs.dto.Source;
 import wqs.security.HeaderPlayerIdResolver;
 import wqs.service.TransactionIngestService;
@@ -229,28 +229,28 @@ class ProjectionApiTest extends IntegrationTest {
 
     // --- helpers ---
 
-    private String store(NewTransaction t) {
+    private String store(IncomingTransaction t) {
         tx.executeWithoutResult(status -> ingest.ingest(t));
         return t.sourceId();
     }
 
-    private NewTransaction row(String type, String amount, String at, String batch, String subBatch) {
+    private IncomingTransaction row(String type, String amount, String at, String batch, String subBatch) {
         return row(type, amount, at, batch, subBatch, "instants");
     }
 
-    private NewTransaction row(String type, String amount, String at, String batch, String subBatch, String productType) {
-        return new NewTransaction((short) 1, player, Instant.parse(at), Source.TRANSACTION, Long.toString(IDS.incrementAndGet()),
+    private IncomingTransaction row(String type, String amount, String at, String batch, String subBatch, String productType) {
+        return new IncomingTransaction((short) 1, player, Instant.parse(at), Source.TRANSACTION, Long.toString(IDS.incrementAndGet()),
                 type, new BigDecimal(amount), "EUR", null, "GAME", productType, batch, subBatch, null, Map.of("channel", "WEB"));
     }
 
-    private static NewTransaction withSource(NewTransaction t, Source source) {
-        return new NewTransaction(t.ownerType(), t.userId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
+    private static IncomingTransaction withSource(IncomingTransaction t, Source source) {
+        return new IncomingTransaction(t.ownerType(), t.userId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
-    private static NewTransaction withOwnerType(NewTransaction t, short ownerType) {
-        return new NewTransaction(ownerType, t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
+    private static IncomingTransaction withOwnerType(IncomingTransaction t, short ownerType) {
+        return new IncomingTransaction(ownerType, t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }

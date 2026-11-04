@@ -2,7 +2,7 @@ package wqs.mapper;
 
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
-import wqs.dto.NewTransaction;
+import wqs.dto.IncomingTransaction;
 import wqs.dto.StreamMessage;
 
 /** Maps each feed's decoded message to the row it becomes. */
@@ -13,5 +13,5 @@ public interface TransactionMapper {
     @Mapping(target = "sourceId", source = "id")
     @Mapping(target = "occurredAt", source = "created")
     @Mapping(target = "balanceAfter", source = "totalPostBalance")
-    NewTransaction fromStream(StreamMessage message);
+    IncomingTransaction fromStream(StreamMessage message);
 }

@@ -23,7 +23,7 @@ public record TotalsIncrement(
         return wins.subtract(plays);
     }
 
-    public static TotalsIncrement of(NewTransaction t) {
+    public static TotalsIncrement of(IncomingTransaction t) {
         MoneyDirection direction = TransactionType.directionOf(t.type());
         BigDecimal amount = t.amount().abs();
         return new TotalsIncrement(t.ownerType(), t.userId(), t.batchId(), t.subBatchId(), t.occurredAt(),
