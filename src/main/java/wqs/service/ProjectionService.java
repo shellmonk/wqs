@@ -174,16 +174,15 @@ public class ProjectionService {
             if (playRows.isEmpty()) {
                 continue; // nothing visible in it under this request's filters
             }
-            playViews.add(request.excludeCancelled() ? mapper.toViewExclCancelled(play, playRows) : mapper.toView(play, playRows));
+            playViews.add(mapper.toView(play, play.totals(request.excludeCancelled()), playRows));
         }
         List<TxView> outsidePlays = rows.stream().filter(t -> t.subBatchId() == null).toList();
         return sessionView(session, outsidePlays.isEmpty() ? null : outsidePlays, playViews, request);
     }
 
     private SessionView sessionView(SessionEntity session, List<TxView> txs, List<PlayView> subitems, ProjectionRequest request) {
-        return request.excludeCancelled()
-                ? mapper.toViewExclCancelled(session, txs, subitems)
-                : mapper.toView(session, txs, subitems);
+        boolean excludeCancelled = request.excludeCancelled();
+        return mapper.toView(session, session.totals(excludeCancelled), session.playCount(excludeCancelled), txs, subitems);
     }
 
     private static <T> Instant earliest(List<T> items, Function<T, Instant> time) {

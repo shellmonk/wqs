@@ -1,12 +1,13 @@
 package wqs.entity;
 
+import jakarta.persistence.AttributeOverride;
 import jakarta.persistence.Column;
+import jakarta.persistence.Embedded;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
-import java.math.BigDecimal;
 import java.time.Instant;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -39,12 +40,25 @@ public class SessionEntity {
     private String currency;
     private int playCount;
     private int playCountExclCancelled;
-    private int txCount;
-    private BigDecimal totalPlays;
-    private BigDecimal totalWins;
-    private BigDecimal net;
-    private int txCountExclCancelled;
-    private BigDecimal totalPlaysExclCancelled;
-    private BigDecimal totalWinsExclCancelled;
-    private BigDecimal netExclCancelled;
+
+    /** How many plays have a row (that is not cancelled, when {@code excludeCancelled}). */
+    public int playCount(boolean excludeCancelled) {
+        return excludeCancelled ? playCountExclCancelled : playCount;
+    }
+    /** Over all of its rows. */
+    @Embedded
+    private Totals totals;
+
+    /** Over its rows that are not cancelled. */
+    @Embedded
+    @AttributeOverride(name = "txCount", column = @Column(name = "txCountExclCancelled"))
+    @AttributeOverride(name = "totalPlays", column = @Column(name = "totalPlaysExclCancelled"))
+    @AttributeOverride(name = "totalWins", column = @Column(name = "totalWinsExclCancelled"))
+    @AttributeOverride(name = "net", column = @Column(name = "netExclCancelled"))
+    private Totals totalsExclCancelled;
+
+    /** The totals a request asks for: over all rows, or over rows not cancelled. */
+    public Totals totals(boolean excludeCancelled) {
+        return excludeCancelled ? totalsExclCancelled : totals;
+    }
 }

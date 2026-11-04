@@ -9,11 +9,12 @@ import wqs.dto.Source;
 import wqs.dto.TxView;
 import wqs.entity.PlayEntity;
 import wqs.entity.SessionEntity;
+import wqs.entity.Totals;
 import wqs.entity.TransactionEntity;
 
 /**
- * Entities to the response views. Sessions and plays have two mappings each: their totals over all
- * rows, or over rows not cancelled ({@code excludeCancelledTransactions}).
+ * Entities to the response views. A session or play is shown with the {@link Totals} the request
+ * asked for ({@code SessionEntity.totals(excludeCancelled)}).
  */
 @Mapper(componentModel = "spring")
 public interface ProjectionMapper {
@@ -25,32 +26,24 @@ public interface ProjectionMapper {
     TxView toView(TransactionEntity transaction);
 
     @Mapping(target = "kind", constant = SessionView.KIND)
+    @Mapping(target = "batchId", source = "session.batchId")
     @Mapping(target = "created", source = "session.startedAt")
-    @Mapping(target = "totalPlay", source = "session.totalPlays")
-    @Mapping(target = "totalWin", source = "session.totalWins")
-    @Mapping(target = "amount", source = "session.net")
-    @Mapping(target = "playCount", source = "session.playCount")
-    SessionView toView(SessionEntity session, List<TxView> txs, List<PlayView> subitems);
+    @Mapping(target = "endedAt", source = "session.endedAt")
+    @Mapping(target = "productId", source = "session.productId")
+    @Mapping(target = "productType", source = "session.productType")
+    @Mapping(target = "currency", source = "session.currency")
+    @Mapping(target = "totalPlay", source = "totals.totalPlays")
+    @Mapping(target = "totalWin", source = "totals.totalWins")
+    @Mapping(target = "amount", source = "totals.net")
+    @Mapping(target = "playCount", source = "playCount")
+    SessionView toView(SessionEntity session, Totals totals, int playCount, List<TxView> txs, List<PlayView> subitems);
 
-    @Mapping(target = "kind", constant = SessionView.KIND)
-    @Mapping(target = "created", source = "session.startedAt")
-    @Mapping(target = "totalPlay", source = "session.totalPlaysExclCancelled")
-    @Mapping(target = "totalWin", source = "session.totalWinsExclCancelled")
-    @Mapping(target = "amount", source = "session.netExclCancelled")
-    @Mapping(target = "playCount", source = "session.playCountExclCancelled")
-    SessionView toViewExclCancelled(SessionEntity session, List<TxView> txs, List<PlayView> subitems);
-
+    @Mapping(target = "subBatchId", source = "play.subBatchId")
     @Mapping(target = "playTimestamp", source = "play.startedAt")
-    @Mapping(target = "playAmount", source = "play.totalPlays")
-    @Mapping(target = "winAmount", source = "play.totalWins")
-    @Mapping(target = "amount", source = "play.net")
-    PlayView toView(PlayEntity play, List<TxView> txs);
-
-    @Mapping(target = "playTimestamp", source = "play.startedAt")
-    @Mapping(target = "playAmount", source = "play.totalPlaysExclCancelled")
-    @Mapping(target = "winAmount", source = "play.totalWinsExclCancelled")
-    @Mapping(target = "amount", source = "play.netExclCancelled")
-    PlayView toViewExclCancelled(PlayEntity play, List<TxView> txs);
+    @Mapping(target = "playAmount", source = "totals.totalPlays")
+    @Mapping(target = "winAmount", source = "totals.totalWins")
+    @Mapping(target = "amount", source = "totals.net")
+    PlayView toView(PlayEntity play, Totals totals, List<TxView> txs);
 
     /** The stored source code as its name. */
     default String kind(short source) {
