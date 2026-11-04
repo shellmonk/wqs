@@ -30,16 +30,16 @@ abstract class StreamTestBase extends IntegrationTest {
     private static final AtomicLong IDS = new AtomicLong(System.nanoTime() % 1_000_000_000L * 1000);
     private static final Duration WAIT = Duration.ofSeconds(30);
 
-    @Autowired Environment streams;
-    @Autowired JdbcClient jdbc;
-    @Autowired ObjectMapper mapper;
+    @Autowired Environment streamEnvironment;
+    @Autowired JdbcClient jdbcClient;
+    @Autowired ObjectMapper objectMapper;
 
     private Producer producer;
     private final List<CountDownLatch> pending = new ArrayList<>();
 
     @BeforeEach
     void openProducer() {
-        producer = streams.producerBuilder().stream(STREAM).build();
+        producer = streamEnvironment.producerBuilder().stream(STREAM).build();
     }
 
     @AfterEach
@@ -53,20 +53,20 @@ abstract class StreamTestBase extends IntegrationTest {
 
     /** A captured message (src/test/resources/stream/{fixture}) with its id, owner and time replaced. */
     byte[] message(String fixture, String id, String ownerId, String created) throws Exception {
-        ObjectNode node = (ObjectNode) mapper.readTree(StreamMessageDecoderTest.fixture(fixture));
+        ObjectNode node = (ObjectNode) objectMapper.readTree(StreamMessageDecoderTest.fixture(fixture));
         node.put("id", id);
         ((ObjectNode) node.get("userContext")).put("ownerId", ownerId);
         ((ObjectNode) node.get("createdContext")).put("created", Instant.parse(created).toString());
-        return mapper.writeValueAsBytes(node);
+        return objectMapper.writeValueAsBytes(node);
     }
 
     /** As above, with its type, amount and currency replaced too. */
     byte[] message(String fixture, String id, String ownerId, String created,
                    String type, int amount, String currency) throws Exception {
-        ObjectNode node = (ObjectNode) mapper.readTree(message(fixture, id, ownerId, created));
+        ObjectNode node = (ObjectNode) objectMapper.readTree(message(fixture, id, ownerId, created));
         node.put("type", type);
         ((ObjectNode) node.get("amount")).put("amount", amount).put("currency", currency);
-        return mapper.writeValueAsBytes(node);
+        return objectMapper.writeValueAsBytes(node);
     }
 
     /** A transfer without a session, owned by {@code "1-" + id}. */
@@ -103,13 +103,13 @@ abstract class StreamTestBase extends IntegrationTest {
     }
 
     long rows(String sourceId) {
-        return jdbc.sql("select count(*) from \"wqPrjTransactions\" where \"sourceId\" = :id")
+        return jdbcClient.sql("select count(*) from \"wqPrjTransactions\" where \"sourceId\" = :id")
                 .param("id", sourceId).query(Long.class).single();
     }
 
     /** Dead letters of an unreadable message, found by its body's hash. */
     long deadLettersFor(byte[] body) {
-        return jdbc.sql("select count(*) from \"wqDeadLetters\" where \"bodySha256\" = :sha")
+        return jdbcClient.sql("select count(*) from \"wqDeadLetters\" where \"bodySha256\" = :sha")
                 .param("sha", Hashes.sha256(body)).query(Long.class).single();
     }
 }

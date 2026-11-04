@@ -18,15 +18,15 @@ public class HeaderOwnerIdResolver implements OwnerIdResolver {
 
     public static final String HEADER = "X-Owner-Id";
 
-    private final ApiAccessProperties access;
+    private final ApiAccessProperties apiAccessProperties;
 
-    public HeaderOwnerIdResolver(ApiAccessProperties access) {
-        this.access = access;
+    public HeaderOwnerIdResolver(ApiAccessProperties apiAccessProperties) {
+        this.apiAccessProperties = apiAccessProperties;
     }
 
     @Override
     public String ownerId(HttpServletRequest request) {
-        if (!access.webOwnerHeader()) {
+        if (!apiAccessProperties.webOwnerHeader()) {
             throw new UnauthenticatedException();
         }
         String raw = request.getHeader(HEADER);

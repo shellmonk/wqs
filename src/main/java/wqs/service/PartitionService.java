@@ -19,21 +19,26 @@ import wqs.exception.RejectedException;
 @Service
 public class PartitionService {
 
-    private final PartitionDdlService ddl;
-    private final PartitionProperties properties;
+    private final PartitionDdlService partitionDdlService;
+    private final PartitionProperties partitionProperties;
     private final Clock clock;
     private final Set<String> known = ConcurrentHashMap.newKeySet();
 
-    public PartitionService(PartitionDdlService ddl, PartitionProperties properties, Clock clock) {
-        this.ddl = ddl;
-        this.properties = properties;
+    public PartitionService(PartitionDdlService partitionDdlService,
+                            PartitionProperties partitionProperties,
+                            Clock clock) {
+        this.partitionDdlService = partitionDdlService;
+        this.partitionProperties = partitionProperties;
         this.clock = clock;
     }
 
-    /** Creates the current month's partition of {@code table} and the next {@code createAheadMonths}. Returns how many months it checked. */
+    /**
+     * Creates the current month's partition of {@code table} and the next {@code createAheadMonths}.
+     * Returns how many months it checked.
+     */
     public int ensureAhead(String table) {
         YearMonth now = YearMonth.now(clock.withZone(ZoneOffset.UTC));
-        int months = Math.min(properties.createAheadMonths(), properties.maxMonthsAhead());
+        int months = Math.min(partitionProperties.createAheadMonths(), partitionProperties.maxMonthsAhead());
         for (int i = 0; i <= months; i++) {
             ensure(table, now.plusMonths(i).atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
         }
@@ -63,10 +68,10 @@ public class PartitionService {
      */
     public void ensure(String table, Instant at) {
         YearMonth month = YearMonth.from(at.atOffset(ZoneOffset.UTC));
-        YearMonth latest = YearMonth.now(clock.withZone(ZoneOffset.UTC)).plusMonths(properties.maxMonthsAhead());
-        if (month.isBefore(properties.floor()) || month.isAfter(latest)) {
+        YearMonth latest = YearMonth.now(clock.withZone(ZoneOffset.UTC)).plusMonths(partitionProperties.maxMonthsAhead());
+        if (month.isBefore(partitionProperties.floor()) || month.isAfter(latest)) {
             throw new RejectedException("occurred-at-out-of-range",
-                    "month outside the partition range " + properties.floor() + ".." + latest);
+                    "month outside the partition range " + partitionProperties.floor() + ".." + latest);
         }
         String partition = "%s_%04d_%02d".formatted(table, month.getYear(), month.getMonthValue());
         if (known.contains(partition)) {
@@ -77,10 +82,10 @@ public class PartitionService {
         String sql = "create table if not exists \"%s\" partition of \"%s\" for values from ('%s') to ('%s')"
                 .formatted(partition, table, month.atDay(1) + "T00:00:00Z", month.plusMonths(1).atDay(1) + "T00:00:00Z");
         try {
-            ddl.execute(sql);
+            partitionDdlService.execute(sql);
         } catch (DataAccessException raced) {
             // Lost a race with another creator, or a real failure: the existence check tells which.
-            if (!ddl.exists(partition)) {
+            if (!partitionDdlService.exists(partition)) {
                 throw raced;
             }
         }

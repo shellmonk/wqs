@@ -19,25 +19,25 @@ public class StreamHealthIndicator implements HealthIndicator {
 
     static final Duration STALLED = Duration.ofMinutes(5);
 
-    private final StreamConsumer consumer;
+    private final StreamConsumer streamConsumer;
 
-    public StreamHealthIndicator(StreamConsumer consumer) {
-        this.consumer = consumer;
+    public StreamHealthIndicator(StreamConsumer streamConsumer) {
+        this.streamConsumer = streamConsumer;
     }
 
     @Override
     public Health health() {
-        StreamConsumer.State state = consumer.state();
+        StreamConsumer.State state = streamConsumer.state();
         Health.Builder health = Health.up().withDetail("state", state);
         if (state != StreamConsumer.State.CONSUMING) {
             return health.build();
         }
-        health.withDetail("lastCommittedOffset", consumer.lastCommittedOffset());
-        Instant last = consumer.lastCommitAt();
+        health.withDetail("lastCommittedOffset", streamConsumer.lastCommittedOffset());
+        Instant last = streamConsumer.lastCommitAt();
         if (last != null) {
             health.withDetail("lastCommitAt", last.toString());
         }
-        var lag = consumer.lag();
+        var lag = streamConsumer.lag();
         lag.ifPresent(l -> health.withDetail("lag", (long) l));
         boolean waiting = lag.isPresent() && lag.getAsDouble() > 0;
         boolean stale = last == null || Duration.between(last, Instant.now()).compareTo(STALLED) > 0;

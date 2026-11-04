@@ -17,15 +17,15 @@ public class PartitionMaintenanceJob extends QuartzJobBean {
 
     private static final Logger log = LoggerFactory.getLogger(PartitionMaintenanceJob.class);
 
-    private final PartitionService partitions;
+    private final PartitionService partitionService;
 
-    public PartitionMaintenanceJob(PartitionService partitions) {
-        this.partitions = partitions;
+    public PartitionMaintenanceJob(PartitionService partitionService) {
+        this.partitionService = partitionService;
     }
 
     @Override
     protected void executeInternal(JobExecutionContext context) {
-        int months = partitions.ensureAhead(TransactionRepository.TABLE);
+        int months = partitionService.ensureAhead(TransactionRepository.TABLE);
         log.debug("Partition maintenance: {} months of {} present", months, TransactionRepository.TABLE);
     }
 }

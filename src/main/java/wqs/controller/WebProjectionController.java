@@ -20,12 +20,12 @@ import wqs.service.ProjectionService;
 @RequestMapping("/web/wallet-data/rest/v1/projection")
 public class WebProjectionController {
 
-    private final ProjectionService projections;
-    private final OwnerIdResolver owners;
+    private final ProjectionService projectionService;
+    private final OwnerIdResolver ownerIdResolver;
 
-    public WebProjectionController(ProjectionService projections, OwnerIdResolver owners) {
-        this.projections = projections;
-        this.owners = owners;
+    public WebProjectionController(ProjectionService projectionService, OwnerIdResolver ownerIdResolver) {
+        this.projectionService = projectionService;
+        this.ownerIdResolver = ownerIdResolver;
     }
 
     @Operation(summary = "The signed-in owner's projection",
@@ -35,6 +35,6 @@ public class WebProjectionController {
             example = "1-1717")
     @GetMapping
     public ProjectionResponse<?> projection(HttpServletRequest request, @ParameterObject ProjectionParameters parameters) {
-        return projections.page(ReadPolicy.WEB, owners.ownerId(request), parameters.toRequest());
+        return projectionService.page(ReadPolicy.WEB, ownerIdResolver.ownerId(request), parameters.toRequest());
     }
 }

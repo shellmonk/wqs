@@ -16,7 +16,7 @@ import wqs.IntegrationTest;
 class PartitionMaintenanceJobTest extends IntegrationTest {
 
     @Autowired Scheduler scheduler;
-    @Autowired JdbcClient jdbc;
+    @Autowired JdbcClient jdbcClient;
 
     @Test
     void the_current_and_next_three_months_are_created_ahead() throws Exception {
@@ -32,12 +32,12 @@ class PartitionMaintenanceJobTest extends IntegrationTest {
     @Test
     void the_job_is_scheduled_hourly_and_survives_in_the_clustered_store() throws Exception {
         assertThat(scheduler.checkExists(JobKey.jobKey("partitionMaintenance"))).isTrue();
-        assertThat(jdbc.sql("select count(*) from quartz.qrtz_triggers where trigger_name = 'partitionMaintenance'")
+        assertThat(jdbcClient.sql("select count(*) from quartz.qrtz_triggers where trigger_name = 'partitionMaintenance'")
                 .query(Long.class).single()).isEqualTo(1);
     }
 
     private boolean exists(YearMonth m) {
         String name = "\"wqPrjTransactions_%04d_%02d\"".formatted(m.getYear(), m.getMonthValue());
-        return jdbc.sql("select to_regclass(:name) is not null").param("name", name).query(Boolean.class).single();
+        return jdbcClient.sql("select to_regclass(:name) is not null").param("name", name).query(Boolean.class).single();
     }
 }

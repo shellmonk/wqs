@@ -25,13 +25,13 @@ public class StreamLeadership {
 
     private static final Logger log = LoggerFactory.getLogger(StreamLeadership.class);
 
-    private final DataSource writer;
+    private final DataSource writerDataSource;
     private final String lockName;
     private Connection connection;
 
-    public StreamLeadership(@Qualifier("writerDataSource") DataSource writer, StreamProperties properties) {
-        this.writer = writer;
-        this.lockName = "wqs-stream:" + properties.name();
+    public StreamLeadership(@Qualifier("writerDataSource") DataSource writerDataSource, StreamProperties streamProperties) {
+        this.writerDataSource = writerDataSource;
+        this.lockName = "wqs-stream:" + streamProperties.name();
     }
 
     /** Takes the lock if no other replica holds it. True when this replica holds it (now or already). */
@@ -40,7 +40,7 @@ public class StreamLeadership {
             return stillHeld();
         }
         try {
-            Connection c = writer.getConnection();
+            Connection c = writerDataSource.getConnection();
             c.setAutoCommit(true);
             if (bool(c, "select pg_try_advisory_lock(hashtextextended(?, 0))")) {
                 connection = c;

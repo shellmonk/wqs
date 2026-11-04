@@ -26,21 +26,21 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** The empty service starts against real Postgres and RabbitMQ, and each piece of plumbing works. */
 class BootstrapTest extends IntegrationTest {
 
-    @Autowired TestRestTemplate http;
-    @Autowired JdbcClient jdbc;
+    @Autowired TestRestTemplate restTemplate;
+    @Autowired JdbcClient jdbcClient;
     @Autowired PlatformTransactionManager transactionManager;
     @Autowired Scheduler scheduler;
-    @Autowired Environment streams;
+    @Autowired Environment streamEnvironment;
 
     @Test
     void health_is_up() {
-        String body = http.getForObject("/actuator/health", String.class);
+        String body = restTemplate.getForObject("/actuator/health", String.class);
         assertThat(body).contains("\"status\":\"UP\"");
     }
 
     @Test
     void flyway_applied_the_baseline() {
-        List<String> applied = jdbc.sql("select version from flyway_schema_history where success")
+        List<String> applied = jdbcClient.sql("select version from flyway_schema_history where success")
                 .query(String.class).list();
         assertThat(applied).containsExactly("1");
     }
@@ -54,9 +54,9 @@ class BootstrapTest extends IntegrationTest {
 
     @Test
     void writer_pool_can_write() {
-        jdbc.sql("create table if not exists \"bootstrapProbe\" (\"id\" int)").update();
-        jdbc.sql("insert into \"bootstrapProbe\" values (:id)").param("id", 1).update();
-        jdbc.sql("drop table \"bootstrapProbe\"").update();
+        jdbcClient.sql("create table if not exists \"bootstrapProbe\" (\"id\" int)").update();
+        jdbcClient.sql("insert into \"bootstrapProbe\" values (:id)").param("id", 1).update();
+        jdbcClient.sql("drop table \"bootstrapProbe\"").update();
     }
 
     @Test
@@ -71,8 +71,8 @@ class BootstrapTest extends IntegrationTest {
         TransactionTemplate tx = readOnlyRepeatableRead();
         List<String> settings = tx.execute(status -> List.of(
                 applicationName(),
-                jdbc.sql("show transaction_isolation").query(String.class).single(),
-                jdbc.sql("show transaction_read_only").query(String.class).single()));
+                jdbcClient.sql("show transaction_isolation").query(String.class).single(),
+                jdbcClient.sql("show transaction_read_only").query(String.class).single()));
         assertThat(settings).containsExactly("wqs-reader", "repeatable read", "on");
     }
 
@@ -80,7 +80,7 @@ class BootstrapTest extends IntegrationTest {
     void the_reader_pool_refuses_writes() {
         TransactionTemplate tx = readOnlyRepeatableRead();
         assertThatThrownBy(() -> tx.executeWithoutResult(status ->
-                jdbc.sql("create table \"readerProbe\" (\"id\" int)").update()))
+                jdbcClient.sql("create table \"readerProbe\" (\"id\" int)").update()))
                 .isInstanceOf(DataAccessException.class)
                 .hasMessageContaining("read-only");
     }
@@ -93,29 +93,29 @@ class BootstrapTest extends IntegrationTest {
     }
 
     private String applicationName() {
-        return jdbc.sql("select current_setting('application_name')").query(String.class).single();
+        return jdbcClient.sql("select current_setting('application_name')").query(String.class).single();
     }
 
     @Test
     void a_published_stream_message_reaches_a_consumer() throws InterruptedException {
         String stream = "bootstrap-probe";
-        streams.streamCreator().stream(stream).create();
+        streamEnvironment.streamCreator().stream(stream).create();
         // send() is asynchronous: wait for the broker's confirm before closing the producer.
         CountDownLatch confirmed = new CountDownLatch(1);
-        try (Producer producer = streams.producerBuilder().stream(stream).build()) {
+        try (Producer producer = streamEnvironment.producerBuilder().stream(stream).build()) {
             producer.send(producer.messageBuilder().addData("hello".getBytes(StandardCharsets.UTF_8)).build(),
                     status -> { if (status.isConfirmed()) confirmed.countDown(); });
             assertThat(confirmed.await(10, TimeUnit.SECONDS)).as("broker confirmed the message").isTrue();
         }
         List<String> received = new CopyOnWriteArrayList<>();
-        try (var consumer = streams.consumerBuilder().stream(stream)
+        try (var consumer = streamEnvironment.consumerBuilder().stream(stream)
                 .offset(OffsetSpecification.first())
                 .messageHandler((context, message) ->
                         received.add(new String(message.getBodyAsBinary(), StandardCharsets.UTF_8)))
                 .build()) {
             await().atMost(Duration.ofSeconds(10)).until(() -> received.contains("hello"));
         } finally {
-            streams.deleteStream(stream);
+            streamEnvironment.deleteStream(stream);
         }
     }
 }

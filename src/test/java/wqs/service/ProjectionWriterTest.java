@@ -24,9 +24,9 @@ class ProjectionWriterTest extends IntegrationTest {
 
     private static final AtomicLong IDS = new AtomicLong(System.nanoTime() % 1_000_000_000L * 1000);
 
-    @Autowired ProjectionWriter writer;
-    @Autowired TransactionTemplate tx;
-    @Autowired JdbcClient jdbc;
+    @Autowired ProjectionWriter projectionWriter;
+    @Autowired TransactionTemplate transactionTemplate;
+    @Autowired JdbcClient jdbcClient;
 
     private final long number = IDS.incrementAndGet();
     private final String owner = "1-" + number;
@@ -114,7 +114,7 @@ class ProjectionWriterTest extends IntegrationTest {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1").owner("2-" + number));
 
-        assertThat(jdbc.sql("select count(*) from \"wqPrjSessions\" where \"ownerId\" in (:a, :b) and \"batchId\" = :batch")
+        assertThat(jdbcClient.sql("select count(*) from \"wqPrjSessions\" where \"ownerId\" in (:a, :b) and \"batchId\" = :batch")
                 .param("a", owner).param("b", "2-" + number).param("batch", batch).query(Long.class).single()).isEqualTo(2);
     }
 
@@ -143,7 +143,7 @@ class ProjectionWriterTest extends IntegrationTest {
     // --- helpers ---
 
     private IngestResult ingest(TestTransactions.Builder row) {
-        return tx.execute(status -> writer.write(row.build()));
+        return transactionTemplate.execute(status -> projectionWriter.write(row.build()));
     }
 
     /** A row of this test's owner in this test's session; {@code subBatch} null means in no play. */
@@ -152,17 +152,17 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     private Map<String, Object> session() {
-        return jdbc.sql("select * from \"wqPrjSessions\" where \"ownerId\" = :owner and \"batchId\" = :batch")
+        return jdbcClient.sql("select * from \"wqPrjSessions\" where \"ownerId\" = :owner and \"batchId\" = :batch")
                 .param("owner", owner).param("batch", batch).query().singleRow();
     }
 
     private Map<String, Object> play(String subBatch) {
-        return jdbc.sql("select * from \"wqPrjPlays\" where \"ownerId\" = :owner and \"batchId\" = :batch and \"subBatchId\" = :sub")
+        return jdbcClient.sql("select * from \"wqPrjPlays\" where \"ownerId\" = :owner and \"batchId\" = :batch and \"subBatchId\" = :sub")
                 .param("owner", owner).param("batch", batch).param("sub", subBatch).query().singleRow();
     }
 
     private long count(String sql) {
-        return jdbc.sql(sql).param("owner", owner).query(Long.class).single();
+        return jdbcClient.sql(sql).param("owner", owner).query(Long.class).single();
     }
 
     /** JDBC returns timestamptz as a java.sql.Timestamp in the JVM's zone; compare instants. */

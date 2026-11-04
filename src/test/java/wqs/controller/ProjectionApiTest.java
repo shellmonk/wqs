@@ -29,11 +29,11 @@ class ProjectionApiTest extends IntegrationTest {
     private static final AtomicLong IDS = new AtomicLong(System.nanoTime() % 1_000_000_000L * 1000);
     private static final String RANGE = "from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z";
 
-    @Autowired TestRestTemplate http;
-    @Autowired ProjectionWriter writer;
-    @Autowired TransactionTemplate tx;
-    @Autowired JdbcClient jdbc;
-    @Autowired ObjectMapper mapper;
+    @Autowired TestRestTemplate restTemplate;
+    @Autowired ProjectionWriter projectionWriter;
+    @Autowired TransactionTemplate transactionTemplate;
+    @Autowired JdbcClient jdbcClient;
+    @Autowired ObjectMapper objectMapper;
 
     private final long number = IDS.incrementAndGet();
     private final String owner = "1-" + number;
@@ -111,7 +111,7 @@ class ProjectionApiTest extends IntegrationTest {
     void cancelled_rows_are_left_out_on_request() throws Exception {
         String kept = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         String cancelled = store(row("TT_BUY", "-1", "2026-10-03T10:00:00Z", null, null));
-        jdbc.sql("update \"wqPrjTransactions\" set \"cancelled\" = true where \"sourceId\" = :id").param("id", cancelled).update();
+        jdbcClient.sql("update \"wqPrjTransactions\" set \"cancelled\" = true where \"sourceId\" = :id").param("id", cancelled).update();
 
         assertThat(txIds(cc(RANGE).get("data"))).containsExactly(cancelled, kept);
         assertThat(txIds(cc(RANGE + "&excludeCancelledTransactions=true").get("data"))).containsExactly(kept);
@@ -236,7 +236,7 @@ class ProjectionApiTest extends IntegrationTest {
     // --- helpers ---
 
     private String store(TestTransactions.Builder row) {
-        tx.executeWithoutResult(status -> writer.write(row.build()));
+        transactionTemplate.executeWithoutResult(status -> projectionWriter.write(row.build()));
         return row.sourceId();
     }
 
@@ -262,12 +262,12 @@ class ProjectionApiTest extends IntegrationTest {
         if (ownerHeader != null) {
             headers.set(HeaderOwnerIdResolver.HEADER, ownerHeader);
         }
-        return http.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+        return restTemplate.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), String.class);
     }
 
     private JsonNode ok(ResponseEntity<String> response) throws Exception {
         assertThat(response.getStatusCode().value()).as(response.getBody()).isEqualTo(200);
-        return mapper.readTree(response.getBody());
+        return objectMapper.readTree(response.getBody());
     }
 
     private void assertProblem(ResponseEntity<String> response, int status, String parameter) {

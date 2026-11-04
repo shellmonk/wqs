@@ -23,18 +23,21 @@ import wqs.repository.TransactionRepository;
 @Service
 public class ProjectionWriter {
 
-    private final PartitionService partitions;
-    private final TransactionRepository transactions;
-    private final SessionRepository sessions;
-    private final PlayRepository plays;
+    private final PartitionService partitionService;
+    private final TransactionRepository transactionRepository;
+    private final SessionRepository sessionRepository;
+    private final PlayRepository playRepository;
     private final ObjectMapper objectMapper;
 
-    public ProjectionWriter(PartitionService partitions, TransactionRepository transactions,
-                                    SessionRepository sessions, PlayRepository plays, ObjectMapper objectMapper) {
-        this.partitions = partitions;
-        this.transactions = transactions;
-        this.sessions = sessions;
-        this.plays = plays;
+    public ProjectionWriter(PartitionService partitionService,
+                            TransactionRepository transactionRepository,
+                            SessionRepository sessionRepository,
+                            PlayRepository playRepository,
+                            ObjectMapper objectMapper) {
+        this.partitionService = partitionService;
+        this.transactionRepository = transactionRepository;
+        this.sessionRepository = sessionRepository;
+        this.playRepository = playRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -46,8 +49,8 @@ public class ProjectionWriter {
         if (t.batchId() == null && t.subBatchId() != null) {
             throw new RejectedException("sub-batch-without-batch", "a sub-batch id needs a batch id");
         }
-        partitions.ensure(TransactionRepository.TABLE, t.occurredAt());
-        int inserted = transactions.insertIfAbsent(t, json(t));
+        partitionService.ensure(TransactionRepository.TABLE, t.occurredAt());
+        int inserted = transactionRepository.insertIfAbsent(t, json(t));
         if (inserted == 0) {
             return IngestResult.ALREADY_STORED; // already projected, totals included
         }
@@ -58,13 +61,13 @@ public class ProjectionWriter {
     }
 
     private void addToSessionAndPlay(TotalsIncrement c) {
-        long sessionId = sessions.addRow(c).orElseThrow(() -> currencyMismatch("session"));
+        long sessionId = sessionRepository.addRow(c).orElseThrow(() -> currencyMismatch("session"));
         if (c.subBatchId() == null) {
             return;
         }
-        PlayRepository.Added play = plays.addRow(sessionId, c).orElseThrow(() -> currencyMismatch("play"));
+        PlayRepository.Added play = playRepository.addRow(sessionId, c).orElseThrow(() -> currencyMismatch("play"));
         if (play.getCreated()) {
-            sessions.addPlay(sessionId);
+            sessionRepository.addPlay(sessionId);
         }
     }
 

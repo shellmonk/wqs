@@ -25,12 +25,12 @@ import wqs.service.ProjectionService;
 @RequestMapping("/cc/wallet-data/rest/v1/projection")
 public class CcProjectionController {
 
-    private final ProjectionService projections;
-    private final ApiAccessProperties access;
+    private final ProjectionService projectionService;
+    private final ApiAccessProperties apiAccessProperties;
 
-    public CcProjectionController(ProjectionService projections, ApiAccessProperties access) {
-        this.projections = projections;
-        this.access = access;
+    public CcProjectionController(ProjectionService projectionService, ApiAccessProperties apiAccessProperties) {
+        this.projectionService = projectionService;
+        this.apiAccessProperties = apiAccessProperties;
     }
 
     @Operation(summary = "An owner's projection, every source",
@@ -39,11 +39,11 @@ public class CcProjectionController {
     public ProjectionResponse<?> projection(
             @Parameter(description = "The owner's id, \"{type}-{id}\".", example = "1-1717") @PathVariable String ownerId,
             @ParameterObject ProjectionParameters parameters) {
-        if (!access.ccEnabled()) {
+        if (!apiAccessProperties.ccEnabled()) {
             throw new AccessDeniedException("/cc is switched off");
         }
         String owner = OwnerIds.canonical(ownerId)
                 .orElseThrow(() -> new InvalidParameterException("ownerId", "must be \"{type}-{id}\""));
-        return projections.page(ReadPolicy.CC, owner, parameters.toRequest());
+        return projectionService.page(ReadPolicy.CC, owner, parameters.toRequest());
     }
 }

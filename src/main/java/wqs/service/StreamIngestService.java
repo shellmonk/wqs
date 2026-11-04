@@ -32,29 +32,33 @@ public class StreamIngestService {
 
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
 
-    private final ProjectionWriter writer;
-    private final PartitionService partitions;
-    private final TransactionMapper mapper;
-    private final IngestCursorRepository cursors;
-    private final DeadLetterRepository deadLetters;
+    private final ProjectionWriter projectionWriter;
+    private final PartitionService partitionService;
+    private final TransactionMapper transactionMapper;
+    private final IngestCursorRepository ingestCursorRepository;
+    private final DeadLetterRepository deadLetterRepository;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
-    public StreamIngestService(ProjectionWriter writer, PartitionService partitions, TransactionMapper mapper,
-                               IngestCursorRepository cursors, DeadLetterRepository deadLetters, ObjectMapper objectMapper,
+    public StreamIngestService(ProjectionWriter projectionWriter,
+                               PartitionService partitionService,
+                               TransactionMapper transactionMapper,
+                               IngestCursorRepository ingestCursorRepository,
+                               DeadLetterRepository deadLetterRepository,
+                               ObjectMapper objectMapper,
                                Clock clock) {
-        this.writer = writer;
-        this.partitions = partitions;
-        this.mapper = mapper;
-        this.cursors = cursors;
-        this.deadLetters = deadLetters;
+        this.projectionWriter = projectionWriter;
+        this.partitionService = partitionService;
+        this.transactionMapper = transactionMapper;
+        this.ingestCursorRepository = ingestCursorRepository;
+        this.deadLetterRepository = deadLetterRepository;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
 
     @Transactional(readOnly = true)
     public OptionalLong lastOffset(String feed) {
-        return cursors.findByFeed(feed)
+        return ingestCursorRepository.findByFeed(feed)
                 .map(IngestCursorEntity::getStreamOffset)
                 .map(OptionalLong::of)
                 .orElse(OptionalLong.empty());
@@ -66,7 +70,7 @@ public class StreamIngestService {
      * batch's own lock (see {@link PartitionDdlService}).
      */
     public void preparePartitions(List<StreamBatchItem> items) {
-        partitions.ensureMonthsOf(TransactionRepository.TABLE, items.stream()
+        partitionService.ensureMonthsOf(TransactionRepository.TABLE, items.stream()
                 .filter(StreamBatchItem.Readable.class::isInstance)
                 .map(item -> ((StreamBatchItem.Readable) item).message().created())
                 .toList());
@@ -99,15 +103,15 @@ public class StreamIngestService {
                 }
             }
         }
-        cursors.saveStreamOffset(feed, items.getLast().offset());
+        ingestCursorRepository.saveStreamOffset(feed, items.getLast().offset());
         return new StreamBatchResult(stored, alreadyStored, deadLettered);
     }
 
     /** Projects one message. A {@link RejectedException} rolls everything back, offset included. */
     @Transactional
     public IngestResult ingestOne(String feed, long offset, StreamMessage message) {
-        IngestResult result = writer.write(mapper.fromStream(message));
-        cursors.saveStreamOffset(feed, offset);
+        IngestResult result = projectionWriter.write(transactionMapper.fromStream(message));
+        ingestCursorRepository.saveStreamOffset(feed, offset);
         return result;
     }
 
@@ -115,30 +119,30 @@ public class StreamIngestService {
     @Transactional
     public void recordUnreadable(String feed, long offset, byte[] body, String reason, String error) {
         saveUnreadable(feed, offset, body, reason, error);
-        cursors.saveStreamOffset(feed, offset);
+        ingestCursorRepository.saveStreamOffset(feed, offset);
     }
 
     /** Dead-letters a rejected message (with its allowlisted fields) and moves the offset past it. */
     @Transactional
     public void recordRejected(String feed, long offset, StreamMessage message, String reason, String error) {
         saveRejected(feed, offset, message, reason, error);
-        cursors.saveStreamOffset(feed, offset);
+        ingestCursorRepository.saveStreamOffset(feed, offset);
     }
 
     private IngestResult write(StreamBatchItem.Readable item) {
         try {
-            return writer.write(mapper.fromStream(item.message()));
+            return projectionWriter.write(transactionMapper.fromStream(item.message()));
         } catch (RejectedException e) {
             throw new BatchItemRejectedException(item.offset(), e);
         }
     }
 
     private void saveUnreadable(String feed, long offset, byte[] body, String reason, String error) {
-        deadLetters.save(DeadLetterEntity.unreadable(feed, offset, Hashes.sha256(body), reason, error, clock.instant()));
+        deadLetterRepository.save(DeadLetterEntity.unreadable(feed, offset, Hashes.sha256(body), reason, error, clock.instant()));
     }
 
     private void saveRejected(String feed, long offset, StreamMessage message, String reason, String error) {
-        deadLetters.save(DeadLetterEntity.rejected(feed, offset, message.id(), reason, error,
+        deadLetterRepository.save(DeadLetterEntity.rejected(feed, offset, message.id(), reason, error,
                 objectMapper.convertValue(message, MAP), clock.instant()));
     }
 }

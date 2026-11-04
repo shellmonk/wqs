@@ -36,12 +36,12 @@ class IngestBenchmark extends IntegrationTest {
 
     static final int MESSAGES = 20_000;
 
-    @Autowired Environment streams;
-    @Autowired StreamMessageDecoder decoder;
-    @Autowired StreamIngestService ingest;
-    @Autowired JdbcClient jdbc;
-    @Autowired ObjectMapper mapper;
-    @Autowired @org.springframework.beans.factory.annotation.Qualifier("writerDataSource") javax.sql.DataSource writer;
+    @Autowired Environment streamEnvironment;
+    @Autowired StreamMessageDecoder streamMessageDecoder;
+    @Autowired StreamIngestService streamIngestService;
+    @Autowired JdbcClient jdbcClient;
+    @Autowired ObjectMapper objectMapper;
+    @Autowired @org.springframework.beans.factory.annotation.Qualifier("writerDataSource") javax.sql.DataSource writerDataSource;
 
     @Test
     void measure() throws Exception {
@@ -52,8 +52,8 @@ class IngestBenchmark extends IntegrationTest {
             String stream = "bench-" + batchSize + "-" + UUID.randomUUID();
             preload(stream, batchSize);
             StreamProperties properties = new StreamProperties(true, "unused", stream, null, batchSize, Duration.ofMillis(200));
-            StreamConsumer consumer = new StreamConsumer(streams, properties, decoder, ingest,
-                    new StreamLeadership(writer, properties), new SimpleMeterRegistry());
+            StreamConsumer consumer = new StreamConsumer(streamEnvironment, properties, streamMessageDecoder, streamIngestService,
+                    new StreamLeadership(writerDataSource, properties), new SimpleMeterRegistry());
             long t0 = System.nanoTime();
             consumer.start();
             while (offset(stream) < MESSAGES - 1) {
@@ -71,11 +71,11 @@ class IngestBenchmark extends IntegrationTest {
     }
 
     private void preload(String stream, int run) throws Exception {
-        streams.streamCreator().stream(stream).create();
-        ObjectNode transfer = (ObjectNode) mapper.readTree(fixture("transfer-out.json"));
-        ObjectNode prize = (ObjectNode) mapper.readTree(fixture("instants-prize.json"));
+        streamEnvironment.streamCreator().stream(stream).create();
+        ObjectNode transfer = (ObjectNode) objectMapper.readTree(fixture("transfer-out.json"));
+        ObjectNode prize = (ObjectNode) objectMapper.readTree(fixture("instants-prize.json"));
         CountDownLatch confirmed = new CountDownLatch(MESSAGES);
-        try (Producer producer = streams.producerBuilder().stream(stream).build()) {
+        try (Producer producer = streamEnvironment.producerBuilder().stream(stream).build()) {
             for (int i = 0; i < MESSAGES; i++) {
                 boolean sessioned = (i / 10) % 10 < 7;
                 ObjectNode m = (sessioned ? prize : transfer).deepCopy();
@@ -88,7 +88,7 @@ class IngestBenchmark extends IntegrationTest {
                 if (sessioned) {
                     ((ObjectNode) m.get("batchContext")).put("batchId", "S-" + run + "-" + (i / 10)).put("subBatchId", "P-" + run + "-" + (i / 2));
                 }
-                producer.send(producer.messageBuilder().addData(mapper.writeValueAsBytes(m)).build(), status -> confirmed.countDown());
+                producer.send(producer.messageBuilder().addData(objectMapper.writeValueAsBytes(m)).build(), status -> confirmed.countDown());
             }
             if (!confirmed.await(60, TimeUnit.SECONDS)) {
                 throw new IllegalStateException("broker did not confirm the preload");
@@ -97,7 +97,7 @@ class IngestBenchmark extends IntegrationTest {
     }
 
     private long offset(String stream) {
-        return jdbc.sql("select coalesce(max(\"streamOffset\"), -1) from \"wqIngestCursors\" where \"feed\" = :feed")
+        return jdbcClient.sql("select coalesce(max(\"streamOffset\"), -1) from \"wqIngestCursors\" where \"feed\" = :feed")
                 .param("feed", stream).query(Long.class).single();
     }
 

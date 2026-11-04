@@ -20,8 +20,8 @@ import wqs.util.Hashes;
  */
 class StreamIngestTest extends StreamTestBase {
 
-    @Autowired StreamConsumer consumer;
-    @Autowired MeterRegistry meters;
+    @Autowired StreamConsumer streamConsumer;
+    @Autowired MeterRegistry meterRegistry;
 
     @Test
     void the_captured_messages_are_stored() throws Exception {
@@ -30,7 +30,7 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("instants-prize.json", id2, "1-" + id2, "2026-10-26T11:36:23.049062Z"));
 
         awaitRow(id2);
-        Map<String, Object> row = jdbc.sql("""
+        Map<String, Object> row = jdbcClient.sql("""
                 select "ownerId", "occurredAt", "source", "type", "amount", "currency", "balanceAfter",
                        "productId", "productType", "batchId", "subBatchId", "transactionReference", "detail"::text as "detail"
                 from "wqPrjTransactions" where "sourceId" = :id
@@ -62,7 +62,7 @@ class StreamIngestTest extends StreamTestBase {
         awaitRow(marker); // the stream is ordered: both copies were handled before the marker
         assertThat(rows(id)).isEqualTo(1);
         // The second copy is a quiet duplicate, not a failed write.
-        assertThat(jdbc.sql("select count(*) from \"wqDeadLetters\" where \"sourceId\" = :id")
+        assertThat(jdbcClient.sql("select count(*) from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", id).query(Long.class).single()).isZero();
     }
 
@@ -73,7 +73,7 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", retailer, "2-777", "2026-09-02T00:00:00Z"));
 
         awaitRow(retailer);
-        assertThat(jdbc.sql("select \"ownerId\" from \"wqPrjTransactions\" where \"sourceId\" in (:a, :b) order by \"ownerId\"")
+        assertThat(jdbcClient.sql("select \"ownerId\" from \"wqPrjTransactions\" where \"sourceId\" in (:a, :b) order by \"ownerId\"")
                 .param("a", player).param("b", retailer).query(String.class).list())
                 .containsExactly("1-777", "2-777");
     }
@@ -87,7 +87,7 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-03T00:00:00Z"));
 
         awaitRow(after);
-        Map<String, Object> dead = jdbc.sql("""
+        Map<String, Object> dead = jdbcClient.sql("""
                 select "reason", "error", "payload", "streamOffset" from "wqDeadLetters" where "bodySha256" = :sha
                 """).param("sha", sha).query().singleRow();
         assertThat(dead).containsEntry("reason", "unreadable").containsEntry("error", "not valid JSON");
@@ -98,15 +98,15 @@ class StreamIngestTest extends StreamTestBase {
     @Test
     void a_nul_character_cannot_stall_the_stream() throws Exception {
         String id = nextId();
-        ObjectNode node = (ObjectNode) mapper.readTree(message("transfer-out.json", id, "1-" + id, "2026-09-06T00:00:00Z"));
+        ObjectNode node = (ObjectNode) objectMapper.readTree(message("transfer-out.json", id, "1-" + id, "2026-09-06T00:00:00Z"));
         node.put("description", "A\u0000B");
-        byte[] body = mapper.writeValueAsBytes(node);
+        byte[] body = objectMapper.writeValueAsBytes(node);
         publish(body);
         String after = nextId();
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-06T00:00:00Z"));
 
         awaitRow(after);
-        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetters\" where \"bodySha256\" = :sha")
+        assertThat(jdbcClient.sql("select \"reason\" from \"wqDeadLetters\" where \"bodySha256\" = :sha")
                 .param("sha", Hashes.sha256(body)).query(String.class).single()).isEqualTo("unreadable");
     }
 
@@ -118,12 +118,12 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-04T00:00:00Z"));
 
         awaitRow(after);
-        Map<String, Object> dead = jdbc.sql("select \"reason\", \"payload\"::text as \"payload\" from \"wqDeadLetters\" where \"sourceId\" = :id")
+        Map<String, Object> dead = jdbcClient.sql("select \"reason\", \"payload\"::text as \"payload\" from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", id).query().singleRow();
         assertThat(dead.get("reason")).isEqualTo("occurred-at-out-of-range");
         assertThat(dead.get("payload").toString()).contains("\"id\": \"" + id + "\"").doesNotContain("5208");
         assertThat(rows(id)).isZero();
-        assertThat(jdbc.sql("select to_regclass('\"wqPrjTransactions_2199_01\"') is null").query(Boolean.class).single()).isTrue();
+        assertThat(jdbcClient.sql("select to_regclass('\"wqPrjTransactions_2199_01\"') is null").query(Boolean.class).single()).isTrue();
     }
 
     @Test
@@ -135,9 +135,9 @@ class StreamIngestTest extends StreamTestBase {
 
         awaitRow(after);
         assertThat(rows(usd)).isZero();
-        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetters\" where \"sourceId\" = :id")
+        assertThat(jdbcClient.sql("select \"reason\" from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", usd).query(String.class).single()).isEqualTo("currency-mismatch");
-        assertThat(jdbc.sql("select \"txCount\" from \"wqPrjSessions\" where \"ownerId\" = :owner")
+        assertThat(jdbcClient.sql("select \"txCount\" from \"wqPrjSessions\" where \"ownerId\" = :owner")
                 .param("owner", "1-" + first).query(Integer.class).single()).isEqualTo(1);
     }
 
@@ -178,7 +178,7 @@ class StreamIngestTest extends StreamTestBase {
 
         assertThat(ids).allMatch(id -> rows(id) == 1);
         assertThat(rows(usd)).isZero();
-        assertThat(jdbc.sql("select count(*) from \"wqDeadLetters\" where \"sourceId\" = :id")
+        assertThat(jdbcClient.sql("select count(*) from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", usd).query(Long.class).single()).isEqualTo(1);
     }
 
@@ -194,7 +194,7 @@ class StreamIngestTest extends StreamTestBase {
         }
         flush();
         await().atMost(Duration.ofSeconds(20)).until(() -> ids.stream().allMatch(id -> rows(id) == 1));
-        assertThat(jdbc.sql("select count(*) from \"wqPrjTransactions\" where \"occurredAt\" < '2023-04-01'")
+        assertThat(jdbcClient.sql("select count(*) from \"wqPrjTransactions\" where \"occurredAt\" < '2023-04-01'")
                 .query(Long.class).single()).isGreaterThanOrEqualTo(30);
     }
 
@@ -204,7 +204,7 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", id, "1-" + id, "2025-03-31T23:59:59.999999Z"));
 
         awaitRow(id);
-        String partition = jdbc.sql("""
+        String partition = jdbcClient.sql("""
                 select tableoid::regclass::text from "wqPrjTransactions" where "sourceId" = :id
                 """).param("id", id).query(String.class).single();
         assertThat(partition).isEqualTo("\"wqPrjTransactions_2025_03\"");
@@ -219,22 +219,22 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", before, "1-" + before, "2026-09-05T00:00:00Z"));
         awaitRow(before);
 
-        consumer.stop();
-        consumer.start();
+        streamConsumer.stop();
+        streamConsumer.start();
         String after = nextId();
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-05T00:00:00Z"));
         awaitRow(after);
 
         // Re-reading from the start would dead-letter the poison message a second time.
-        assertThat(jdbc.sql("select count(*) from \"wqDeadLetters\" where \"bodySha256\" = :sha")
+        assertThat(jdbcClient.sql("select count(*) from \"wqDeadLetters\" where \"bodySha256\" = :sha")
                 .param("sha", sha).query(Long.class).single()).isEqualTo(1);
-        long stored = jdbc.sql("select \"streamOffset\" from \"wqIngestCursors\" where \"feed\" = :feed")
+        long stored = jdbcClient.sql("select \"streamOffset\" from \"wqIngestCursors\" where \"feed\" = :feed")
                 .param("feed", STREAM).query(Long.class).single();
         assertThat(stored).isNotNegative();
     }
 
     private long batches() {
-        var summary = meters.find("wqs.ingest.stream.batch.size").summary();
+        var summary = meterRegistry.find("wqs.ingest.stream.batch.size").summary();
         return summary == null ? 0 : summary.count();
     }
 }

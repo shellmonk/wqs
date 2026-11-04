@@ -46,12 +46,12 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
     /** Where this replica's consumer is. */
     public enum State { STOPPED, STANDBY, CONNECTING, CONSUMING }
 
-    private final Environment environment;
-    private final StreamProperties properties;
-    private final StreamMessageDecoder decoder;
-    private final StreamIngestService ingest;
-    private final StreamLeadership leadership;
-    private final StreamMetrics metrics;
+    private final Environment streamEnvironment;
+    private final StreamProperties streamProperties;
+    private final StreamMessageDecoder streamMessageDecoder;
+    private final StreamIngestService streamIngestService;
+    private final StreamLeadership streamLeadership;
+    private final StreamMetrics streamMetrics;
 
     private volatile boolean running;
     /** True during a term: while this replica holds the lock and consumes. */
@@ -61,17 +61,21 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
     private volatile Instant lastCommitAt;
     private volatile Thread supervisor;
     private volatile StreamBatcher batcher;
-    private volatile Consumer client;
+    private volatile Consumer streamClient;
 
-    public StreamConsumer(Environment environment, StreamProperties properties, StreamMessageDecoder decoder,
-                          StreamIngestService ingest, StreamLeadership leadership, MeterRegistry meters) {
-        this.environment = environment;
-        this.properties = properties;
-        this.decoder = decoder;
-        this.ingest = ingest;
-        this.leadership = leadership;
-        this.metrics = new StreamMetrics(meters);
-        metrics.registerGauges(this);
+    public StreamConsumer(Environment streamEnvironment,
+                          StreamProperties streamProperties,
+                          StreamMessageDecoder streamMessageDecoder,
+                          StreamIngestService streamIngestService,
+                          StreamLeadership streamLeadership,
+                          MeterRegistry meterRegistry) {
+        this.streamEnvironment = streamEnvironment;
+        this.streamProperties = streamProperties;
+        this.streamMessageDecoder = streamMessageDecoder;
+        this.streamIngestService = streamIngestService;
+        this.streamLeadership = streamLeadership;
+        this.streamMetrics = new StreamMetrics(meterRegistry);
+        streamMetrics.registerGauges(this);
     }
 
     // --- what the outside sees ---
@@ -98,7 +102,7 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
             return OptionalDouble.empty();
         }
         try {
-            long head = environment.queryStreamStats(properties.name()).committedChunkId();
+            long head = streamEnvironment.queryStreamStats(streamProperties.name()).committedChunkId();
             return OptionalDouble.of(Math.max(0, head - lastOffset));
         } catch (NoOffsetException empty) {
             return OptionalDouble.of(0);
@@ -156,7 +160,7 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
     /** Takes the lock (or waits on standby), consumes while holding it, and starts over if it is lost. */
     private void supervise() {
         while (running) {
-            if (!leadership.tryAcquire()) {
+            if (!streamLeadership.tryAcquire()) {
                 state = State.STANDBY;
                 if (!sleep(STANDBY_POLL)) {
                     break;
@@ -171,7 +175,7 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
                 // and an interrupted thread would break both.
                 boolean interrupted = Thread.interrupted();
                 endTerm();
-                leadership.release();
+                streamLeadership.release();
                 if (interrupted) {
                     Thread.currentThread().interrupt();
                 }
@@ -181,19 +185,21 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
     }
 
     private void consumeWhileLeader() {
-        log.info("This replica holds the lock for stream {}: consuming", properties.name());
+        log.info("This replica holds the lock for stream {}: consuming", streamProperties.name());
         state = State.CONNECTING;
         consuming = true;
-        BatchCommitter committer = new BatchCommitter(properties.name(), decoder, ingest, metrics, this, () -> consuming);
-        batcher = new StreamBatcher(properties.batchSize(), properties.batchMaxWait(), committer::commit, () -> consuming);
+        BatchCommitter committer = new BatchCommitter(streamProperties.name(), streamMessageDecoder,
+                streamIngestService, streamMetrics, this, () -> consuming);
+        batcher = new StreamBatcher(streamProperties.batchSize(), streamProperties.batchMaxWait(),
+                committer::commit, () -> consuming);
         batcher.start();
         if (!subscribe()) {
             return;
         }
         state = State.CONSUMING;
         while (sleep(LEADERSHIP_CHECK)) {
-            if (!leadership.stillHeld()) {
-                log.error("Lost the lock for stream {}: stopping consumption on this replica", properties.name());
+            if (!streamLeadership.stillHeld()) {
+                log.error("Lost the lock for stream {}: stopping consumption on this replica", streamProperties.name());
                 return;
             }
         }
@@ -207,8 +213,8 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
         if (b != null) {
             b.stop();
         }
-        Consumer c = client;
-        client = null;
+        Consumer c = streamClient;
+        streamClient = null;
         if (c != null) {
             c.close();
         }
@@ -218,24 +224,25 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
 
     /** Subscribes after the stored offset, retrying with backoff. False when the term ended first. */
     private boolean subscribe() {
-        Backoff backoff = new Backoff(FIRST_SUBSCRIBE_RETRY, MAX_SUBSCRIBE_RETRY, () -> running && leadership.stillHeld());
+        Backoff backoff = new Backoff(FIRST_SUBSCRIBE_RETRY, MAX_SUBSCRIBE_RETRY, () -> running && streamLeadership.stillHeld());
         while (running && consuming) {
             try {
-                OptionalLong stored = ingest.lastOffset(properties.name());
+                OptionalLong stored = streamIngestService.lastOffset(streamProperties.name());
                 lastOffset = stored.orElse(-1);
                 stored.ifPresent(this::detectRetentionGap);
                 OffsetSpecification from = stored.isPresent()
                         ? OffsetSpecification.offset(stored.getAsLong() + 1)
                         : OffsetSpecification.first();
-                client = environment.consumerBuilder()
-                        .stream(properties.name())
+                streamClient = streamEnvironment.consumerBuilder()
+                        .stream(streamProperties.name())
                         .offset(from)
                         .messageHandler((context, message) -> receive(context.offset(), message))
                         .build();
-                log.info("Consuming stream {} after offset {}", properties.name(), lastOffset);
+                log.info("Consuming stream {} after offset {}", streamProperties.name(), lastOffset);
                 return true;
             } catch (RuntimeException e) {
-                log.warn("Cannot subscribe to stream {} ({}); retrying in {}", properties.name(), e.toString(), backoff.next());
+                log.warn("Cannot subscribe to stream {} ({}); retrying in {}",
+                        streamProperties.name(), e.toString(), backoff.next());
                 if (!backoff.pause()) {
                     return false;
                 }
@@ -250,12 +257,12 @@ public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
      */
     private void detectRetentionGap(long stored) {
         try {
-            long first = environment.queryStreamStats(properties.name()).firstOffset();
+            long first = streamEnvironment.queryStreamStats(streamProperties.name()).firstOffset();
             if (first > stored + 1) {
                 long lost = first - stored - 1;
                 log.error("Stream {}: {} messages (offsets {}..{}) were removed by retention before they were read; "
-                        + "they are missing from the projection", properties.name(), lost, stored + 1, first - 1);
-                metrics.lostToRetention(lost);
+                        + "they are missing from the projection", streamProperties.name(), lost, stored + 1, first - 1);
+                streamMetrics.lostToRetention(lost);
             }
         } catch (RuntimeException e) {
             // an empty stream, or stats unavailable: nothing to compare

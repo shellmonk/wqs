@@ -19,23 +19,23 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class PartitionDdlService {
 
-    private final JdbcClient jdbc;
+    private final JdbcClient jdbcClient;
 
-    public PartitionDdlService(JdbcClient jdbc) {
-        this.jdbc = jdbc;
+    public PartitionDdlService(JdbcClient jdbcClient) {
+        this.jdbcClient = jdbcClient;
     }
 
     static final String LOCK_TIMEOUT = "5s";
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void execute(String ddl) {
-        jdbc.sql("set local lock_timeout = '" + LOCK_TIMEOUT + "'").update();
-        jdbc.sql(ddl).update();
+        jdbcClient.sql("set local lock_timeout = '" + LOCK_TIMEOUT + "'").update();
+        jdbcClient.sql(ddl).update();
     }
 
     /** Runs in the caller's transaction. */
     public boolean exists(String partition) {
-        return jdbc.sql("select to_regclass(:name) is not null")
+        return jdbcClient.sql("select to_regclass(:name) is not null")
                 .param("name", "\"" + partition + "\"")
                 .query(Boolean.class).single();
     }

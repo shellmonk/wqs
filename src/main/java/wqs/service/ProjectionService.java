@@ -51,17 +51,19 @@ public class ProjectionService {
     private static final Sort NEWEST_FIRST = Sort.by(Sort.Order.desc("occurredAt"), Sort.Order.desc("transactionId"));
     private static final String[] NONE = new String[0];
 
-    private final TransactionRepository transactions;
-    private final SessionRepository sessions;
-    private final PlayRepository plays;
-    private final ProjectionMapper mapper;
+    private final TransactionRepository transactionRepository;
+    private final SessionRepository sessionRepository;
+    private final PlayRepository playRepository;
+    private final ProjectionMapper projectionMapper;
 
-    public ProjectionService(TransactionRepository transactions, SessionRepository sessions, PlayRepository plays,
-                             ProjectionMapper mapper) {
-        this.transactions = transactions;
-        this.sessions = sessions;
-        this.plays = plays;
-        this.mapper = mapper;
+    public ProjectionService(TransactionRepository transactionRepository,
+                             SessionRepository sessionRepository,
+                             PlayRepository playRepository,
+                             ProjectionMapper projectionMapper) {
+        this.transactionRepository = transactionRepository;
+        this.sessionRepository = sessionRepository;
+        this.playRepository = playRepository;
+        this.projectionMapper = projectionMapper;
     }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
@@ -74,7 +76,8 @@ public class ProjectionService {
     // --- level 0 ---
 
     private ProjectionResponse<TxView> transactionPage(ReadPolicy policy, String ownerId, ProjectionRequest request) {
-        Specification<TransactionEntity> filter = TransactionSpecifications.visibleTo(policy, ownerId, request.from(), request.to());
+        Specification<TransactionEntity> filter =
+                TransactionSpecifications.visibleTo(policy, ownerId, request.from(), request.to());
         if (request.excludeCancelled()) {
             filter = filter.and(TransactionSpecifications.notCancelled());
         }
@@ -84,9 +87,9 @@ public class ProjectionService {
         if (!request.transactionTypes().isEmpty()) {
             filter = filter.and(TransactionSpecifications.typeIn(request.transactionTypes()));
         }
-        Page<TransactionEntity> page = transactions.findAll(filter,
+        Page<TransactionEntity> page = transactionRepository.findAll(filter,
                 PageRequest.of(request.pageNumber() - 1, request.pageSize(), NEWEST_FIRST));
-        return ProjectionResponse.of(request, page.getTotalElements(), page.map(mapper::toView).getContent());
+        return ProjectionResponse.of(request, page.getTotalElements(), page.map(projectionMapper::toView).getContent());
     }
 
     // --- levels 1 and 2 ---
@@ -94,9 +97,9 @@ public class ProjectionService {
     private ProjectionResponse<HighLevelEntry> sessionPage(ReadPolicy policy, String ownerId, ProjectionRequest request) {
         EntryFilter filter = new EntryFilter(ownerId, request.from(), request.to(), policy.sourceCodeArray(),
                 request.excludeCancelled(), request.productTypes().toArray(NONE), request.transactionTypes().toArray(NONE));
-        long total = sessions.countPageEntries(filter);
+        long total = sessionRepository.countPageEntries(filter);
         List<PageEntry> pageEntries = total <= request.offset() ? List.of()
-                : sessions.findPageEntries(filter, request.pageSize(), request.offset());
+                : sessionRepository.findPageEntries(filter, request.pageSize(), request.offset());
 
         List<PageEntry> sessionEntries = pageEntries.stream().filter(PageEntry::isSession).toList();
         List<PageEntry> transactionEntries = pageEntries.stream().filter(e -> !e.isSession()).toList();
@@ -117,8 +120,8 @@ public class ProjectionService {
         }
         Instant from = earliest(entries, PageEntry::getAt);
         Instant to = latest(entries, PageEntry::getAt);
-        return transactions.findByIds(ownerId, entries.stream().map(PageEntry::getId).toList(), from, to).stream()
-                .collect(Collectors.toMap(TransactionEntity::getTransactionId, mapper::toView));
+        return transactionRepository.findByIds(ownerId, entries.stream().map(PageEntry::getId).toList(), from, to).stream()
+                .collect(Collectors.toMap(TransactionEntity::getTransactionId, projectionMapper::toView));
     }
 
     /** The page's sessions with their transactions (level 1), or with their plays and transactions (level 2). */
@@ -128,10 +131,10 @@ public class ProjectionService {
             return Map.of();
         }
         List<Long> sessionIds = entries.stream().map(PageEntry::getId).toList();
-        List<SessionEntity> pageSessions = sessions.findAllById(sessionIds);
+        List<SessionEntity> pageSessions = sessionRepository.findAllById(sessionIds);
         Map<String, List<TxView>> rowsByBatch = visibleRowsByBatch(policy, ownerId, pageSessions, request);
         Map<Long, List<PlayEntity>> playsBySession = request.level() == AggregationLevel.SESSIONS_AND_PLAYS
-                ? plays.findBySessionIdInOrderByStartedAtDescPlayIdDesc(sessionIds).stream()
+                ? playRepository.findBySessionIdInOrderByStartedAtDescPlayIdDesc(sessionIds).stream()
                         .collect(Collectors.groupingBy(PlayEntity::getSessionId))
                 : Map.of();
 
@@ -152,12 +155,12 @@ public class ProjectionService {
      */
     private Map<String, List<TxView>> visibleRowsByBatch(ReadPolicy policy, String ownerId, List<SessionEntity> pageSessions,
                                                          ProjectionRequest request) {
-        return transactions.findSessionRows(ownerId, pageSessions.stream().map(SessionEntity::getBatchId).toList(),
+        return transactionRepository.findSessionRows(ownerId, pageSessions.stream().map(SessionEntity::getBatchId).toList(),
                         earliest(pageSessions, SessionEntity::getStartedAt), latest(pageSessions, SessionEntity::getEndedAt),
                         policy.sourceCodes(), !request.excludeCancelled())
                 .stream()
                 .filter(t -> request.transactionTypes().isEmpty() || request.transactionTypes().contains(t.getType()))
-                .map(mapper::toView)
+                .map(projectionMapper::toView)
                 .collect(Collectors.groupingBy(TxView::batchId, LinkedHashMap::new, Collectors.toList()));
     }
 
@@ -172,7 +175,7 @@ public class ProjectionService {
             if (playRows.isEmpty()) {
                 continue; // nothing visible in it under this request's filters
             }
-            playViews.add(mapper.toView(play, play.totals(request.excludeCancelled()), playRows));
+            playViews.add(projectionMapper.toView(play, play.totals(request.excludeCancelled()), playRows));
         }
         List<TxView> outsidePlays = rows.stream().filter(t -> t.subBatchId() == null).toList();
         return sessionView(session, outsidePlays.isEmpty() ? null : outsidePlays, playViews, request);
@@ -180,7 +183,8 @@ public class ProjectionService {
 
     private SessionView sessionView(SessionEntity session, List<TxView> txs, List<PlayView> subitems, ProjectionRequest request) {
         boolean excludeCancelled = request.excludeCancelled();
-        return mapper.toView(session, session.totals(excludeCancelled), session.playCount(excludeCancelled), txs, subitems);
+        return projectionMapper.toView(session, session.totals(excludeCancelled), session.playCount(excludeCancelled),
+                txs, subitems);
     }
 
     private static <T> Instant earliest(List<T> items, Function<T, Instant> time) {

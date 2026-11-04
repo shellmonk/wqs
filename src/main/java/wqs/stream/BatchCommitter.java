@@ -49,18 +49,22 @@ final class BatchCommitter {
     }
 
     private final String feed;
-    private final StreamMessageDecoder decoder;
-    private final StreamIngestService ingest;
-    private final StreamMetrics metrics;
+    private final StreamMessageDecoder streamMessageDecoder;
+    private final StreamIngestService streamIngestService;
+    private final StreamMetrics streamMetrics;
     private final Progress progress;
     private final BooleanSupplier active;
 
-    BatchCommitter(String feed, StreamMessageDecoder decoder, StreamIngestService ingest, StreamMetrics metrics,
-                   Progress progress, BooleanSupplier active) {
+    BatchCommitter(String feed,
+                   StreamMessageDecoder streamMessageDecoder,
+                   StreamIngestService streamIngestService,
+                   StreamMetrics streamMetrics,
+                   Progress progress,
+                   BooleanSupplier active) {
         this.feed = feed;
-        this.decoder = decoder;
-        this.ingest = ingest;
-        this.metrics = metrics;
+        this.streamMessageDecoder = streamMessageDecoder;
+        this.streamIngestService = streamIngestService;
+        this.streamMetrics = streamMetrics;
         this.progress = progress;
         this.active = active;
     }
@@ -82,10 +86,10 @@ final class BatchCommitter {
         Backoff backoff = new Backoff(FIRST_RETRY, MAX_RETRY, active);
         while (active.getAsBoolean()) {
             try {
-                ingest.preparePartitions(items); // before the batch transaction: see PartitionDdlService
-                var result = ingest.ingestBatch(feed, items);
+                streamIngestService.preparePartitions(items); // before the batch transaction: see PartitionDdlService
+                var result = streamIngestService.ingestBatch(feed, items);
                 progress.committed(batch.getLast().offset());
-                metrics.batchCommitted(batch.size(), result);
+                streamMetrics.batchCommitted(batch.size(), result);
                 return;
             } catch (BatchItemRejectedException e) {
                 log.info("Stream offset {} rejected ({}); handling batch {}..{} one by one",
@@ -118,7 +122,7 @@ final class BatchCommitter {
             try {
                 StreamOutcome outcome = writeOne(received);
                 progress.committed(received.offset());
-                metrics.messageHandled(outcome);
+                streamMetrics.messageHandled(outcome);
                 return;
             } catch (RuntimeException e) {
                 if (!TransientFailures.isTransient(e)) {
@@ -138,16 +142,16 @@ final class BatchCommitter {
     private StreamOutcome writeOne(ReceivedMessage received) {
         StreamBatchItem item = decode(received);
         if (item instanceof StreamBatchItem.Unreadable unreadable) {
-            ingest.recordUnreadable(feed, received.offset(), received.body(), "unreadable", unreadable.error());
+            streamIngestService.recordUnreadable(feed, received.offset(), received.body(), "unreadable", unreadable.error());
             return StreamOutcome.DEAD_LETTERED;
         }
         StreamMessage message = ((StreamBatchItem.Readable) item).message();
         try {
-            return ingest.ingestOne(feed, received.offset(), message) == IngestResult.STORED
+            return streamIngestService.ingestOne(feed, received.offset(), message) == IngestResult.STORED
                     ? StreamOutcome.STORED : StreamOutcome.ALREADY_STORED;
         } catch (RejectedException e) {
             // The ingest transaction has rolled back; the rejection is recorded in a fresh one.
-            ingest.recordRejected(feed, received.offset(), message, e.reason(), e.getMessage());
+            streamIngestService.recordRejected(feed, received.offset(), message, e.reason(), e.getMessage());
             return StreamOutcome.DEAD_LETTERED;
         }
     }
@@ -167,13 +171,14 @@ final class BatchCommitter {
         while (active.getAsBoolean()) {
             try {
                 if (withFields) {
-                    StreamMessage message = decoder.decode(received.body()); // it decoded before, so it decodes again
-                    ingest.recordRejected(feed, received.offset(), message, "write-failed", error);
+                    // It decoded before, so it decodes again.
+                    StreamMessage message = streamMessageDecoder.decode(received.body());
+                    streamIngestService.recordRejected(feed, received.offset(), message, "write-failed", error);
                 } else {
-                    ingest.recordUnreadable(feed, received.offset(), received.body(), "write-failed", error);
+                    streamIngestService.recordUnreadable(feed, received.offset(), received.body(), "write-failed", error);
                 }
                 progress.committed(received.offset());
-                metrics.messageHandled(StreamOutcome.DEAD_LETTERED);
+                streamMetrics.messageHandled(StreamOutcome.DEAD_LETTERED);
                 return;
             } catch (RuntimeException e) {
                 if (TransientFailures.isTransient(e)) {
@@ -196,7 +201,7 @@ final class BatchCommitter {
     /** Decodes a message; an unexpected decoder failure (a bug, never a value) makes it unreadable too. */
     private StreamBatchItem decode(ReceivedMessage received) {
         try {
-            return new StreamBatchItem.Readable(received.offset(), decoder.decode(received.body()));
+            return new StreamBatchItem.Readable(received.offset(), streamMessageDecoder.decode(received.body()));
         } catch (DecodeException e) {
             return new StreamBatchItem.Unreadable(received.offset(), received.body(), e.getMessage());
         } catch (RuntimeException e) {

@@ -77,12 +77,12 @@ class ReadBenchmark {
 
     static final List<Owner> BUSY = List.of(new Owner(900_001, 10_000), new Owner(900_002, 100_000), new Owner(900_003, 1_000_000));
 
-    @Autowired JdbcClient jdbc;
-    @Autowired PartitionService partitions;
-    @Autowired ProjectionService projections;
-    @Autowired SessionRepository sessions;
-    @Autowired TransactionRepository transactions;
-    @Autowired PlayRepository plays;
+    @Autowired JdbcClient jdbcClient;
+    @Autowired PartitionService partitionService;
+    @Autowired ProjectionService projectionService;
+    @Autowired SessionRepository sessionRepository;
+    @Autowired TransactionRepository transactionRepository;
+    @Autowired PlayRepository playRepository;
     @Autowired PlatformTransactionManager transactionManager;
 
     private final StringBuilder report = new StringBuilder();
@@ -141,19 +141,19 @@ class ReadBenchmark {
 
     private void seed() {
         for (YearMonth m = YearMonth.from(START.atOffset(ZoneOffset.UTC)); m.isBefore(YearMonth.from(END.atOffset(ZoneOffset.UTC))); m = m.plusMonths(1)) {
-            partitions.ensure("wqPrjTransactions", m.atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
+            partitionService.ensure("wqPrjTransactions", m.atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
         }
-        jdbc.sql("create temporary table if not exists \"benchOwner\" (\"ownerId\" text, \"n\" bigint, \"rows\" int)").update();
-        jdbc.sql("""
+        jdbcClient.sql("create temporary table if not exists \"benchOwner\" (\"ownerId\" text, \"n\" bigint, \"rows\" int)").update();
+        jdbcClient.sql("""
                 insert into "benchOwner" select '1-' || (1000000 + g), 1000000 + g, 50 from generate_series(1, 40000) g
                 """).update();
         for (Owner o : BUSY) {
-            jdbc.sql("insert into \"benchOwner\" values (:o, :u, :n)").param("o", o.ownerId()).param("u", o.number())
+            jdbcClient.sql("insert into \"benchOwner\" values (:o, :u, :n)").param("o", o.ownerId()).param("u", o.number())
                     .param("n", o.rows()).update();
         }
         // i counts an owner's rows oldest first; 10 consecutive rows form a group. 7 groups in 10 are
         // sessions (5 plays of a bet and a prize), the rest are rows without a session.
-        jdbc.sql("""
+        jdbcClient.sql("""
                 insert into "wqPrjTransactions" ("ownerId", "occurredAt", "transactionId", "source", "sourceId",
                     "type", "amount", "currency", "productId", "productType", "batchId", "subBatchId", "detail")
                 select o."ownerId",
@@ -172,7 +172,7 @@ class ReadBenchmark {
                 cross join lateral generate_series(0, o."rows" - 1) i
                 cross join lateral (select (i / 10) % 10 < 7 as s) k
                 """).update();
-        jdbc.sql("""
+        jdbcClient.sql("""
                 insert into "wqPrjSessions" ("ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",
                     "currency", "txCount", "playCount", "totalPlays", "totalWins", "net",
                     "txCountExclCancelled", "playCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
@@ -186,7 +186,7 @@ class ReadBenchmark {
                       from "wqPrjTransactions" where "batchId" is not null and not "zeroAmount"
                       group by "ownerId", "batchId") g
                 """).update();
-        jdbc.sql("""
+        jdbcClient.sql("""
                 insert into "wqPrjPlays" ("sessionId", "ownerId", "batchId", "subBatchId", "startedAt", "endedAt",
                     "productId", "productType", "currency", "txCount", "totalPlays", "totalWins", "net",
                     "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
@@ -204,13 +204,13 @@ class ReadBenchmark {
                 where t."batchId" is not null and not t."zeroAmount"
                 group by s."sessionId", t."ownerId", t."batchId", t."subBatchId"
                 """).update();
-        jdbc.sql("analyze").update();
+        jdbcClient.sql("analyze").update();
     }
 
     // --- measuring ---
 
     private void run(Owner owner, String name, ProjectionRequest request) {
-        Supplier<ProjectionResponse<?>> call = () -> projections.page(ReadPolicy.CC, owner.ownerId(), request);
+        Supplier<ProjectionResponse<?>> call = () -> projectionService.page(ReadPolicy.CC, owner.ownerId(), request);
         long cold = time(call);
         long[] warm = new long[WARM_RUNS];
         ProjectionResponse<?> last = null;
@@ -259,29 +259,29 @@ class ReadBenchmark {
         report.append("\n## Level-1 page broken down (").append(owner.rows()).append("-row owner, 24 months, page 1 of 50), warm ms\n\n")
                 .append("| step | ms |\n|---|---:|\n");
         for (int warmup = 0; warmup < 3; warmup++) {
-            tx.executeWithoutResult(status -> sessions.countPageEntries(filter));
+            tx.executeWithoutResult(status -> sessionRepository.countPageEntries(filter));
         }
         tx.executeWithoutResult(status -> {
             long t0 = System.nanoTime();
-            sessions.countPageEntries(filter);
+            sessionRepository.countPageEntries(filter);
             long t1 = System.nanoTime();
-            var entries = sessions.findPageEntries(filter, 50, 0);
+            var entries = sessionRepository.findPageEntries(filter, 50, 0);
             long t2 = System.nanoTime();
             List<Long> ids = entries.stream().filter(e -> e.getKind() == 0).map(SessionRepository.PageEntry::getId).toList();
-            List<SessionEntity> found = sessions.findAllById(ids);
+            List<SessionEntity> found = sessionRepository.findAllById(ids);
             long t3 = System.nanoTime();
             Instant from = found.stream().map(SessionEntity::getStartedAt).min(Instant::compareTo).orElse(START);
             Instant to = found.stream().map(SessionEntity::getEndedAt).max(Instant::compareTo).orElse(END);
-            int rows = transactions.findSessionRows(owner.ownerId(), found.stream().map(SessionEntity::getBatchId).toList(),
+            int rows = transactionRepository.findSessionRows(owner.ownerId(), found.stream().map(SessionEntity::getBatchId).toList(),
                     from, to, List.of((short) 1, (short) 2, (short) 3, (short) 4, (short) 5), true).size();
             long t4 = System.nanoTime();
             var txEntries = entries.stream().filter(e -> e.getKind() == 1).toList();
             List<Long> txIds = txEntries.stream().map(SessionRepository.PageEntry::getId).toList();
-            transactions.findByIds(owner.ownerId(), txIds,
+            transactionRepository.findByIds(owner.ownerId(), txIds,
                     txEntries.stream().map(SessionRepository.PageEntry::getAt).min(Instant::compareTo).orElse(START),
                     txEntries.stream().map(SessionRepository.PageEntry::getAt).max(Instant::compareTo).orElse(END));
             long t5 = System.nanoTime();
-            plays.findBySessionIdInOrderByStartedAtDescPlayIdDesc(ids);
+            playRepository.findBySessionIdInOrderByStartedAtDescPlayIdDesc(ids);
             long t6 = System.nanoTime();
             report.append("| count entries (native) | ").append(ms(t1 - t0)).append(" |\n")
                     .append("| page of entries (native) | ").append(ms(t2 - t1)).append(" |\n")
@@ -297,11 +297,11 @@ class ReadBenchmark {
     }
 
     private void explain(String title, String sql) {
-        List<String> plan = new ArrayList<>(jdbc.sql("explain (analyze, buffers) " + sql).query(String.class).list());
+        List<String> plan = new ArrayList<>(jdbcClient.sql("explain (analyze, buffers) " + sql).query(String.class).list());
         report.append("\n### ").append(title).append("\n\n```\n").append(String.join("\n", plan)).append("\n```\n");
     }
 
     private long count(String table) {
-        return jdbc.sql("select count(*) from " + table).query(Long.class).single();
+        return jdbcClient.sql("select count(*) from " + table).query(Long.class).single();
     }
 }

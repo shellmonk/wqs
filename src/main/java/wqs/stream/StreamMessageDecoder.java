@@ -39,10 +39,10 @@ public class StreamMessageDecoder {
     private static final int MONEY_SCALE = 4;
     private static final int MONEY_INTEGER_DIGITS = 16;
 
-    private final ObjectReader reader;
+    private final ObjectReader objectReader;
 
     public StreamMessageDecoder(ObjectMapper objectMapper) {
-        this.reader = objectMapper.reader()
+        this.objectReader = objectMapper.reader()
                 .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
                 .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
     }
@@ -50,7 +50,7 @@ public class StreamMessageDecoder {
     public StreamMessage decode(byte[] body) {
         JsonNode root;
         try {
-            root = reader.readTree(body);
+            root = objectReader.readTree(body);
         } catch (IOException e) {
             // Jackson's message can quote the input, so it is not passed on.
             throw new DecodeException("not valid JSON");
