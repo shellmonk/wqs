@@ -16,15 +16,24 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
     Optional<SessionEntity> findByOwnerIdAndBatchId(String ownerId, String batchId);
 
     /**
-     * A top-level entry of a level-1/2 page: {@code kind} 0 is a session, 1 a transaction without
-     * one; {@code at} its time (the session's start, or the transaction's occurredAt).
+     * A top-level entry of a level-1/2 page: a session, or a transaction without one. {@code id} is
+     * the session's or the transaction's id, {@code at} its time (the session's start, or the
+     * transaction's occurredAt). {@code kind} is {@link #SESSION} or {@link #TRANSACTION}, as the
+     * {@link #ENTRIES} query writes it.
      */
     interface PageEntry {
+        int SESSION = 0;
+        int TRANSACTION = 1;
+
         Integer getKind();
 
         Long getId();
 
         Instant getAt();
+
+        default boolean isSession() {
+            return getKind() == SESSION;
+        }
     }
 
     String ENTRIES = """
