@@ -37,7 +37,7 @@ class PartitionMaintenanceJobTest extends IntegrationTest {
     }
 
     private boolean exists(YearMonth m) {
-        String name = "\"wqPrjTransaction_%04d_%02d\"".formatted(m.getYear(), m.getMonthValue());
+        String name = "\"wqPrjTransactions_%04d_%02d\"".formatted(m.getYear(), m.getMonthValue());
         return jdbc.sql("select to_regclass(:name) is not null").param("name", name).query(Boolean.class).single();
     }
 }

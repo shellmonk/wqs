@@ -13,7 +13,7 @@ import wqs.config.PartitionProperties;
 import wqs.exception.RejectedException;
 
 /**
- * Creates monthly partitions on demand ({@code "wqPrjTransaction_2026_10"} holds October 2026, UTC).
+ * Creates monthly partitions on demand ({@code "wqPrjTransactions_2026_10"} holds October 2026, UTC).
  * A concurrent creator that wins the race is fine: the partition exists either way.
  */
 @Service

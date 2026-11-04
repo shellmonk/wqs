@@ -15,11 +15,11 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 /**
- * A row of {@code "wqPrjTransaction"}. Read through JPA; written only by the native, duplicate-safe
+ * A row of {@code "wqPrjTransactions"}. Read through JPA; written only by the native, duplicate-safe
  * insert in {@link wqs.repository.TransactionRepository}, so the entity is never persisted itself.
  */
 @Entity
-@Table(name = "wqPrjTransaction")
+@Table(name = "wqPrjTransactions")
 @IdClass(TransactionKey.class)
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)

@@ -33,7 +33,7 @@ class StreamIngestTest extends StreamTestBase {
         Map<String, Object> row = jdbc.sql("""
                 select "ownerId", "occurredAt", "source", "type", "amount", "currency", "balanceAfter",
                        "productId", "productType", "batchId", "subBatchId", "transactionReference", "detail"::text as "detail"
-                from "wqPrjTransaction" where "sourceId" = :id
+                from "wqPrjTransactions" where "sourceId" = :id
                 """).param("id", id2).query().singleRow();
         // JDBC returns smallint as Integer.
         assertThat(row).containsEntry("ownerId", "1-" + id2)
@@ -62,7 +62,7 @@ class StreamIngestTest extends StreamTestBase {
         awaitRow(marker); // the stream is ordered: both copies were handled before the marker
         assertThat(rows(id)).isEqualTo(1);
         // The second copy is a quiet duplicate, not a failed write.
-        assertThat(jdbc.sql("select count(*) from \"wqDeadLetter\" where \"sourceId\" = :id")
+        assertThat(jdbc.sql("select count(*) from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", id).query(Long.class).single()).isZero();
     }
 
@@ -73,7 +73,7 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", retailer, "2-777", "2026-09-02T00:00:00Z"));
 
         awaitRow(retailer);
-        assertThat(jdbc.sql("select \"ownerId\" from \"wqPrjTransaction\" where \"sourceId\" in (:a, :b) order by \"ownerId\"")
+        assertThat(jdbc.sql("select \"ownerId\" from \"wqPrjTransactions\" where \"sourceId\" in (:a, :b) order by \"ownerId\"")
                 .param("a", player).param("b", retailer).query(String.class).list())
                 .containsExactly("1-777", "2-777");
     }
@@ -88,7 +88,7 @@ class StreamIngestTest extends StreamTestBase {
 
         awaitRow(after);
         Map<String, Object> dead = jdbc.sql("""
-                select "reason", "error", "payload", "streamOffset" from "wqDeadLetter" where "bodySha256" = :sha
+                select "reason", "error", "payload", "streamOffset" from "wqDeadLetters" where "bodySha256" = :sha
                 """).param("sha", sha).query().singleRow();
         assertThat(dead).containsEntry("reason", "unreadable").containsEntry("error", "not valid JSON");
         assertThat(dead.get("payload")).isNull(); // the raw message, with its card digits, is never stored
@@ -106,7 +106,7 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-06T00:00:00Z"));
 
         awaitRow(after);
-        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetter\" where \"bodySha256\" = :sha")
+        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetters\" where \"bodySha256\" = :sha")
                 .param("sha", Hashes.sha256(body)).query(String.class).single()).isEqualTo("unreadable");
     }
 
@@ -118,12 +118,12 @@ class StreamIngestTest extends StreamTestBase {
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-04T00:00:00Z"));
 
         awaitRow(after);
-        Map<String, Object> dead = jdbc.sql("select \"reason\", \"payload\"::text as \"payload\" from \"wqDeadLetter\" where \"sourceId\" = :id")
+        Map<String, Object> dead = jdbc.sql("select \"reason\", \"payload\"::text as \"payload\" from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", id).query().singleRow();
         assertThat(dead.get("reason")).isEqualTo("occurred-at-out-of-range");
         assertThat(dead.get("payload").toString()).contains("\"id\": \"" + id + "\"").doesNotContain("5208");
         assertThat(rows(id)).isZero();
-        assertThat(jdbc.sql("select to_regclass('\"wqPrjTransaction_2199_01\"') is null").query(Boolean.class).single()).isTrue();
+        assertThat(jdbc.sql("select to_regclass('\"wqPrjTransactions_2199_01\"') is null").query(Boolean.class).single()).isTrue();
     }
 
     @Test
@@ -135,9 +135,9 @@ class StreamIngestTest extends StreamTestBase {
 
         awaitRow(after);
         assertThat(rows(usd)).isZero();
-        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetter\" where \"sourceId\" = :id")
+        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", usd).query(String.class).single()).isEqualTo("currency-mismatch");
-        assertThat(jdbc.sql("select \"txCount\" from \"wqPrjSession\" where \"ownerId\" = :owner")
+        assertThat(jdbc.sql("select \"txCount\" from \"wqPrjSessions\" where \"ownerId\" = :owner")
                 .param("owner", "1-" + first).query(Integer.class).single()).isEqualTo(1);
     }
 
@@ -178,7 +178,7 @@ class StreamIngestTest extends StreamTestBase {
 
         assertThat(ids).allMatch(id -> rows(id) == 1);
         assertThat(rows(usd)).isZero();
-        assertThat(jdbc.sql("select count(*) from \"wqDeadLetter\" where \"sourceId\" = :id")
+        assertThat(jdbc.sql("select count(*) from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", usd).query(Long.class).single()).isEqualTo(1);
     }
 
@@ -194,7 +194,7 @@ class StreamIngestTest extends StreamTestBase {
         }
         flush();
         await().atMost(Duration.ofSeconds(20)).until(() -> ids.stream().allMatch(id -> rows(id) == 1));
-        assertThat(jdbc.sql("select count(*) from \"wqPrjTransaction\" where \"occurredAt\" < '2023-04-01'")
+        assertThat(jdbc.sql("select count(*) from \"wqPrjTransactions\" where \"occurredAt\" < '2023-04-01'")
                 .query(Long.class).single()).isGreaterThanOrEqualTo(30);
     }
 
@@ -205,9 +205,9 @@ class StreamIngestTest extends StreamTestBase {
 
         awaitRow(id);
         String partition = jdbc.sql("""
-                select tableoid::regclass::text from "wqPrjTransaction" where "sourceId" = :id
+                select tableoid::regclass::text from "wqPrjTransactions" where "sourceId" = :id
                 """).param("id", id).query(String.class).single();
-        assertThat(partition).isEqualTo("\"wqPrjTransaction_2025_03\"");
+        assertThat(partition).isEqualTo("\"wqPrjTransactions_2025_03\"");
     }
 
     @Test
@@ -226,9 +226,9 @@ class StreamIngestTest extends StreamTestBase {
         awaitRow(after);
 
         // Re-reading from the start would dead-letter the poison message a second time.
-        assertThat(jdbc.sql("select count(*) from \"wqDeadLetter\" where \"bodySha256\" = :sha")
+        assertThat(jdbc.sql("select count(*) from \"wqDeadLetters\" where \"bodySha256\" = :sha")
                 .param("sha", sha).query(Long.class).single()).isEqualTo(1);
-        long stored = jdbc.sql("select \"streamOffset\" from \"wqIngestCursor\" where \"feed\" = :feed")
+        long stored = jdbc.sql("select \"streamOffset\" from \"wqIngestCursors\" where \"feed\" = :feed")
                 .param("feed", STREAM).query(Long.class).single();
         assertThat(stored).isNotNegative();
     }

@@ -59,8 +59,8 @@ class ProjectionWriterTest extends IntegrationTest {
     @Test
     void a_zero_amount_row_is_stored_but_adds_nothing() {
         ingest(row("PRIZE", "0", "2026-10-26T11:00:00Z", "P1"));
-        assertThat(count("select count(*) from \"wqPrjSession\" where \"ownerId\" = :owner")).isZero();
-        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"ownerId\" = :owner and \"zeroAmount\"")).isEqualTo(1);
+        assertThat(count("select count(*) from \"wqPrjSessions\" where \"ownerId\" = :owner")).isZero();
+        assertThat(count("select count(*) from \"wqPrjTransactions\" where \"ownerId\" = :owner and \"zeroAmount\"")).isEqualTo(1);
 
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"));
         ingest(row("PRIZE", "0", "2026-10-26T10:00:00Z", "P1")); // earlier, but does not move the start
@@ -106,7 +106,7 @@ class ProjectionWriterTest extends IntegrationTest {
         ingest(row("TT_BUY", "-3", "2026-10-26T11:00:00Z", null));
 
         assertThat(session()).containsEntry("txCount", 1).containsEntry("playCount", 0);
-        assertThat(count("select count(*) from \"wqPrjPlay\" where \"ownerId\" = :owner")).isZero();
+        assertThat(count("select count(*) from \"wqPrjPlays\" where \"ownerId\" = :owner")).isZero();
     }
 
     @Test
@@ -114,7 +114,7 @@ class ProjectionWriterTest extends IntegrationTest {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1").owner("2-" + number));
 
-        assertThat(jdbc.sql("select count(*) from \"wqPrjSession\" where \"ownerId\" in (:a, :b) and \"batchId\" = :batch")
+        assertThat(jdbc.sql("select count(*) from \"wqPrjSessions\" where \"ownerId\" in (:a, :b) and \"batchId\" = :batch")
                 .param("a", owner).param("b", "2-" + number).param("batch", batch).query(Long.class).single()).isEqualTo(2);
     }
 
@@ -126,7 +126,7 @@ class ProjectionWriterTest extends IntegrationTest {
         assertThatThrownBy(() -> ingest(usd))
                 .isInstanceOf(RejectedException.class)
                 .satisfies(e -> assertThat(((RejectedException) e).reason()).isEqualTo("currency-mismatch"));
-        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"ownerId\" = :owner")).isEqualTo(1);
+        assertThat(count("select count(*) from \"wqPrjTransactions\" where \"ownerId\" = :owner")).isEqualTo(1);
         assertThat(session()).containsEntry("txCount", 1);
     }
 
@@ -137,7 +137,7 @@ class ProjectionWriterTest extends IntegrationTest {
         assertThatThrownBy(() -> ingest(payment))
                 .isInstanceOf(RejectedException.class)
                 .satisfies(e -> assertThat(((RejectedException) e).reason()).isEqualTo("batch-on-unbatched-source"));
-        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"ownerId\" = :owner")).isZero();
+        assertThat(count("select count(*) from \"wqPrjTransactions\" where \"ownerId\" = :owner")).isZero();
     }
 
     // --- helpers ---
@@ -152,12 +152,12 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     private Map<String, Object> session() {
-        return jdbc.sql("select * from \"wqPrjSession\" where \"ownerId\" = :owner and \"batchId\" = :batch")
+        return jdbc.sql("select * from \"wqPrjSessions\" where \"ownerId\" = :owner and \"batchId\" = :batch")
                 .param("owner", owner).param("batch", batch).query().singleRow();
     }
 
     private Map<String, Object> play(String subBatch) {
-        return jdbc.sql("select * from \"wqPrjPlay\" where \"ownerId\" = :owner and \"batchId\" = :batch and \"subBatchId\" = :sub")
+        return jdbc.sql("select * from \"wqPrjPlays\" where \"ownerId\" = :owner and \"batchId\" = :batch and \"subBatchId\" = :sub")
                 .param("owner", owner).param("batch", batch).param("sub", subBatch).query().singleRow();
     }
 

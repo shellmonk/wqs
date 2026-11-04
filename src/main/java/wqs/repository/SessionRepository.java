@@ -10,7 +10,7 @@ import org.springframework.data.repository.query.Param;
 import wqs.dto.TotalsIncrement;
 import wqs.entity.SessionEntity;
 
-/** {@code "wqPrjSession"}: totals per session, updated as each of its rows arrives. */
+/** {@code "wqPrjSessions"}: totals per session, updated as each of its rows arrives. */
 public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
 
     Optional<SessionEntity> findByOwnerIdAndBatchId(String ownerId, String batchId);
@@ -45,7 +45,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
 
     String ENTRIES = """
             select 0 as "kind", s."sessionId" as "id", s."startedAt" as "at"
-            from "wqPrjSession" s
+            from "wqPrjSessions" s
             where s."ownerId" = :#{#f.ownerId()}
               and s."startedAt" >= :#{#f.from()} and s."startedAt" < :#{#f.to()}
               and (not :#{#f.excludeCancelled()} or s."txCountExclCancelled" > 0)
@@ -53,7 +53,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
               and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or s."batchId" in (
                     -- One pass over the owner's matching rows (a session's rows are never before its
                     -- start, so from bounds them), instead of one probe per session.
-                    select m."batchId" from "wqPrjTransaction" m
+                    select m."batchId" from "wqPrjTransactions" m
                     where m."ownerId" = :#{#f.ownerId()} and m."batchId" is not null
                       and m."occurredAt" >= :#{#f.from()}
                       and m."source" = any(cast(:#{#f.sources()} as int[])) and not m."zeroAmount"
@@ -61,7 +61,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
                       and m."type" = any(cast(:#{#f.transactionTypes()} as text[]))))
             union all
             select 1, t."transactionId", t."occurredAt"
-            from "wqPrjTransaction" t
+            from "wqPrjTransactions" t
             where t."ownerId" = :#{#f.ownerId()} and t."batchId" is null
               and t."occurredAt" >= :#{#f.from()} and t."occurredAt" < :#{#f.to()}
               and t."source" = any(cast(:#{#f.sources()} as int[])) and not t."zeroAmount"
@@ -94,7 +94,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
      * modifying query cannot; it runs as a query inside the caller's transaction.
      */
     @Query(nativeQuery = true, value = """
-            insert into "wqPrjSession" as s (
+            insert into "wqPrjSessions" as s (
                 "ownerId", "batchId", "startedAt", "endedAt", "productId", "productType", "currency",
                 "txCount", "totalPlays", "totalWins", "net",
                 "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
@@ -123,7 +123,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
     /** Counts a play that has just been created in this session. */
     @Modifying
     @Query(nativeQuery = true, value = """
-            update "wqPrjSession"
+            update "wqPrjSessions"
             set "playCount" = "playCount" + 1, "playCountExclCancelled" = "playCountExclCancelled" + 1
             where "sessionId" = :sessionId
             """)

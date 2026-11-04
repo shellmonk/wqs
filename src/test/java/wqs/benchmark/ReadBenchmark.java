@@ -94,9 +94,9 @@ class ReadBenchmark {
         long seedMillis = Duration.ofNanos(System.nanoTime() - seedStart).toMillis();
 
         report.append("# Read benchmark\n\n")
-                .append("Postgres 16 in a container (shared_buffers 1GB), ").append(count("\"wqPrjTransaction\""))
-                .append(" rows over 24 monthly partitions, ").append(count("\"wqPrjSession\"")).append(" sessions, ")
-                .append(count("\"wqPrjPlay\"")).append(" plays. Seeded in ").append(seedMillis / 1000).append(" s.\n\n")
+                .append("Postgres 16 in a container (shared_buffers 1GB), ").append(count("\"wqPrjTransactions\""))
+                .append(" rows over 24 monthly partitions, ").append(count("\"wqPrjSessions\"")).append(" sessions, ")
+                .append(count("\"wqPrjPlays\"")).append(" plays. Seeded in ").append(seedMillis / 1000).append(" s.\n\n")
                 .append("Times are the whole service call (page + `COUNT(*)` total), in ms: one cold run, then the median of ")
                 .append(WARM_RUNS).append(" warm runs. `/cc` policy (every source).\n\n")
                 .append("| owner rows | case | total rows | cold ms | warm ms |\n|---:|---|---:|---:|---:|\n");
@@ -116,12 +116,12 @@ class ReadBenchmark {
         breakdown(busiest);
         report.append("\n## Query plans for the ").append(busiest.rows()).append("-row owner, 24 months\n");
         explain("Level 0 total", """
-                select count(*) from "wqPrjTransaction"
+                select count(*) from "wqPrjTransactions"
                 where "ownerId" = '%s' and "occurredAt" >= '%s' and "occurredAt" < '%s'
                   and "source" in (1, 2, 3, 4, 5) and not "zeroAmount"
                 """.formatted(busiest.ownerId(), START, END));
         explain("Level 0 page 1", """
-                select * from "wqPrjTransaction"
+                select * from "wqPrjTransactions"
                 where "ownerId" = '%s' and "occurredAt" >= '%s' and "occurredAt" < '%s'
                   and "source" in (1, 2, 3, 4, 5) and not "zeroAmount"
                 order by "occurredAt" desc, "transactionId" desc limit 50
@@ -141,7 +141,7 @@ class ReadBenchmark {
 
     private void seed() {
         for (YearMonth m = YearMonth.from(START.atOffset(ZoneOffset.UTC)); m.isBefore(YearMonth.from(END.atOffset(ZoneOffset.UTC))); m = m.plusMonths(1)) {
-            partitions.ensure("wqPrjTransaction", m.atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
+            partitions.ensure("wqPrjTransactions", m.atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
         }
         jdbc.sql("create temporary table if not exists \"benchOwner\" (\"ownerId\" text, \"n\" bigint, \"rows\" int)").update();
         jdbc.sql("""
@@ -154,7 +154,7 @@ class ReadBenchmark {
         // i counts an owner's rows oldest first; 10 consecutive rows form a group. 7 groups in 10 are
         // sessions (5 plays of a bet and a prize), the rest are rows without a session.
         jdbc.sql("""
-                insert into "wqPrjTransaction" ("ownerId", "occurredAt", "transactionId", "source", "sourceId",
+                insert into "wqPrjTransactions" ("ownerId", "occurredAt", "transactionId", "source", "sourceId",
                     "type", "amount", "currency", "productId", "productType", "batchId", "subBatchId", "detail")
                 select o."ownerId",
                        timestamptz '2024-11-01 00:00:00+00' + interval '730 days' * ((i + 0.5) / o."rows"),
@@ -173,7 +173,7 @@ class ReadBenchmark {
                 cross join lateral (select (i / 10) % 10 < 7 as s) k
                 """).update();
         jdbc.sql("""
-                insert into "wqPrjSession" ("ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",
+                insert into "wqPrjSessions" ("ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",
                     "currency", "txCount", "playCount", "totalPlays", "totalWins", "net",
                     "txCountExclCancelled", "playCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
                 select "ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",
@@ -183,11 +183,11 @@ class ReadBenchmark {
                              count(distinct "subBatchId") as plays,
                              sum(case when "type" = 'TT_BUY' then abs("amount") else 0 end) as p,
                              sum(case when "type" = 'PRIZE' then abs("amount") else 0 end) as w
-                      from "wqPrjTransaction" where "batchId" is not null and not "zeroAmount"
+                      from "wqPrjTransactions" where "batchId" is not null and not "zeroAmount"
                       group by "ownerId", "batchId") g
                 """).update();
         jdbc.sql("""
-                insert into "wqPrjPlay" ("sessionId", "ownerId", "batchId", "subBatchId", "startedAt", "endedAt",
+                insert into "wqPrjPlays" ("sessionId", "ownerId", "batchId", "subBatchId", "startedAt", "endedAt",
                     "productId", "productType", "currency", "txCount", "totalPlays", "totalWins", "net",
                     "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
                 select s."sessionId", t."ownerId", t."batchId", t."subBatchId", min(t."occurredAt"), max(t."occurredAt"),
@@ -199,8 +199,8 @@ class ReadBenchmark {
                        sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end),
                        sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end),
                        sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end) - sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end)
-                from "wqPrjTransaction" t
-                join "wqPrjSession" s on s."ownerId" = t."ownerId" and s."batchId" = t."batchId"
+                from "wqPrjTransactions" t
+                join "wqPrjSessions" s on s."ownerId" = t."ownerId" and s."batchId" = t."batchId"
                 where t."batchId" is not null and not t."zeroAmount"
                 group by s."sessionId", t."ownerId", t."batchId", t."subBatchId"
                 """).update();

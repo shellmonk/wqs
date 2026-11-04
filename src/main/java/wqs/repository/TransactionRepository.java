@@ -12,11 +12,11 @@ import wqs.dto.IncomingTransaction;
 import wqs.entity.TransactionEntity;
 import wqs.entity.TransactionKey;
 
-/** {@code "wqPrjTransaction"}: every projected row, partitioned by month. */
+/** {@code "wqPrjTransactions"}: every projected row, partitioned by month. */
 public interface TransactionRepository
         extends JpaRepository<TransactionEntity, TransactionKey>, JpaSpecificationExecutor<TransactionEntity> {
 
-    String TABLE = "wqPrjTransaction";
+    String TABLE = "wqPrjTransactions";
 
     /**
      * Inserts a row; returns 0 when it already exists. A redelivered row hits the unique key
@@ -26,7 +26,7 @@ public interface TransactionRepository
      */
     @Modifying
     @Query(nativeQuery = true, value = """
-            insert into "wqPrjTransaction" (
+            insert into "wqPrjTransactions" (
                 "ownerId", "occurredAt", "transactionId", "source", "sourceId", "type",
                 "amount", "currency", "balanceAfter", "productId", "productType", "batchId", "subBatchId",
                 "transactionReference", "detail")

@@ -10,7 +10,7 @@ import org.springframework.data.repository.query.Param;
 import wqs.dto.TotalsIncrement;
 import wqs.entity.PlayEntity;
 
-/** {@code "wqPrjPlay"}: totals per play, updated as each of its rows arrives. */
+/** {@code "wqPrjPlays"}: totals per play, updated as each of its rows arrives. */
 public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
 
     /** The outcome of adding a row to its play; {@code created} is true when the row made the play. */
@@ -31,7 +31,7 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
      * only for a row this statement inserted, which tells a new play from an existing one.
      */
     @Query(nativeQuery = true, value = """
-            insert into "wqPrjPlay" as p (
+            insert into "wqPrjPlays" as p (
                 "sessionId", "ownerId", "batchId", "subBatchId", "startedAt", "endedAt",
                 "productId", "productType", "currency",
                 "txCount", "totalPlays", "totalWins", "net",

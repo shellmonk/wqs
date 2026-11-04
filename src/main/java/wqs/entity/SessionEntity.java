@@ -16,11 +16,11 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 /**
- * A row of {@code "wqPrjSession"}: one session's totals. Kept up to date by the native upserts in
+ * A row of {@code "wqPrjSessions"}: one session's totals. Kept up to date by the native upserts in
  * {@link wqs.repository.SessionRepository}; read through JPA.
  */
 @Entity
-@Table(name = "wqPrjSession")
+@Table(name = "wqPrjSessions")
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class SessionEntity {

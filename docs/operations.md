@@ -6,7 +6,7 @@ Any number of replicas may run with `WQS_STREAM_ENABLED=true`. They compete for 
 advisory lock named after the stream (`wqs-stream:<name>`); the holder consumes, the others stand
 by and retry every 5 seconds. The lock lives on one held writer connection: if the leader's process
 or connection dies, Postgres releases it and a standby takes over within seconds, from the offset
-stored in `"wqIngestCursor"`. Writes are idempotent, so the short overlap possible during a
+stored in `"wqIngestCursors"`. Writes are idempotent, so the short overlap possible during a
 handover cannot double-count.
 
 Which replica leads: `wqs_ingest_stream_leader == 1`, or `state: CONSUMING` in `/actuator/health`.
@@ -15,7 +15,7 @@ Which replica leads: `wqs_ingest_stream_leader == 1`, or `state: CONSUMING` in `
 
 | Job | When | What |
 |---|---|---|
-| `partitionMaintenance` | at startup, then hourly | creates the current month's partition of `"wqPrjTransaction"` and the next `wqs.partition.create-ahead-months` (3) |
+| `partitionMaintenance` | at startup, then hourly | creates the current month's partition of `"wqPrjTransactions"` and the next `wqs.partition.create-ahead-months` (3) |
 
 ## Health
 
@@ -63,7 +63,7 @@ Kubernetes), so a broker problem never restarts the service or stops it serving 
 
 ## When something is wrong
 
-- **Dead letters:** `select "reason", count(*) from "wqDeadLetter" group by 1`. An unreadable
+- **Dead letters:** `select "reason", count(*) from "wqDeadLetters" group by 1`. An unreadable
   message is identified by `"streamOffset"` and `"bodySha256"`; the message itself is still in the
   stream at that offset. A rejected one keeps its allowlisted fields in `"payload"`.
 - **Lost messages:** the log line names the offset range. Those rows must come from the backfill.

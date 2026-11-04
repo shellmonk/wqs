@@ -10,9 +10,9 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
-/** A row of {@code "wqIngestCursor"}: one feed's last processed position. */
+/** A row of {@code "wqIngestCursors"}: one feed's last processed position. */
 @Entity
-@Table(name = "wqIngestCursor")
+@Table(name = "wqIngestCursors")
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class IngestCursorEntity {

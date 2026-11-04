@@ -97,7 +97,7 @@ class IngestBenchmark extends IntegrationTest {
     }
 
     private long offset(String stream) {
-        return jdbc.sql("select coalesce(max(\"streamOffset\"), -1) from \"wqIngestCursor\" where \"feed\" = :feed")
+        return jdbc.sql("select coalesce(max(\"streamOffset\"), -1) from \"wqIngestCursors\" where \"feed\" = :feed")
                 .param("feed", stream).query(Long.class).single();
     }
 

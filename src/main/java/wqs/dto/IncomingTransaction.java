@@ -4,7 +4,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Map;
 
-/** A transaction arriving from a feed, before it is stored in {@code "wqPrjTransaction"}; either feed maps to it. */
+/** A transaction arriving from a feed, before it is stored in {@code "wqPrjTransactions"}; either feed maps to it. */
 public record IncomingTransaction(
         String ownerId,
         Instant occurredAt,

@@ -14,7 +14,7 @@
 -- of a partitioned table to include the partition column, so it cannot be the primary key alone;
 -- the sequence keeps it unique. The primary key doubles as the index pages read by.
 -- The unique key catches a redelivered row.
-create table "wqPrjTransaction" (
+create table "wqPrjTransactions" (
     "ownerId"              text          not null,
     "occurredAt"           timestamptz   not null,
     "transactionId"        bigint        not null,
@@ -35,16 +35,16 @@ create table "wqPrjTransaction" (
     -- A zero-amount stream transaction: stored, never shown, not counted in session or play totals.
     "zeroAmount"           boolean       not null generated always as ("amount" = 0 and "source" = 1) stored,
     primary key ("ownerId", "occurredAt", "transactionId"),
-    constraint "wqPrjTransaction_sourceKey" unique ("source", "sourceId", "occurredAt")
+    constraint "wqPrjTransactions_sourceKey" unique ("source", "sourceId", "occurredAt")
 ) partition by range ("occurredAt");
 
 create sequence "wqTransactionIdSeq" as bigint;
 
 -- Levels 1-2 page through sessions merged with the rows that have no session; this index serves
 -- the second half. A session's own rows are found by batch, bounded by the session's time span.
-create index "wqPrjTransaction_unsessioned" on "wqPrjTransaction" ("ownerId", "occurredAt" desc, "transactionId" desc)
+create index "wqPrjTransactions_unsessioned" on "wqPrjTransactions" ("ownerId", "occurredAt" desc, "transactionId" desc)
     where "batchId" is null;
-create index "wqPrjTransaction_session" on "wqPrjTransaction" ("ownerId", "batchId", "occurredAt")
+create index "wqPrjTransactions_session" on "wqPrjTransactions" ("ownerId", "batchId", "occurredAt")
     where "batchId" is not null;
 
 -- ---------------------------------------------------------------------------------------------
@@ -57,7 +57,7 @@ create index "wqPrjTransaction_session" on "wqPrjTransaction" ("ownerId", "batch
 -- Each total is kept twice: over all rows, and over rows not cancelled ("...ExclCancelled").
 -- Zero-amount stream rows add nothing. A session has one currency: a row in another currency is
 -- dead-lettered. "productId"/"productType" are those of the earliest row.
-create table "wqPrjSession" (
+create table "wqPrjSessions" (
     "sessionId"                bigint        generated always as identity primary key,
     "ownerId"                  text          not null,
     "batchId"                  text          not null,
@@ -76,14 +76,14 @@ create table "wqPrjSession" (
     "totalPlaysExclCancelled"  numeric(20,4) not null default 0,
     "totalWinsExclCancelled"   numeric(20,4) not null default 0,
     "netExclCancelled"         numeric(20,4) not null default 0,
-    constraint "wqPrjSession_batchKey" unique ("ownerId", "batchId")
+    constraint "wqPrjSessions_batchKey" unique ("ownerId", "batchId")
 );
 
-create index "wqPrjSession_byStart" on "wqPrjSession" ("ownerId", "startedAt" desc, "sessionId" desc);
+create index "wqPrjSessions_byStart" on "wqPrjSessions" ("ownerId", "startedAt" desc, "sessionId" desc);
 
-create table "wqPrjPlay" (
+create table "wqPrjPlays" (
     "playId"                   bigint        generated always as identity primary key,
-    "sessionId"                bigint        not null references "wqPrjSession" ("sessionId"),
+    "sessionId"                bigint        not null references "wqPrjSessions" ("sessionId"),
     "ownerId"                  text          not null,
     "batchId"                  text          not null,
     "subBatchId"               text          not null,
@@ -100,10 +100,10 @@ create table "wqPrjPlay" (
     "totalPlaysExclCancelled"  numeric(20,4) not null default 0,
     "totalWinsExclCancelled"   numeric(20,4) not null default 0,
     "netExclCancelled"         numeric(20,4) not null default 0,
-    constraint "wqPrjPlay_subBatchKey" unique ("ownerId", "batchId", "subBatchId")
+    constraint "wqPrjPlays_subBatchKey" unique ("ownerId", "batchId", "subBatchId")
 );
 
-create index "wqPrjPlay_session" on "wqPrjPlay" ("sessionId");
+create index "wqPrjPlays_session" on "wqPrjPlays" ("sessionId");
 
 -- ---------------------------------------------------------------------------------------------
 -- Ingest state
@@ -111,19 +111,19 @@ create index "wqPrjPlay_session" on "wqPrjPlay" ("sessionId");
 
 -- One row per feed: the stream's last processed offset ("feed" = the stream name). Kept here,
 -- not in the broker, so a row and the offset that produced it commit or roll back together.
-create table "wqIngestCursor" (
+create table "wqIngestCursors" (
     "cursorId"     bigint      generated always as identity primary key,
     "feed"         text        not null,
     "streamOffset" bigint,
     "updatedAt"    timestamptz not null default now(),
-    constraint "wqIngestCursor_feedKey" unique ("feed")
+    constraint "wqIngestCursors_feedKey" unique ("feed")
 );
 
 -- Input that could not be projected. Never the raw message: wallet messages can carry card data
 -- (e.g. "toDescription"). A message that could not be read is identified by its offset and the
 -- SHA-256 of its body (the message itself stays in the stream); a readable but rejected one keeps
 -- only its decoded, allowlisted fields in "payload".
-create table "wqDeadLetter" (
+create table "wqDeadLetters" (
     "deadLetterId" bigint      generated always as identity primary key,
     "feed"         text        not null,
     "streamOffset" bigint,

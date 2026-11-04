@@ -8,7 +8,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 /**
- * The primary key of {@code "wqPrjTransaction"}. {@code transactionId} alone is the row's synthetic
+ * The primary key of {@code "wqPrjTransactions"}. {@code transactionId} alone is the row's synthetic
  * id; Postgres requires the partition column ({@code occurredAt}) in every key of a partitioned table.
  */
 @Getter
