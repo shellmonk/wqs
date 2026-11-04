@@ -18,11 +18,9 @@ public record ProjectionParameters(
         @Parameter(description = "End of the range, exclusive. ISO-8601 with an offset; send + as %2B.",
                 required = true, example = "2026-11-01T00:00:00Z")
         @DateTimeFormat(iso = ISO.DATE_TIME) OffsetDateTime to,
-        @Parameter(description = "Only these product types (repeat the parameter or separate with commas). At levels 1-2, sessions are listed by their product type.",
-                example = "instants")
+        @Parameter(description = "Only these product types (repeat the parameter or separate with commas). At levels 1-2, sessions are listed by their product type. Example: instants. Default: any.")
         List<String> productTypes,
-        @Parameter(description = "Only these transaction types (repeat or comma-separate). At levels 1-2, a session is listed when it has a visible transaction of one of them, and its txs show only those.",
-                example = "TT_BUY")
+        @Parameter(description = "Only these transaction types (repeat or comma-separate). At levels 1-2, a session is listed when it has a visible transaction of one of them, and its txs show only those. Example: TT_BUY. Default: any.")
         List<String> transactionTypes,
         @Parameter(description = "Leave cancelled transactions out; session and play totals then exclude them too. Default false.")
         Boolean excludeCancelledTransactions,
