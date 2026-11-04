@@ -9,7 +9,11 @@
 -- partitions are created on demand by the writer (wqs.db.Partitions). The owner is
 -- ("ownerType", "userId"): a player 1717 and a retailer 1717 never share rows.
 -- "source": 1 TRANSACTION (stream), 2 MANUAL_ADJUSTMENT, 3 CLAIMABLE_PRIZE, 4 PAYMENT, 5 LIMIT.
--- The unique key catches a redelivered row: Postgres requires the partition column in it.
+-- "transactionId" is the row's synthetic id, from "wqTransactionIdSeq". Postgres requires every key
+-- of a partitioned table to include the partition column, so it cannot be the primary key alone;
+-- the sequence keeps it unique. The primary key doubles as the index pages read by: an owner
+-- query also filters "ownerType", checked on the row (owners sharing a userId are rare).
+-- The unique key catches a redelivered row.
 create table "wqPrjTransaction" (
     "ownerType"            smallint      not null,
     "userId"               bigint        not null,
@@ -28,7 +32,7 @@ create table "wqPrjTransaction" (
     "transactionReference" text,
     "detail"               jsonb         not null default '{}',
     "ingestedAt"           timestamptz   not null default now(),
-    primary key ("ownerType", "userId", "occurredAt", "transactionId"),
+    primary key ("userId", "occurredAt", "transactionId"),
     constraint "wqPrjTransaction_sourceKey" unique ("source", "sourceId", "occurredAt")
 ) partition by range ("occurredAt");
 
@@ -41,10 +45,11 @@ create sequence "wqTransactionIdSeq" as bigint;
 -- One row per feed: the stream's last processed offset ("feed" = the stream name). Kept here,
 -- not in the broker, so a row and the offset that produced it commit or roll back together.
 create table "wqIngestCursor" (
+    "cursorId"     bigint      generated always as identity primary key,
     "feed"         text        not null,
     "streamOffset" bigint,
     "updatedAt"    timestamptz not null default now(),
-    primary key ("feed")
+    constraint "wqIngestCursor_feedKey" unique ("feed")
 );
 
 -- Input that could not be projected. Never the raw message: wallet messages can carry card data
@@ -52,7 +57,7 @@ create table "wqIngestCursor" (
 -- SHA-256 of its body (the message itself stays in the stream); a readable but rejected one keeps
 -- only its decoded, allowlisted fields in "payload".
 create table "wqDeadLetter" (
-    "deadLetterId" bigserial   primary key,
+    "deadLetterId" bigint      generated always as identity primary key,
     "feed"         text        not null,
     "streamOffset" bigint,
     "sourceId"     text,
