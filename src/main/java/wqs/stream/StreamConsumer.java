@@ -41,8 +41,8 @@ import wqs.util.TransientFailures;
  * bounded queue (a full queue blocks it, so the broker slows down instead of memory filling up);
  * one worker takes up to {@code batch-size} messages, or what arrived within {@code batch-max-wait},
  * and commits them with the last offset in one transaction. A refused message rolls the batch back
- * and the batch is retried with that message dead-lettered; a transient failure retries the batch;
- * any other failure falls back to one message per transaction for that batch. Messages queued but
+ * and that batch is handled one message per transaction; a transient failure retries the batch;
+ * any other failure also falls back to one message per transaction. Messages queued but
  * not committed when stopping are read again from the stored offset on restart. The broker's own offset tracking is not used. A redelivered message hits the unique key and
  * is counted as a duplicate.
  *
@@ -195,8 +195,16 @@ public class StreamConsumer implements SmartLifecycle {
             } catch (InterruptedException e) {
                 return;
             }
-            if (!batch.isEmpty()) {
+            if (batch.isEmpty()) {
+                continue;
+            }
+            try {
                 commit(batch);
+            } catch (RuntimeException e) {
+                // Never let one batch kill the only worker: handle its messages one by one.
+                log.error("Batch at stream offsets {}..{} failed unexpectedly ({}); handling its messages one by one",
+                        batch.getFirst().offset(), batch.getLast().offset(), e.getClass().getSimpleName());
+                batch.stream().filter(r -> r.offset() > lastOffset).forEach(r -> handleOne(r.offset(), r.body()));
             }
         }
     }
@@ -232,6 +240,9 @@ public class StreamConsumer implements SmartLifecycle {
                 items.add(new StreamBatchItem.Readable(r.offset(), decoder.decode(r.body())));
             } catch (DecodeException e) {
                 items.add(new StreamBatchItem.Unreadable(r.offset(), r.body(), e.getMessage()));
+            } catch (RuntimeException e) {
+                // A decoder bug, never a value: the message is unreadable, not a reason to stop.
+                items.add(new StreamBatchItem.Unreadable(r.offset(), r.body(), "decoder failed: " + e.getClass().getSimpleName()));
             }
         }
         Duration backoff = Duration.ofMillis(100);
@@ -245,8 +256,12 @@ public class StreamConsumer implements SmartLifecycle {
                 count("dead_lettered", result.deadLettered());
                 return;
             } catch (BatchItemRejectedException e) {
-                // Rolled back; retry with the refused message dead-lettered instead.
-                items = refuse(items, e);
+                // Rolled back. Refusals are rare: rather than re-running the batch once per refused
+                // message, handle this batch one message per transaction.
+                log.info("Stream offset {} refused ({}); handling batch {}..{} one by one",
+                        e.offset(), e.rejection().reason(), batch.getFirst().offset(), batch.getLast().offset());
+                batch.forEach(r -> handleOne(r.offset(), r.body()));
+                return;
             } catch (RuntimeException e) {
                 if (!TransientFailures.isTransient(e)) {
                     log.warn("Batch at stream offsets {}..{} failed ({}); handling its messages one by one",
@@ -262,18 +277,6 @@ public class StreamConsumer implements SmartLifecycle {
                 backoff = min(backoff.multipliedBy(2), MAX_BACKOFF);
             }
         }
-    }
-
-    private static List<StreamBatchItem> refuse(List<StreamBatchItem> items, BatchItemRejectedException e) {
-        List<StreamBatchItem> next = new ArrayList<>(items.size());
-        for (StreamBatchItem item : items) {
-            if (item.offset() == e.offset() && item instanceof StreamBatchItem.Readable r) {
-                next.add(new StreamBatchItem.Refused(r.offset(), r.message(), e.rejection().reason(), e.rejection().getMessage()));
-            } else {
-                next.add(item);
-            }
-        }
-        return next;
     }
 
     private void count(String outcome, int n) {
@@ -312,6 +315,9 @@ public class StreamConsumer implements SmartLifecycle {
             m = decoder.decode(body);
         } catch (DecodeException e) {
             ingest.recordUnreadable(feed, offset, body, "unreadable", e.getMessage());
+            return "dead_lettered";
+        } catch (RuntimeException e) {
+            ingest.recordUnreadable(feed, offset, body, "unreadable", "decoder failed: " + e.getClass().getSimpleName());
             return "dead_lettered";
         }
         try {

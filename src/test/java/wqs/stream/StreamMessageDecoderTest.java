@@ -112,6 +112,14 @@ class StreamMessageDecoderTest {
     }
 
     @Test
+    void rejects_an_amount_with_a_huge_exponent() throws IOException {
+        byte[] body = new String(fixture("transfer-out.json"), java.nio.charset.StandardCharsets.UTF_8).replace("\"amount\": -12", "\"amount\": 1E+2147483647")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> decoder.decode(body))
+                .isInstanceOf(DecodeException.class).hasMessage("amount.amount does not fit numeric(20,4)");
+    }
+
+    @Test
     void rejects_a_bad_currency() {
         assertThatThrownBy(() -> decode(n -> ((ObjectNode) n.get("amount")).put("currency", "eur")))
                 .isInstanceOf(DecodeException.class).hasMessageContaining("amount.currency");

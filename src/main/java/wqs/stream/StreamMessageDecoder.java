@@ -160,7 +160,8 @@ public class StreamMessageDecoder {
             throw new DecodeException(path + " must be a number");
         }
         BigDecimal value = node.decimalValue().stripTrailingZeros();
-        if (value.scale() > MONEY_SCALE || value.precision() - value.scale() > MONEY_INTEGER_DIGITS) {
+        // long arithmetic: an exponent like 1E+2147483647 has scale -2147483647 and would overflow int.
+        if (value.scale() > MONEY_SCALE || (long) value.precision() - value.scale() > MONEY_INTEGER_DIGITS) {
             throw new DecodeException(path + " does not fit numeric(20,4)");
         }
         return value.setScale(Math.max(0, value.scale()));
