@@ -1,4 +1,4 @@
-package wqs.db;
+package wqs.config;
 
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;

@@ -1,4 +1,4 @@
-package wqs.ingest.stream;
+package wqs.stream;
 
 import com.rabbitmq.stream.Consumer;
 import com.rabbitmq.stream.Environment;
@@ -16,14 +16,17 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.config.StreamProperties;
-import wqs.db.OutOfRangeException;
-import wqs.ingest.DeadLetters;
-import wqs.ingest.IngestCursor;
-import wqs.ingest.TransientFailures;
-import wqs.projection.TransactionWriter;
+import wqs.dto.StreamMessage;
+import wqs.exception.DecodeException;
+import wqs.exception.RejectedException;
+import wqs.mapper.TransactionMapper;
+import wqs.repository.DeadLetterRepository;
+import wqs.repository.IngestCursorRepository;
+import wqs.service.TransactionIngestService;
+import wqs.util.TransientFailures;
 
 /**
- * Consumes {@code walAccountTransactions} from the RabbitMQ stream into {@code "wqPrjTransaction"}.
+ * Consumes {@code walAccountTransactions} from the RabbitMQ stream through {@link TransactionIngestService}.
  *
  * <p>Each message is handled in ONE database transaction that also stores its offset in
  * {@code "wqIngestCursor"}, so a crash replays from the last committed message and never skips
@@ -32,8 +35,10 @@ import wqs.projection.TransactionWriter;
  *
  * <ul>
  *   <li>Unreadable message: dead-lettered (offset and body hash only), offset advanced.</li>
- *   <li>Readable but rejected (garbage timestamp, or a non-transient write failure): dead-lettered
- *       with its allowlisted fields, offset advanced.</li>
+ *   <li>Readable but rejected ({@link RejectedException}: garbage timestamp, currency mismatch, ...):
+ *       the ingest transaction rolls back, then the row is dead-lettered with its allowlisted fields
+ *       and the offset advanced, in a fresh transaction.</li>
+ *   <li>Any other non-transient failure (a constraint, a bug): dead-lettered as {@code write-failed}.</li>
  *   <li>Transient database failure: retried with backoff on the same message, never dead-lettered.</li>
  * </ul>
  *
@@ -50,9 +55,10 @@ public class StreamConsumer implements SmartLifecycle {
     private final Environment environment;
     private final StreamProperties properties;
     private final StreamMessageDecoder decoder;
-    private final TransactionWriter writer;
-    private final IngestCursor cursor;
-    private final DeadLetters deadLetters;
+    private final TransactionMapper mapper;
+    private final TransactionIngestService ingest;
+    private final IngestCursorRepository cursor;
+    private final DeadLetterRepository deadLetters;
     private final TransactionTemplate tx;
     private final MeterRegistry meters;
 
@@ -63,12 +69,13 @@ public class StreamConsumer implements SmartLifecycle {
     private volatile long lastOffset = -1;
 
     public StreamConsumer(Environment environment, StreamProperties properties, StreamMessageDecoder decoder,
-                          TransactionWriter writer, IngestCursor cursor, DeadLetters deadLetters,
-                          TransactionTemplate tx, MeterRegistry meters) {
+                          TransactionMapper mapper, TransactionIngestService ingest, IngestCursorRepository cursor,
+                          DeadLetterRepository deadLetters, TransactionTemplate tx, MeterRegistry meters) {
         this.environment = environment;
         this.properties = properties;
         this.decoder = decoder;
-        this.writer = writer;
+        this.mapper = mapper;
+        this.ingest = ingest;
         this.cursor = cursor;
         this.deadLetters = deadLetters;
         this.tx = tx;
@@ -163,26 +170,30 @@ public class StreamConsumer implements SmartLifecycle {
 
     private String process(long offset, byte[] body) {
         String feed = properties.name();
-        return tx.execute(status -> {
-            StreamMessage m;
-            try {
-                m = decoder.decode(body);
-            } catch (DecodeException e) {
+        StreamMessage m;
+        try {
+            m = decoder.decode(body);
+        } catch (DecodeException e) {
+            tx.executeWithoutResult(status -> {
                 deadLetters.unreadable(feed, offset, body, "unreadable", e.getMessage());
                 cursor.saveStreamOffset(feed, offset);
-                return "dead_lettered";
-            }
-            String outcome;
-            try {
-                outcome = writer.write(m) == TransactionWriter.Outcome.INSERTED ? "inserted" : "duplicate";
-            } catch (OutOfRangeException e) {
-                // Thrown before any write, so the transaction is still clean.
-                deadLetters.rejected(feed, offset, m.id(), "occurred-at-out-of-range", e.getMessage(), m);
-                outcome = "dead_lettered";
-            }
-            cursor.saveStreamOffset(feed, offset);
-            return outcome;
-        });
+            });
+            return "dead_lettered";
+        }
+        try {
+            return tx.execute(status -> {
+                TransactionIngestService.Outcome outcome = ingest.ingest(mapper.fromStream(m));
+                cursor.saveStreamOffset(feed, offset);
+                return outcome == TransactionIngestService.Outcome.INSERTED ? "inserted" : "duplicate";
+            });
+        } catch (RejectedException e) {
+            // The ingest transaction has rolled back; record the rejection in a fresh one.
+            tx.executeWithoutResult(status -> {
+                deadLetters.rejected(feed, offset, m.id(), e.reason(), e.getMessage(), m);
+                cursor.saveStreamOffset(feed, offset);
+            });
+            return "dead_lettered";
+        }
     }
 
     /**

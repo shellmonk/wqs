@@ -1,4 +1,4 @@
-package wqs.domain;
+package wqs.dto;
 
 /** Where a projected row came from, by its stored code. */
 public enum Source {
@@ -18,5 +18,14 @@ public enum Source {
 
     public short code() {
         return code;
+    }
+
+    /**
+     * Only game rounds carry a session batch id: transactions and claimable prizes. A batched row
+     * of any other source is a producer fault and is rejected, so a session never mixes in
+     * payments, adjustments or limits.
+     */
+    public boolean carriesBatch() {
+        return this == TRANSACTION || this == CLAIMABLE_PRIZE;
     }
 }

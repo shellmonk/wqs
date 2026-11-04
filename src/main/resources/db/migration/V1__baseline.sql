@@ -32,11 +32,71 @@ create table "wqPrjTransaction" (
     "transactionReference" text,
     "detail"               jsonb         not null default '{}',
     "ingestedAt"           timestamptz   not null default now(),
+    -- A zero-amount stream transaction: stored, never shown, not counted in session or play totals.
+    "zeroAmount"           boolean       not null generated always as ("amount" = 0 and "source" = 1) stored,
     primary key ("userId", "occurredAt", "transactionId"),
     constraint "wqPrjTransaction_sourceKey" unique ("source", "sourceId", "occurredAt")
 ) partition by range ("occurredAt");
 
 create sequence "wqTransactionIdSeq" as bigint;
+
+-- ---------------------------------------------------------------------------------------------
+-- Sessions and plays
+-- ---------------------------------------------------------------------------------------------
+
+-- Totals per session (a batch id) and per play (a sub-batch id), updated in the same transaction
+-- as each row that joins them, so pages read finished numbers. Not partitioned: found by key.
+-- "totalPlays" and "totalWins" are absolute amounts; "net" = "totalWins" - "totalPlays".
+-- Each total is kept twice: over all rows, and over rows not cancelled ("...ExclCancelled").
+-- Zero-amount stream rows add nothing. A session has one currency: a row in another currency is
+-- dead-lettered. "productId"/"productType" are those of the earliest row.
+create table "wqPrjSession" (
+    "sessionId"                bigint        generated always as identity primary key,
+    "ownerType"                smallint      not null,
+    "userId"                   bigint        not null,
+    "batchId"                  text          not null,
+    "startedAt"                timestamptz   not null,
+    "endedAt"                  timestamptz   not null,
+    "productId"                text,
+    "productType"              text,
+    "currency"                 char(3)       not null,
+    "txCount"                  int           not null default 0,
+    "playCount"                int           not null default 0,
+    "totalPlays"               numeric(20,4) not null default 0,
+    "totalWins"                numeric(20,4) not null default 0,
+    "net"                      numeric(20,4) not null default 0,
+    "txCountExclCancelled"     int           not null default 0,
+    "playCountExclCancelled"   int           not null default 0,
+    "totalPlaysExclCancelled"  numeric(20,4) not null default 0,
+    "totalWinsExclCancelled"   numeric(20,4) not null default 0,
+    "netExclCancelled"         numeric(20,4) not null default 0,
+    constraint "wqPrjSession_batchKey" unique ("ownerType", "userId", "batchId")
+);
+
+create table "wqPrjPlay" (
+    "playId"                   bigint        generated always as identity primary key,
+    "sessionId"                bigint        not null references "wqPrjSession" ("sessionId"),
+    "ownerType"                smallint      not null,
+    "userId"                   bigint        not null,
+    "batchId"                  text          not null,
+    "subBatchId"               text          not null,
+    "startedAt"                timestamptz   not null,
+    "endedAt"                  timestamptz   not null,
+    "productId"                text,
+    "productType"              text,
+    "currency"                 char(3)       not null,
+    "txCount"                  int           not null default 0,
+    "totalPlays"               numeric(20,4) not null default 0,
+    "totalWins"                numeric(20,4) not null default 0,
+    "net"                      numeric(20,4) not null default 0,
+    "txCountExclCancelled"     int           not null default 0,
+    "totalPlaysExclCancelled"  numeric(20,4) not null default 0,
+    "totalWinsExclCancelled"   numeric(20,4) not null default 0,
+    "netExclCancelled"         numeric(20,4) not null default 0,
+    constraint "wqPrjPlay_subBatchKey" unique ("ownerType", "userId", "batchId", "subBatchId")
+);
+
+create index "wqPrjPlay_session" on "wqPrjPlay" ("sessionId");
 
 -- ---------------------------------------------------------------------------------------------
 -- Ingest state

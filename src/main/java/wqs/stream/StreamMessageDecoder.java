@@ -1,4 +1,4 @@
-package wqs.ingest.stream;
+package wqs.stream;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -15,6 +15,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
+import wqs.dto.StreamMessage;
+import wqs.exception.DecodeException;
 
 /**
  * Reads a {@code walAccountTransactions} message strictly (format: docs/reference/stream-message-samples.md).

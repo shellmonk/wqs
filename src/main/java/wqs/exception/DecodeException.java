@@ -1,4 +1,4 @@
-package wqs.ingest.stream;
+package wqs.exception;
 
 /**
  * A stream message that cannot be read. The message text names the field and the rule, never the

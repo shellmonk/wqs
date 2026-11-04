@@ -1,4 +1,4 @@
-package wqs.ingest.stream;
+package wqs.dto;
 
 import java.math.BigDecimal;
 import java.time.Instant;

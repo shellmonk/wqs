@@ -1,4 +1,4 @@
-package wqs.ingest.stream;
+package wqs.stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.IntegrationTest;
-import wqs.ingest.DeadLetters;
+import wqs.repository.DeadLetterRepository;
 
 /**
  * Messages published to the real stream end up in Postgres. Tests share one stream and one
@@ -107,7 +107,7 @@ class StreamIngestTest extends IntegrationTest {
     @Test
     void an_unreadable_message_is_dead_lettered_by_hash_and_the_stream_moves_on() throws Exception {
         byte[] poison = ("{\"id\": \"" + nextId() + "\", \"toDescription\": \"WITHDRAWAL*5208\"").getBytes(StandardCharsets.UTF_8);
-        String sha = DeadLetters.sha256(poison);
+        String sha = DeadLetterRepository.sha256(poison);
         publish(poison);
         String after = nextId();
         publish(message("transfer-out.json", after, "1-" + after, "2026-09-03T00:00:00Z"));
@@ -133,7 +133,7 @@ class StreamIngestTest extends IntegrationTest {
 
         awaitRow(after);
         assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetter\" where \"bodySha256\" = :sha")
-                .param("sha", DeadLetters.sha256(body)).query(String.class).single()).isEqualTo("unreadable");
+                .param("sha", DeadLetterRepository.sha256(body)).query(String.class).single()).isEqualTo("unreadable");
     }
 
     @Test
@@ -153,6 +153,21 @@ class StreamIngestTest extends IntegrationTest {
     }
 
     @Test
+    void a_rejected_row_is_dead_lettered_with_its_reason_and_the_stream_moves_on() throws Exception {
+        String first = nextId(), usd = nextId(), after = nextId();
+        publish(message("instants-prize.json", first, "1-" + first, "2026-09-07T00:00:00Z", "PRIZE", 5, "EUR"));
+        publish(message("instants-prize.json", usd, "1-" + first, "2026-09-07T00:00:01Z", "PRIZE", 5, "USD"));
+        publish(message("transfer-out.json", after, "1-" + after, "2026-09-07T00:00:02Z"));
+
+        awaitRow(after);
+        assertThat(rows(usd)).isZero();
+        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetter\" where \"sourceId\" = :id")
+                .param("id", usd).query(String.class).single()).isEqualTo("currency-mismatch");
+        assertThat(jdbc.sql("select \"txCount\" from \"wqPrjSession\" where \"userId\" = :user")
+                .param("user", Long.parseLong(first)).query(Integer.class).single()).isEqualTo(1);
+    }
+
+    @Test
     void each_month_gets_its_own_partition() throws Exception {
         String id = nextId();
         publish(message("transfer-out.json", id, "1-" + id, "2025-03-31T23:59:59.999999Z"));
@@ -167,7 +182,7 @@ class StreamIngestTest extends IntegrationTest {
     @Test
     void after_a_restart_consumption_resumes_after_the_stored_offset() throws Exception {
         byte[] poison = ("not json " + nextId()).getBytes(StandardCharsets.UTF_8);
-        String sha = DeadLetters.sha256(poison);
+        String sha = DeadLetterRepository.sha256(poison);
         publish(poison);
         String before = nextId();
         publish(message("transfer-out.json", before, "1-" + before, "2026-09-05T00:00:00Z"));
@@ -188,6 +203,14 @@ class StreamIngestTest extends IntegrationTest {
     }
 
     // --- helpers ---
+
+    private byte[] message(String fixture, String id, String ownerId, String created,
+                           String type, int amount, String currency) throws Exception {
+        ObjectNode node = (ObjectNode) mapper.readTree(message(fixture, id, ownerId, created));
+        node.put("type", type);
+        ((ObjectNode) node.get("amount")).put("amount", amount).put("currency", currency);
+        return mapper.writeValueAsBytes(node);
+    }
 
     private byte[] message(String fixture, String id, String ownerId, String created) throws Exception {
         ObjectNode node = (ObjectNode) mapper.readTree(StreamMessageDecoderTest.fixture(fixture));

@@ -1,4 +1,4 @@
-package wqs.ingest;
+package wqs.repository;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -6,22 +6,22 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Records input that could not be projected. Never stores a raw message (see the table comment in
+ * {@code "wqDeadLetter"}: input that could not be projected. Never stores a raw message (see the table comment in
  * V1__baseline.sql): an unreadable one by its offset and body hash, a rejected one by its decoded,
  * allowlisted fields.
  */
-@Component
-public class DeadLetters {
+@Repository
+public class DeadLetterRepository {
 
     private final JdbcClient jdbc;
     private final ObjectMapper objectMapper;
 
-    public DeadLetters(JdbcClient jdbc, ObjectMapper objectMapper) {
+    public DeadLetterRepository(JdbcClient jdbc, ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
     }

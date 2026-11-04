@@ -1,4 +1,4 @@
-package wqs.ingest.stream;
+package wqs.stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -14,6 +14,8 @@ import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import wqs.dto.StreamMessage;
+import wqs.exception.DecodeException;
 
 /** Golden fixtures are the two captured messages in docs/reference/stream-message-samples.md. */
 class StreamMessageDecoderTest {

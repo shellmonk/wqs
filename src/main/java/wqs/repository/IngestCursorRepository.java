@@ -1,18 +1,18 @@
-package wqs.ingest;
+package wqs.repository;
 
 import java.util.OptionalLong;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-/** The last processed position of each feed, stored in the same transaction as what it produced. */
-@Component
-public class IngestCursor {
+/** {@code "wqIngestCursor"}: the last processed position of each feed, stored in the same transaction as what it produced. */
+@Repository
+public class IngestCursorRepository {
 
     private final JdbcClient jdbc;
 
-    public IngestCursor(JdbcClient jdbc) {
+    public IngestCursorRepository(JdbcClient jdbc) {
         this.jdbc = jdbc;
     }
 

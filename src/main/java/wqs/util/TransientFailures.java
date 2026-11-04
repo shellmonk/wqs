@@ -1,4 +1,4 @@
-package wqs.ingest;
+package wqs.util;
 
 import java.sql.SQLException;
 import org.springframework.dao.DataAccessResourceFailureException;
