@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.dao.DataAccessException;
@@ -37,6 +38,23 @@ public class PartitionService {
             ensure(table, now.plusMonths(i).atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
         }
         return months + 1;
+    }
+
+    /**
+     * Ensures {@code table} has a partition for each month these instants fall in. Garbage months
+     * are skipped, not thrown: the rows carrying them are rejected one by one when written.
+     */
+    public void ensureMonthsOf(String table, Collection<Instant> instants) {
+        instants.stream()
+                .map(at -> YearMonth.from(at.atOffset(ZoneOffset.UTC)))
+                .distinct()
+                .forEach(month -> {
+                    try {
+                        ensure(table, month.atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
+                    } catch (RejectedException garbage) {
+                        // rejected again, per row, when written
+                    }
+                });
     }
 
     /**
