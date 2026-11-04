@@ -1,0 +1,15 @@
+# SDD scratch workspace (ledger, briefs, review packages) -- never committed
+.superpowers/
+
+build/
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+*.log
+.idea/
+*.iml
+.DS_Store
+
+# jqwik runtime artifact
+app/.jqwik-database
+# Kotlin script session cache
+buildSrc/.kotlin/
