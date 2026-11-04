@@ -133,12 +133,19 @@ public final class StrictJson {
         return text;
     }
 
+    /**
+     * An ISO-8601 instant, truncated to microseconds (final-review M5): Postgres stores timestamptz at
+     * microsecond precision and ROUNDS a finer one, so an instant 0.5 µs or less before a UTC month
+     * start would be stored in the next month while the writer counts it -- and provisions its
+     * partition -- in this one. Truncated here, the month counted and the month stored always agree
+     * (the delta decoder truncates the same way).
+     */
     public static Instant instant(JsonNode node, String field) {
         if (!node.isTextual()) {
             throw new IllegalArgumentException(field + " must be an ISO-8601 instant string");
         }
         try {
-            return Instant.parse(node.asText());
+            return Instant.parse(node.asText()).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         } catch (DateTimeParseException e) {
             throw new IllegalArgumentException(field + " is not a valid ISO-8601 instant", e);
         }

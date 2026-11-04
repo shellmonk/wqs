@@ -132,10 +132,11 @@ class WebProjectionSecurityTest extends ApiTestBase {
      * Spec 9 control 3 on the single transaction table: every source is stored once in
      * "wqPrjTransaction", and no stored row knows an endpoint, so /web's isolation rests on its read
      * policy (plan D1) bound into every query. A payment is never a /web row, never a /web entry,
-     * never a nested /web transaction and never in a /web total. A payment carrying a batch is stored
-     * and sessioned like any transaction (the ingest rule is gone): its session belongs to the policies
-     * of its first source, so it is a /cc entry and never a /web one. A session of /web sources --
-     * here one whose only transaction is cancelled -- looks the same on both endpoints.
+     * never a nested /web transaction and never in a /web total. A payment can never join a session
+     * either: only the sources the producer batches (SourceKind.carriesBatch) may carry a batch, so a
+     * batched payment is dead-lettered as sessioned-source-not-on-every-view and is shown on no endpoint
+     * (final-review M1). A session -- here one whose only transaction is cancelled -- therefore looks
+     * the same on both endpoints.
      */
     @Test
     void a_payment_never_reaches_web_through_the_policy_the_entries_or_the_totals() throws Exception {
@@ -143,17 +144,18 @@ class WebProjectionSecurityTest extends ApiTestBase {
                 sessioned(SourceKind.TRANSACTION, "u1-s-tx", "2034-02-15T10:00:00Z", "s-web", null),
                 sessioned(SourceKind.PAYMENT, "u1-pay2", "2034-02-16T10:00:00Z", null, null),
                 sessioned(SourceKind.TRANSACTION, "u1-s-c", "2034-02-17T10:00:00Z", null, "u1-s-tx")), 2L));
-        var sessionedPayment = writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
+        var rejected = writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
                 sessioned(SourceKind.PAYMENT, "u1-s-pay", "2034-02-16T11:00:00Z", "s-pay", null)), 3L));
-        assertThat(sessionedPayment.projected()).as("a sessioned payment is stored like any row").isEqualTo(1);
-        assertThat(sessionedPayment.deadLettered()).isZero();
-        List<String> payments = List.of("u1-payment", "u1-pay2", "u1-s-pay");
+        assertThat(rejected.deadLettered()).as("a sessioned payment is rejected, never projected").isEqualTo(1);
+        assertThat(rejected.projected()).isZero();
+        assertThat(db().value("select \"error\" from \"wqDeadLetter\" where \"sourceId\" = 'u1-s-pay'", String.class))
+                .isEqualTo("sessioned-source-not-on-every-view");
+        List<String> payments = List.of("u1-payment", "u1-pay2");
 
         assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" where \"source\" = ?", String.class,
                 (short) SourceKind.PAYMENT.code())).as("stored once, in the one table")
                 .containsExactlyInAnyOrderElementsOf(payments);
-        assertThat(db().value("select \"firstSource\" from \"wqPrjSession\" where \"batchId\" = 's-pay'", Short.class))
-                .as("the session of a payment").isEqualTo((short) SourceKind.PAYMENT.code());
+        assertThat(db().count("\"wqPrjSession\" where \"batchId\" = 's-pay'")).as("no session of a payment").isZero();
 
         for (String level : List.of("0", "1", "2")) {
             for (String excl : List.of("false", "true")) {
@@ -170,7 +172,7 @@ class WebProjectionSecurityTest extends ApiTestBase {
                 .andExpect(jsonPath("$.totalRowCount").value(4));
         mvc.perform(webAt("0", "true").header(PRINCIPAL_HEADER, "1"))
                 .andExpect(jsonPath("$.totalRowCount").value(3));
-        // Entry paging and totals: u1-tx, u1-prize and s-web; the payments (and their session) are /cc only.
+        // Entry paging and totals: u1-tx, u1-prize and s-web; the payments are /cc only.
         for (String level : List.of("1", "2")) {
             mvc.perform(webAt(level, "false").header(PRINCIPAL_HEADER, "1"))
                     .andExpect(jsonPath("$.totalRowCount").value(3))
@@ -180,16 +182,68 @@ class WebProjectionSecurityTest extends ApiTestBase {
                     .andExpect(jsonPath("$.data[*].txId", contains("u1-prize", "u1-tx")));
             mvc.perform(cc(level, "false"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.totalRowCount").value(6))
+                    .andExpect(jsonPath("$.totalRowCount").value(5))
                     .andExpect(jsonPath("$.data[*].batchId", hasItem("s-web")))
-                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-pay")));
+                    .andExpect(jsonPath("$..batchId", not(hasItem("s-pay"))))
+                    .andExpect(jsonPath("$..txId", not(hasItem("u1-s-pay"))));
             // The emptied session is hidden on /cc exactly as on /web.
             mvc.perform(cc(level, "true"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.totalRowCount").value(5))
+                    .andExpect(jsonPath("$.totalRowCount").value(4))
                     .andExpect(jsonPath("$.data[*].batchId", not(hasItem("s-web"))))
                     .andExpect(jsonPath("$.data[*].txId", hasItem("u1-pay2")));
         }
+    }
+
+    /**
+     * Final-review M1, on the totals: a /web session's and play's stored totals hold only sources
+     * /web shows. A session mixing a transaction and a claimable prize is offered batched rows of every
+     * other source in the same session and play; those are dead-lettered, so the /web session and play
+     * totals are exactly the sums of the /web-source rows ({@code 1, 3}, written out here, not taken
+     * from ReadPolicy.WEB) -- and agree with the nested transactions /web shows.
+     */
+    @Test
+    void web_session_and_play_totals_never_include_a_source_web_does_not_show() throws Exception {
+        List<wqs.domain.ProjectionTransaction> batch = new ArrayList<>(List.of(
+                member(SourceKind.TRANSACTION, "m-tx", "2034-02-20T10:00:00Z", wqs.gen.TxTypes.PLAY, "10.0000"),
+                member(SourceKind.CLAIMABLE_PRIZE, "m-prize", "2034-02-20T10:01:00Z", wqs.gen.TxTypes.WIN, "4.0000")));
+        int offered = 0;
+        for (SourceKind source : SourceKind.values()) {
+            if (source != SourceKind.TRANSACTION && source != SourceKind.CLAIMABLE_PRIZE) {
+                batch.add(member(source, "m-" + source.name(), "2034-02-20T10:02:00Z", wqs.gen.TxTypes.WIN, "500.0000"));
+                offered++;
+            }
+        }
+        var result = writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", batch, 4L));
+        assertThat(result.deadLettered()).as("every non-/web source refused").isEqualTo(offered).isEqualTo(3);
+        assertThat(db().value("""
+                select count(*)::int from "wqPrjTransaction" where "batchId" = 's-mix' and "source" not in (1, 3)""",
+                Integer.class)).as("no non-/web row in the session").isZero();
+
+        for (String level : List.of("1", "2")) {
+            for (String excl : List.of("false", "true")) {
+                var page = mvc.perform(webAt(level, excl).header(PRINCIPAL_HEADER, "1")).andExpect(status().isOk());
+                String session = "$.data[?(@.batchId == 's-mix')]";
+                page.andExpect(jsonPath(session + ".totalPlay", contains(10.0)))
+                        .andExpect(jsonPath(session + ".totalWin", contains(4.0)))
+                        .andExpect(jsonPath(session + ".amount", contains(-6.0)))
+                        .andExpect(jsonPath("$..txId", not(hasItem("m-PAYMENT"))))
+                        .andExpect(jsonPath("$..txId", not(hasItem("m-MANUAL_ADJUSTMENT"))))
+                        .andExpect(jsonPath("$..txId", not(hasItem("m-LIMIT"))));
+                if (level.equals("2")) {
+                    page.andExpect(jsonPath(session + ".subitems[*].playAmount", contains(10.0)))
+                            .andExpect(jsonPath(session + ".subitems[*].winAmount", contains(4.0)));
+                } else {
+                    page.andExpect(jsonPath(session + ".txs[*].txId", contains("m-prize", "m-tx")));
+                }
+            }
+        }
+    }
+
+    private static wqs.domain.ProjectionTransaction member(
+            SourceKind source, String sourceId, String at, String type, String amount) {
+        return new wqs.domain.ProjectionTransaction(1L, source, sourceId, java.time.Instant.parse(at), "P10", "keno",
+                "s-mix", "s-mix-p", type, new java.math.BigDecimal(amount), "EUR", null, null, null);
     }
 
     private static MockHttpServletRequestBuilder cc(String level, String excludeCancelled) {

@@ -19,7 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>The one place that knows where the months come from. Its callers bound a lookup that has no
  * timestamp to these months instead of probing every monthly partition: a cancel's target (named by
- * (source, sourceId) only), and a new group's earlier zero-amount rows.
+ * (source, sourceId) only). Only a cancel reads them -- never a new play or session (final-review I1).
  */
 @Component
 public class OwnerMonths {
@@ -27,11 +27,6 @@ public class OwnerMonths {
     private static final String MONTHS = """
             select distinct "month" from "wqOwnerMonth"
             where "ownerType" = ? and "userId" = ? and "unit" = ?
-            order by "month"
-            """;
-    private static final String ZERO_AMOUNT_MONTHS = """
-            select distinct "month" from "wqOwnerMonth"
-            where "ownerType" = ? and "userId" = ? and "unit" = ? and "zeroAmount"
             order by "month"
             """;
 
@@ -47,12 +42,6 @@ public class OwnerMonths {
     @Transactional(propagation = Propagation.MANDATORY)
     public List<YearMonth> of(short ownerType, long userId) {
         return months(MONTHS, ownerType, userId);
-    }
-
-    /** The months holding the owner's zero-amount transactions, ascending; usually empty. */
-    @Transactional(propagation = Propagation.MANDATORY)
-    public List<YearMonth> withZeroAmounts(short ownerType, long userId) {
-        return months(ZERO_AMOUNT_MONTHS, ownerType, userId);
     }
 
     private List<YearMonth> months(String sql, short ownerType, long userId) {

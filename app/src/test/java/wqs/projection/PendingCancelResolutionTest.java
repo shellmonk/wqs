@@ -75,6 +75,30 @@ class PendingCancelResolutionTest extends PostgresTestBase {
         assertThat(new ProjectionInvariants(jdbc()).drift()).as("a resolved cancel is no drift").isEmpty();
     }
 
+    /**
+     * Final-review M8: a run logs its first removals one WARN line each and the rest in one summary
+     * line with their count -- ids, source and age only, never the owner.
+     */
+    @Test
+    void a_large_run_logs_the_first_removals_and_then_one_summary(CapturedOutput output) {
+        int n = PendingCancelResolution.LOGGED_INDIVIDUALLY + 7;
+        List<ProjectionTransaction> cancels = new java.util.ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            cancels.add(cancel("c-many-" + i, "t-many-" + i));
+        }
+        writer.apply(new ProjectionBatch("s", cancels, 1L));
+        db().execute("update \"wqPrjPendingCancel\" set \"parkedAt\" = now() - make_interval(days => 8)");
+
+        assertThat(resolution.resolveOlderThan(Duration.ofDays(7))).isEqualTo(n);
+
+        String log = output.getAll();
+        long individual = log.lines().filter(l -> l.contains("Resolved parked cancel c-many-")).count();
+        assertThat(individual).isEqualTo(PendingCancelResolution.LOGGED_INDIVIDUALLY);
+        assertThat(log).contains("Resolved 7 more parked cancels unapplied").contains(n + " in all")
+                .doesNotContain(Long.toString(USER));
+        assertThat(pendingCancelStore.depth()).isZero();
+    }
+
     @Test
     void a_target_arriving_after_resolution_is_not_cancelled() {
         writer.apply(new ProjectionBatch("s", List.of(cancel("c-old", "t-late")), 1L));

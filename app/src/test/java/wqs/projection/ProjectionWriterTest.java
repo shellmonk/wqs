@@ -293,27 +293,71 @@ class ProjectionWriterTest extends PostgresTestBase {
     }
 
     /**
-     * The sessioned-source rule is gone (plan Task 4): a session is shown by the read policies of its
-     * first transaction's source, so a payment carrying a batch is stored and sessioned like any other
-     * transaction -- never dead-lettered -- under "firstSource" 4.
+     * Final-review M1: only the sources the producer batches ({@link SourceKind#carriesBatch}) may carry a
+     * batchId. A batched payment, manual adjustment or limit is rejected as {@code
+     * sessioned-source-not-on-every-view} before anything of it is written, so it can never fold its
+     * amount into a session's totals; the rest of its batch applies.
      */
-    @Test
-    void a_sessioned_payment_is_projected_as_a_session_of_its_own_source() {
-        ProjectionTransaction sessionedPayment = new ProjectionTransaction(
-                7L, SourceKind.PAYMENT, "pay-s", WHEN, null, null, "b-pay", "p-pay",
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = SourceKind.class,
+            names = {"PAYMENT", "MANUAL_ADJUSTMENT", "LIMIT"})
+    void a_batched_row_of_a_source_never_batched_dead_letters_alone(SourceKind source) {
+        ProjectionTransaction batched = new ProjectionTransaction(
+                7L, source, "pay-s", WHEN, null, null, "b-pay", "p-pay",
                 TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
 
         WriteResult result = writer.apply(new ProjectionBatch(STREAM,
-                List.of(tx("before"), sessionedPayment, tx("after")), 6L, List.of(4L, 5L, 6L)));
+                List.of(tx("before"), batched, tx("after")), 6L, List.of(4L, 5L, 6L)));
+
+        assertThat(result.deadLettered()).isEqualTo(1);
+        assertThat(result.projected()).isEqualTo(2);
+        assertThat(db().count("\"wqPrjSession\" where \"batchId\" = 'b-pay'")).isZero();
+        assertThat(db().count("\"wqPrjPlay\" where \"batchId\" = 'b-pay'")).isZero();
+        assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" order by 1", String.class))
+                .as("not even the transaction row").containsExactly("after", "before");
+        assertThat(deadLetters()).containsExactly("pay-s|5|sessioned-source-not-on-every-view");
+        assertThat(offsetStore.read(STREAM)).contains(6L);
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+    }
+
+    /** The batched sources still session: a claimable prize joins a transaction's session. */
+    @Test
+    void a_batched_prize_joins_its_session() {
+        ProjectionTransaction prize = new ProjectionTransaction(
+                7L, SourceKind.CLAIMABLE_PRIZE, "prize-s", WHEN.plusSeconds(5), null, null, "b-mix", null,
+                TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
+        ProjectionTransaction round = new ProjectionTransaction(
+                7L, SourceKind.TRANSACTION, "tx-s", WHEN, null, null, "b-mix", "p-1",
+                TxTypes.PLAY, new BigDecimal("2.0000"), "EUR", null, null, null);
+
+        WriteResult result = writer.apply(new ProjectionBatch(STREAM, List.of(round, prize), 7L, List.of(6L, 7L)));
 
         assertThat(result.deadLettered()).isZero();
-        assertThat(result.projected()).isEqualTo(3);
-        assertThat(db().value("select \"firstSource\" from \"wqPrjSession\" where \"batchId\" = 'b-pay'", Short.class))
-                .isEqualTo((short) SourceKind.PAYMENT.code());
-        assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" order by 1", String.class))
-                .containsExactly("after", "before", "pay-s");
-        assertThat(deadLetters()).isEmpty();
-        assertThat(offsetStore.read(STREAM)).contains(6L);
+        assertThat(db().value("select \"txCount\" from \"wqPrjSession\" where \"batchId\" = 'b-mix'", Integer.class))
+                .isEqualTo(2);
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+    }
+
+    /**
+     * Final-review M5: a stream instant 0.4 µs before a UTC month start. Postgres rounds timestamptz to
+     * microseconds -- into the next month -- so the decoder truncates it, and the month the writer
+     * counts (and provisions) is the month the row is stored in.
+     */
+    @Test
+    void a_stream_instant_just_before_a_month_start_is_counted_and_stored_in_one_month() {
+        partitionManager.ensurePartitionsAhead(YearMonth.of(2033, 7), 1);
+        Instant decoded = wqs.ingest.StrictJson.instant(
+                com.fasterxml.jackson.databind.node.TextNode.valueOf("2033-07-31T23:59:59.9999996Z"), "created");
+        assertThat(decoded).isEqualTo(Instant.parse("2033-07-31T23:59:59.999999Z"));
+
+        writer.apply(new ProjectionBatch(STREAM, List.of(tx("edge", decoded)), 1L));
+
+        assertThat(db().value("select \"occurredAt\" = cast(? as timestamptz) from \"wqPrjTransaction\" where \"sourceId\" = 'edge'",
+                Boolean.class, decoded.toString())).as("stored as decoded").isTrue();
+        assertThat(db().value("select tableoid::regclass::text from \"wqPrjTransaction\" where \"sourceId\" = 'edge'",
+                String.class)).contains("2033_07");
+        assertThat(db().column("select cast(\"month\" as text) from \"wqOwnerMonth\" where \"unit\" = 0", String.class))
+                .containsOnly("2033-07-01");
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 

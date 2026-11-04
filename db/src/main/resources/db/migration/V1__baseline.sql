@@ -160,6 +160,25 @@ create table "wqPrjPlay" (
     primary key ("ownerType", "userId", "batchId", "subBatchId")
 );
 
+-- Zero-amount rows waiting for their group (plan D6, final-review I1). A zero-amount row never creates
+-- a group, so one that arrives before its session (or play) has a non-zero row is counted here, and
+-- the group's first non-zero row takes the count into its "zeroTxCount" by primary key: creating a
+-- group never searches the owner's history. "sessionCount": the batch's zero-amount rows that arrived
+-- before its session existed (summed over the batch's rows); "playCount": this play's that arrived
+-- before the play existed ("subBatchId" '' = no play). Each count is set to 0 when its group takes it,
+-- and the row is deleted once both are 0 -- so any arrival order leaves the same rows. A row whose
+-- group never gets a non-zero row stays, as the zero-amount rows themselves do.
+create table "wqPrjPendingZero" (
+    "ownerType"     smallint not null,
+    "userId"        bigint   not null,
+    "batchId"       text     not null,
+    "subBatchId"    text     not null,
+    "sessionCount"  int      not null default 0,
+    "playCount"     int      not null default 0,
+    check ("sessionCount" >= 0 and "playCount" >= 0 and ("subBatchId" <> '' or "playCount" = 0)),
+    primary key ("ownerType", "userId", "batchId", "subBatchId")
+);
+
 -- ---------------------------------------------------------------------------------------------
 -- Owner-month counts
 -- ---------------------------------------------------------------------------------------------

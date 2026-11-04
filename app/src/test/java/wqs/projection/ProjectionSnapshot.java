@@ -20,7 +20,8 @@ public record ProjectionSnapshot(
         List<String> sessions,
         List<String> plays,
         List<String> counts,
-        List<String> pendingCancels) {
+        List<String> pendingCancels,
+        List<String> pendingZeros) {
 
     public static ProjectionSnapshot of(JdbcClient jdbc) {
         TestSql sql = new TestSql(jdbc);
@@ -29,7 +30,8 @@ public record ProjectionSnapshot(
                 all(sql, "wqPrjSession", "\"ownerType\", \"userId\", \"batchId\""),
                 all(sql, "wqPrjPlay", "\"ownerType\", \"userId\", \"batchId\", \"subBatchId\""),
                 all(sql, "wqOwnerMonth", COUNTER_KEY),
-                pendingCancelRows(sql));
+                pendingCancelRows(sql),
+                all(sql, "wqPrjPendingZero", "\"ownerType\", \"userId\", \"batchId\", \"subBatchId\""));
     }
 
     private static final String COUNTER_KEY =

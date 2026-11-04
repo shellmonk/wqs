@@ -55,6 +55,7 @@ public class ProjectionReader {
         this.properties = properties;
         this.metrics = metrics;
         for (HighLevelQuery q : highLevelQueries) {
+            ReadPolicy.requireOwn(q.view(), q.policy(), q);
             if (this.highLevelQueries.put(q.view(), q) != null) {
                 throw new IllegalStateException("more than one high-level query for view " + q.view());
             }
@@ -131,6 +132,7 @@ public class ProjectionReader {
      */
     <R> HighLevelPage<R> readHighLevel(
             HighLevelQuery q, HighLevelRequest req, BiFunction<JdbcClient, List<HighLevelKey>, List<R>> assemble) {
+        ReadPolicy.requireOwn(q.view(), q.policy(), q);
         if (q.view() != req.view()) {
             throw new IllegalArgumentException("query for " + q.view() + ", request for " + req.view());
         }
@@ -179,6 +181,7 @@ public class ProjectionReader {
     }
 
     private static Unit<TransactionKey> transactionUnit(Level0Query q, Level0Filter f) {
+        ReadPolicy.requireOwn(q.view(), q.policy(), q);
         return new Unit<>(PageUnit.TRANSACTION, q.view(), q.policy(), f.userId(), f.productTypes(), f.typeCodes(),
                 f.excludeCancelled(),
                 (tx, lo, hi) -> q.count(tx, f, lo, hi),

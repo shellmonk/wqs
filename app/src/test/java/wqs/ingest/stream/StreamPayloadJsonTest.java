@@ -183,6 +183,21 @@ class StreamPayloadJsonTest {
         assertThat(p.totalPostBalance()).isEqualTo(new BigDecimal("12.50"));
     }
 
+    /**
+     * Final-review M5: "created" is truncated to microseconds, Postgres's timestamptz precision (which
+     * would round 0.4 µs before a month start into the next month).
+     */
+    @Test
+    void created_is_truncated_to_microseconds_at_a_month_boundary() {
+        StreamPayload p = parse(with("createdContext.created", "\"2034-01-31T23:59:59.9999996Z\""));
+
+        assertThat(p.created()).isEqualTo(Instant.parse("2034-01-31T23:59:59.999999Z"));
+        assertThat(java.time.YearMonth.from(p.created().atZone(java.time.ZoneOffset.UTC)))
+                .isEqualTo(java.time.YearMonth.of(2034, 1));
+        assertThat(parse(with("createdContext.created", "\"2034-01-31T23:59:59.123456789Z\"")).created())
+                .isEqualTo(Instant.parse("2034-01-31T23:59:59.123456Z"));
+    }
+
     @Test
     void created_parse_failures_name_the_field() {
         assertThatThrownBy(() -> parse(with("createdContext.created", "\"yesterday\"")))

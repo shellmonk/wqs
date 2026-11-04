@@ -15,13 +15,18 @@ import org.springframework.transaction.annotation.Transactional;
  * holds the oldest-age gauge up. The cancel's own "wqPrjTransaction" row stays, an ordinary row; a
  * target arriving after this never sees the cancel.
  *
- * <p>Each removal is logged with ids, source and age only -- never the owner or an amount (no PII).
- * Run daily by the {@code pending-cancel-resolution} job; one transaction per run.
+ * <p>Each removal is logged with ids, source and age only -- never the owner or an amount (no PII):
+ * the first {@link #LOGGED_INDIVIDUALLY} of a run one WARN line each, the rest in one summary WARN line
+ * with their count (final-review M8), so a producer fault parking thousands of orphan cancels cannot
+ * flood the log. Run daily by the {@code pending-cancel-resolution} job; one transaction per run.
  */
 @Service
 public class PendingCancelResolution {
 
     private static final Logger log = LoggerFactory.getLogger(PendingCancelResolution.class);
+
+    /** How many removals of one run are logged one line each; the rest are counted in one line. */
+    static final int LOGGED_INDIVIDUALLY = 20;
 
     private final PendingCancelStore store;
     private final Clock clock;
@@ -39,13 +44,16 @@ public class PendingCancelResolution {
         }
         Instant now = clock.instant();
         List<PendingCancelStore.Expired> expired = store.expireParkedBefore(now.minus(threshold));
-        for (PendingCancelStore.Expired cancel : expired) {
+        for (PendingCancelStore.Expired cancel : expired.subList(0, Math.min(expired.size(), LOGGED_INDIVIDUALLY))) {
             log.warn("Resolved parked cancel {} (source {}, cancels {}) unapplied: its target did not arrive in {}"
                             + " (parked {} ago)",
                     cancel.cancelSourceId(), cancel.source(), cancel.targetSourceId(), threshold,
                     Duration.between(cancel.parkedAt(), now));
         }
-        if (!expired.isEmpty()) {
+        if (expired.size() > LOGGED_INDIVIDUALLY) {
+            log.warn("Resolved {} more parked cancels unapplied (not logged one by one): {} in all older than {}",
+                    expired.size() - LOGGED_INDIVIDUALLY, expired.size(), threshold);
+        } else if (!expired.isEmpty()) {
             log.info("Resolved {} parked cancels older than {}", expired.size(), threshold);
         }
         return expired.size();

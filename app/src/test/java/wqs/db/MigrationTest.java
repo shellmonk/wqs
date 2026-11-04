@@ -28,7 +28,7 @@ class MigrationTest extends PostgresTestBase {
      * and the locator are gone.
      */
     @Test
-    void the_schema_is_seven_tables_and_no_views() {
+    void the_schema_is_eight_tables_and_no_views() {
         List<String> tables = db().column("""
                 select c.relname from pg_class c
                 join pg_namespace n on n.oid = c.relnamespace
@@ -37,7 +37,7 @@ class MigrationTest extends PostgresTestBase {
                 order by c.relname
                 """, String.class);
         assertThat(tables).containsExactlyInAnyOrder("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqOwnerMonth",
-                "wqPrjPendingCancel", "wqIngestCursor", "wqDeadLetter");
+                "wqPrjPendingCancel", "wqPrjPendingZero", "wqIngestCursor", "wqDeadLetter");
         assertThat(db().column("""
                 select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
                 where n.nspname = 'public' and c.relkind in ('v', 'm')
@@ -69,7 +69,7 @@ class MigrationTest extends PostgresTestBase {
     /** Owner identity is ("ownerType", "userId"): the owner type leads every owner key and index. */
     @Test
     void owner_type_leads_every_owner_key() {
-        for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqOwnerMonth")) {
+        for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqOwnerMonth", "wqPrjPendingZero")) {
             assertThat(primaryKey(table)).as(table).startsWith("ownerType", "userId");
         }
         for (String table : List.of("wqPrjTransaction", "wqPrjPendingCancel",

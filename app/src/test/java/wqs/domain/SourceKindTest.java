@@ -15,6 +15,13 @@ class SourceKindTest {
         assertThat(SourceKind.LIMIT.code()).isEqualTo(5);
     }
 
+    /** Final-review M1: the producer batches game rounds only -- transactions and claimable prizes. */
+    @Test
+    void only_transactions_and_claimable_prizes_carry_a_batch() {
+        assertThat(java.util.Arrays.stream(SourceKind.values()).filter(SourceKind::carriesBatch))
+                .containsExactlyInAnyOrder(SourceKind.TRANSACTION, SourceKind.CLAIMABLE_PRIZE);
+    }
+
     @Test
     void codes_round_trip() {
         for (SourceKind kind : SourceKind.values()) {

@@ -31,6 +31,25 @@ public record ReadPolicy(Set<SourceKind> sources, short ownerType, boolean inclu
     public static final ReadPolicy CC = new ReadPolicy(
             EnumSet.allOf(SourceKind.class), ProjectionTransaction.PLAYER, false);
 
+    /** The policy of an endpoint: what every query class of that endpoint must hold. */
+    public static ReadPolicy of(ViewKind view) {
+        return switch (view) {
+            case WEB -> WEB;
+            case CC -> CC;
+        };
+    }
+
+    /**
+     * Fails unless {@code query} holds its endpoint's policy (final-review M2): a /web class wired with
+     * the /cc policy, or the reverse, fails at its first use instead of serving the other endpoint's data.
+     */
+    public static void requireOwn(ViewKind view, ReadPolicy held, Object query) {
+        if (!of(view).equals(held)) {
+            throw new IllegalStateException(query.getClass().getName() + " serves " + view
+                    + " but holds another endpoint's read policy");
+        }
+    }
+
     public ReadPolicy {
         Objects.requireNonNull(sources, "sources");
         if (sources.isEmpty()) {

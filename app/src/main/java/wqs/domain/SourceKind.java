@@ -22,6 +22,18 @@ public enum SourceKind {
         return code;
     }
 
+    /**
+     * Whether the producer emits this source inside a session (a batch id): only game rounds --
+     * transactions and claimable prizes -- are batched. Payments, manual adjustments and limits never
+     * are, so a batched row of one of them is a producer fault the writer dead-letters
+     * ({@code sessioned-source-not-on-every-view}). A fact about the producer, not about an endpoint:
+     * it is what keeps every member of a session of one kind, so a session's stored totals are those
+     * of the transactions any endpoint showing the session shows.
+     */
+    public boolean carriesBatch() {
+        return this == TRANSACTION || this == CLAIMABLE_PRIZE;
+    }
+
     public static SourceKind ofCode(int code) {
         for (SourceKind kind : values()) {
             if (kind.code == code) {

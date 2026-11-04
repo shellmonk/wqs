@@ -7,6 +7,7 @@ import java.util.stream.Collectors;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.db.TestSql;
 import wqs.domain.MoneyDirection;
+import wqs.domain.SourceKind;
 import wqs.read.ReadPolicy;
 
 /**
@@ -52,7 +53,12 @@ public final class ProjectionInvariants {
      * zero-amount; kind = source). Every owner type, like the stored rows: callers filter the owner.
      */
     public static String entries(ReadPolicy policy) {
-        String sources = policy.sources().stream().map(k -> Integer.toString(k.code()))
+        return entries(policy.sources().stream().map(SourceKind::code).toArray(Integer[]::new));
+    }
+
+    /** {@link #entries(ReadPolicy)} over source codes written out by hand (the naive oracle's). */
+    public static String entries(Integer... sourceCodes) {
+        String sources = java.util.Arrays.stream(sourceCodes).map(String::valueOf)
                 .collect(Collectors.joining(", "));
         return """
                 (select "ownerType", "userId", "startedAt" as "occurredAt", cast(0 as smallint) as "kind",
@@ -66,10 +72,10 @@ public final class ProjectionInvariants {
     }
 
     /** /web's entries; see {@link #entries}. */
-    public static final String WEB_TIMELINE = entries(ReadPolicy.WEB);
+    public static final String WEB_TIMELINE = entries(1, 3);
 
     /** /cc's entries; see {@link #entries}. */
-    public static final String CC_TIMELINE = entries(ReadPolicy.CC);
+    public static final String CC_TIMELINE = entries(1, 2, 3, 4, 5);
 
     /**
      * The transaction rows of /web's sources (what the dropped "wqPrjWebTransaction" view held), as a
@@ -388,6 +394,20 @@ public final class ProjectionInvariants {
                 order by 2, 3, 4, 5
                 """.formatted(sessioned, folded, compared, zeros))
                 .stream().map(ProjectionInvariants::describe).toList());
+        // Final-review I1: a zero-amount count waits in "wqPrjPendingZero" only while its group does not
+        // exist; the group's first non-zero row takes it. A waiting count beside its group is lost.
+        drift.addAll(sql.rows("""
+                select 'pending zero beside its group' as problem, p."ownerType", p."userId", p."batchId",
+                       p."subBatchId", p."sessionCount", p."playCount"
+                from "wqPrjPendingZero" p
+                where (p."sessionCount" > 0 and exists (select 1 from "wqPrjSession" s
+                          where s."ownerType" = p."ownerType" and s."userId" = p."userId" and s."batchId" = p."batchId"))
+                   or (p."playCount" > 0 and exists (select 1 from "wqPrjPlay" y
+                          where y."ownerType" = p."ownerType" and y."userId" = p."userId" and y."batchId" = p."batchId"
+                            and y."subBatchId" = p."subBatchId"))
+                   or (p."sessionCount" = 0 and p."playCount" = 0)
+                order by 2, 3, 4, 5
+                """).stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }
 

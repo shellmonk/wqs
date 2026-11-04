@@ -52,22 +52,31 @@ public final class NaiveOffsetOracle {
         return this.sql.rows(sql, binds.toArray()).stream().map(NaiveOffsetOracle::entry).toList();
     }
 
-    /** The endpoint's read policy, by hand: its sources, players only, no zero-amount rows. */
-    static ReadPolicy policy(ViewKind v) {
+    /** /web's sources, written out by hand (TRANSACTION, CLAIMABLE_PRIZE): never ReadPolicy.WEB. */
+    static final Integer[] WEB_SOURCES = {1, 3};
+    /** /cc's sources, written out by hand (every source): never ReadPolicy.CC. */
+    static final Integer[] CC_SOURCES = {1, 2, 3, 4, 5};
+    /** Both endpoints show players only (ownerType 1). */
+    static final short PLAYER = 1;
+
+    /**
+     * The endpoint's sources, written independently of {@link ReadPolicy} (final-review M2): a swapped
+     * or widened policy constant then disagrees with this oracle instead of moving it along.
+     */
+    static Integer[] sources(ViewKind v) {
         return switch (v) {
-            case WEB -> ReadPolicy.WEB;
-            case CC -> ReadPolicy.CC;
+            case WEB -> WEB_SOURCES.clone();
+            case CC -> CC_SOURCES.clone();
         };
     }
 
     private static String where(
             ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to, List<Object> binds) {
-        ReadPolicy p = policy(v);
         StringBuilder w = new StringBuilder("\"ownerType\" = ? and \"userId\" = ? and \"source\" = any(?)"
                 + " and not \"zeroAmount\" and \"occurredAt\" >= ?::timestamptz and \"occurredAt\" < ?::timestamptz");
-        binds.add(p.ownerType());
+        binds.add(PLAYER);
         binds.add(f.userId());
-        binds.add(sources(p));
+        binds.add(sources(v));
         // ISO-8601 with Z: an explicit UTC instant, independent of the session TimeZone.
         binds.add(from.toString());
         binds.add(to.toString());
@@ -115,14 +124,14 @@ public final class NaiveOffsetOracle {
 
     private static String highLevelTable(ViewKind v) {
         return switch (v) {
-            case WEB -> wqs.projection.ProjectionInvariants.WEB_TIMELINE + " web";
-            case CC -> wqs.projection.ProjectionInvariants.CC_TIMELINE + " cc";
+            case WEB -> wqs.projection.ProjectionInvariants.entries(WEB_SOURCES) + " web";
+            case CC -> wqs.projection.ProjectionInvariants.entries(CC_SOURCES) + " cc";
         };
     }
 
     private static String highLevelWhere(ViewKind v, HighLevelFilter f, Instant from, Instant to, List<Object> binds) {
         StringBuilder w = new StringBuilder("\"ownerType\" = ? and \"userId\" = ? and \"occurredAt\" >= ?::timestamptz and \"occurredAt\" < ?::timestamptz");
-        binds.add(policy(v).ownerType());
+        binds.add(PLAYER);
         binds.add(f.userId());
         binds.add(from.toString());
         binds.add(to.toString());
@@ -134,10 +143,6 @@ public final class NaiveOffsetOracle {
             binds.add(f.productTypes().toArray(String[]::new));
         }
         return w.toString();
-    }
-
-    private static Integer[] sources(ReadPolicy p) {
-        return p.sources().stream().map(SourceKind::code).toArray(Integer[]::new);
     }
 
     /** Same field rules as the view mappers: kind is the source's name, detail the raw JSON. */

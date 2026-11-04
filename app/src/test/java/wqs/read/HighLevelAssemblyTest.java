@@ -287,6 +287,32 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
      * unchanged; over every transaction-table scan node, (actual rows + rows removed by filter / index
      * recheck) x loops -- the rows the executor examined.
      */
+    /**
+     * Final-review M4, defence in depth: the session and play reads of assembly bind the policy's
+     * sources on "firstSource" too, so a key of a session /web does not show -- however it was built --
+     * is never assembled for /web. (The writer never stores such a session: only batched sources open
+     * one; it is inserted by hand.)
+     */
+    @Test
+    void assembly_binds_the_policy_sources_on_sessions_and_plays() {
+        db().execute("""
+                insert into "wqPrjSession" ("ownerType", "userId", "batchId", "startedAt", "endedAt", "currency",
+                        "firstSource", "firstSourceId", "txCount", "txCountExclCancelled", "playCount", "playCountExclCancelled")
+                values (1, 1, 'cc-only', '2034-02-10T13:00:00Z', '2034-02-10T13:00:00Z', 'EUR', 4, 'x', 1, 1, 1, 1)""");
+        db().execute("""
+                insert into "wqPrjPlay" ("ownerType", "userId", "batchId", "subBatchId", "startedAt", "endedAt", "currency",
+                        "firstSource", "firstSourceId", "txCount", "txCountExclCancelled")
+                values (1, 1, 'cc-only', 'cc-p', '2034-02-10T13:00:00Z', '2034-02-10T13:00:00Z', 'EUR', 4, 'x', 1, 1)""");
+        HighLevelKey key = new HighLevelKey(Instant.parse("2034-02-10T13:00:00Z"), (short) 0, "cc-only");
+        HighLevelAssembler.Nesting n = new HighLevelAssembler.Nesting(AggregationLevel.L2, Set.of(), false, TO);
+        org.springframework.jdbc.core.simple.JdbcClient tx = new StatementRecorder(readerDataSource).client();
+
+        assertThat(assembler.assemble(tx, webAssembly, USER, n, List.of(key))).as("/web").isEmpty();
+        List<HighLevelEntry> onCc = assembler.assemble(tx, ccAssembly, USER, n, List.of(key));
+        assertThat(onCc).as("/cc").singleElement().isInstanceOf(SessionView.class);
+        assertThat(((SessionView) onCc.get(0)).subitems()).extracting(PlayView::subBatchId).containsExactly("cc-p");
+    }
+
     @Test
     void transaction_fetch_examines_only_the_page_rows() throws Exception {
         reset();

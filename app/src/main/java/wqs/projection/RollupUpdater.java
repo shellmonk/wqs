@@ -5,9 +5,7 @@ import static wqs.projection.Binds.timestamptz;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
-import java.time.YearMonth;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.Objects;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -49,10 +47,10 @@ import wqs.domain.TransactionType;
  *       like any other.</li>
  *   <li>"zeroTxCount" = the group's zero-amount rows (plan D6), which are stored but add nothing
  *       else: no count, money, start or label, and they never create a group. A zero-amount row
- *       joining an existing group adds one; a group's first non-zero row counts the zero-amount
- *       rows already stored for it, so any arrival order converges. That count is bounded to the
- *       owner's months holding zero-amount rows ({@link OwnerMonths#withZeroAmounts}, usually none, and
- *       then no query runs), one "_batch" index probe per such month.</li>
+ *       joining an existing group adds one; one arriving before its group (or play) exists is counted in
+ *       "wqPrjPendingZero", and the group's first non-zero row takes that count, so any arrival order
+ *       converges. Both are primary-key operations on the group's own key: creating a group never
+ *       reads the owner's history (final-review I1).</li>
  *   <li>Keys are owner keys: ("ownerType", "userId", "batchId"[, "subBatchId"]).</li>
  *   <li>"currency" = the first-arriving transaction's. A session is single-currency: a transaction of another
  *       currency is dead-lettered before it gets here ({@link IngestRules}), so every transaction agrees
@@ -143,22 +141,6 @@ public class RollupUpdater {
             returning "productId", "productType", "firstSource", "currency", "txCountExclCancelled"
             """;
 
-    /**
-     * The zero-amount rows already stored for a group that is being created, one "_batch" index probe
-     * per month of the owner's that holds zero-amount rows (the month bounds as two parallel arrays, as
-     * the cancel lookup binds them; "offset 0" keeps each a per-month probe Postgres prunes to its
-     * partition). Cancellations never fold, so a zero-amount cancellation is not counted either.
-     * {@code %s}: the play predicate or nothing.
-     */
-    static final String ZERO_ROWS = """
-            select count(*) from unnest(cast(? as timestamptz[]), cast(? as timestamptz[])) as "m" ("fromAt", "toAt")
-            cross join lateral (
-                select 1 from "wqPrjTransaction"
-                where "ownerType" = ? and "userId" = ? and "batchId" = ?%s
-                  and "occurredAt" >= "m"."fromAt" and "occurredAt" < "m"."toAt"
-                  and "zeroAmount" and "cancels" is null
-                offset 0) as "z"
-            """;
     private static final String PLAY_ZERO = """
             update "wqPrjPlay" set "zeroTxCount" = "wqPrjPlay"."zeroTxCount" + 1
             where "ownerType" = ? and "userId" = ? and "batchId" = ? and "subBatchId" = ?
@@ -168,16 +150,47 @@ public class RollupUpdater {
             where "ownerType" = ? and "userId" = ? and "batchId" = ?
             """;
 
+    /** Counts a zero-amount row whose session (sessionCount) or play (playCount) does not exist yet. */
+    private static final String PEND_ZERO = """
+            insert into "wqPrjPendingZero" ("ownerType", "userId", "batchId", "subBatchId", "sessionCount", "playCount")
+            values (?, ?, ?, ?, ?, ?)
+            on conflict ("ownerType", "userId", "batchId", "subBatchId") do update set
+                "sessionCount" = "wqPrjPendingZero"."sessionCount" + excluded."sessionCount",
+                "playCount" = "wqPrjPendingZero"."playCount" + excluded."playCount"
+            """;
+    /** A new play's waiting zero-amount rows, by primary key; the row is locked until the play takes them. */
+    static final String PENDING_PLAY_ZEROS = """
+            select "playCount" from "wqPrjPendingZero"
+            where "ownerType" = ? and "userId" = ? and "batchId" = ? and "subBatchId" = ?
+            for update
+            """;
+    /** A new session's waiting zero-amount rows: the batch's rows, a primary-key prefix range. */
+    static final String PENDING_SESSION_ZEROS = """
+            select "sessionCount" from "wqPrjPendingZero"
+            where "ownerType" = ? and "userId" = ? and "batchId" = ?
+            for update
+            """;
+    private static final String TAKE_PLAY_ZEROS = """
+            update "wqPrjPendingZero" set "playCount" = 0
+            where "ownerType" = ? and "userId" = ? and "batchId" = ? and "subBatchId" = ?
+            """;
+    private static final String TAKE_SESSION_ZEROS = """
+            update "wqPrjPendingZero" set "sessionCount" = 0
+            where "ownerType" = ? and "userId" = ? and "batchId" = ? and "sessionCount" > 0
+            """;
+    private static final String DROP_TAKEN_ZEROS = """
+            delete from "wqPrjPendingZero"
+            where "ownerType" = ? and "userId" = ? and "batchId" = ? and "sessionCount" = 0 and "playCount" = 0
+            """;
+
     private static final RowMapper<SessionLabel> SESSION_LABEL = (rs, n) -> new SessionLabel(
             rs.getString("productId"), rs.getString("productType"), rs.getShort("firstSource"),
             rs.getString("currency"), rs.getInt("txCountExclCancelled"));
 
     private final JdbcClient jdbc;
-    private final OwnerMonths ownerMonths;
 
-    public RollupUpdater(JdbcClient jdbc, OwnerMonths ownerMonths) {
+    public RollupUpdater(JdbcClient jdbc) {
         this.jdbc = jdbc;
-        this.ownerMonths = ownerMonths;
     }
 
     /**
@@ -224,8 +237,12 @@ public class RollupUpdater {
             Integer survivors = null;
             OffsetDateTime playStart = lockPlay(transaction);
             if (playStart == null) {
-                survivors = claimPlay(c, zeroRows(transaction, true));
+                int waiting = pendingPlayZeros(transaction);
+                survivors = claimPlay(c, waiting);
                 playIsNew = survivors != null;
+                if (playIsNew && waiting > 0) {
+                    takeZeros(TAKE_PLAY_ZEROS, transaction, true);
+                }
                 if (!playIsNew) {
                     playStart = lockPlay(transaction); // a concurrent writer created it first
                 }
@@ -242,7 +259,11 @@ public class RollupUpdater {
         SessionKey before = lockSession(transaction);
         SessionLabel label = null;
         if (before == null) {
-            label = claimSession(c, playIsNew, playIsLive, zeroRows(transaction, false));
+            int waiting = pendingSessionZeros(transaction);
+            label = claimSession(c, playIsNew, playIsLive, waiting);
+            if (label != null && waiting > 0) {
+                takeZeros(TAKE_SESSION_ZEROS, transaction, false);
+            }
             if (label == null) {
                 before = lockSession(transaction); // a concurrent writer created it first
             }
@@ -277,33 +298,63 @@ public class RollupUpdater {
     }
 
     /**
-     * A zero-amount row joins its play and session as "zeroTxCount" only (plan D6); a group that
-     * does not exist yet counts it when its first non-zero row creates it ({@link #zeroRows}).
+     * A zero-amount row joins its play and session as "zeroTxCount" only (plan D6). A group that does
+     * not exist yet gets it through "wqPrjPendingZero", taken when its first non-zero row creates it. A
+     * play exists only inside its session, so a missing session means a missing play too.
      */
     private void countZero(ProjectionTransaction transaction) {
+        int playMissing = 0;
         if (transaction.hasPlay()) {
-            jdbc.sql(PLAY_ZERO)
+            playMissing = jdbc.sql(PLAY_ZERO)
                     .params(transaction.ownerType(), transaction.userId(), transaction.batchId(), transaction.subBatchId())
+                    .update() == 0 ? 1 : 0;
+        }
+        int sessionMissing = jdbc.sql(SESSION_ZERO)
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId())
+                .update() == 0 ? 1 : 0;
+        if (sessionMissing + playMissing > 0) {
+            jdbc.sql(PEND_ZERO)
+                    .params(transaction.ownerType(), transaction.userId(), transaction.batchId(),
+                            pendingPlayKey(transaction), sessionMissing, playMissing)
                     .update();
         }
-        jdbc.sql(SESSION_ZERO)
+    }
+
+    /** The zero-amount rows waiting for the transaction's play; 0 in the common case (no pending row). */
+    private int pendingPlayZeros(ProjectionTransaction transaction) {
+        return jdbc.sql(PENDING_PLAY_ZEROS)
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId(), pendingPlayKey(transaction))
+                .query(Integer.class)
+                .optional()
+                .orElse(0);
+    }
+
+    /** The zero-amount rows waiting for the transaction's session; 0 in the common case (no pending row). */
+    private int pendingSessionZeros(ProjectionTransaction transaction) {
+        return jdbc.sql(PENDING_SESSION_ZEROS)
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId())
+                .query(Integer.class)
+                .list()
+                .stream()
+                .mapToInt(Integer::intValue)
+                .sum();
+    }
+
+    /** The new group has taken its waiting count: zero it and drop the batch's rows nothing waits on. */
+    private void takeZeros(String take, ProjectionTransaction transaction, boolean play) {
+        var spec = jdbc.sql(take).params(transaction.ownerType(), transaction.userId(), transaction.batchId());
+        if (play) {
+            spec = spec.param(pendingPlayKey(transaction));
+        }
+        spec.update();
+        jdbc.sql(DROP_TAKEN_ZEROS)
                 .params(transaction.ownerType(), transaction.userId(), transaction.batchId())
                 .update();
     }
 
-    /** The zero-amount rows stored so far for the transaction's play ({@code play}) or session. */
-    private int zeroRows(ProjectionTransaction transaction, boolean play) {
-        List<YearMonth> months = ownerMonths.withZeroAmounts(transaction.ownerType(), transaction.userId());
-        if (months.isEmpty()) {
-            return 0; // the common case: the owner has no zero-amount row, so nothing to count
-        }
-        String[][] bounds = OwnerMonths.bounds(months);
-        var spec = jdbc.sql(ZERO_ROWS.formatted(play ? " and \"subBatchId\" = ?" : ""))
-                .params(bounds[0], bounds[1], transaction.ownerType(), transaction.userId(), transaction.batchId());
-        if (play) {
-            spec = spec.param(transaction.subBatchId());
-        }
-        return spec.query(Integer.class).single();
+    /** The pending row's play key: the play's subBatchId, '' for a row that joins no play. */
+    private static String pendingPlayKey(ProjectionTransaction transaction) {
+        return transaction.hasPlay() ? transaction.subBatchId() : "";
     }
 
     /** The play's startedAt, its row locked for the rest of the transaction; null if no play yet. */

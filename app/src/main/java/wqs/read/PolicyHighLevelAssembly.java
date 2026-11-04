@@ -33,7 +33,8 @@ public abstract class PolicyHighLevelAssembly implements HighLevelTransactionQue
     private static final String SESSION_TRANSACTIONS = "select " + TRANSACTION_COLUMNS + """
             from unnest(cast(:ids as text[])) as "wanted" ("id")
             join "wqPrjSession" on ("wqPrjSession"."ownerType" = :ownerType and "wqPrjSession"."userId" = :userId
-                   and "wqPrjSession"."batchId" = "wanted"."id")
+                   and "wqPrjSession"."batchId" = "wanted"."id"
+                   and "wqPrjSession"."firstSource" = any (cast(:sources as smallint[])))
             join "wqPrjTransaction" on ("wqPrjTransaction"."ownerType" = :ownerType
                    and "wqPrjTransaction"."userId" = :userId
                    and "wqPrjTransaction"."batchId" = "wqPrjSession"."batchId"

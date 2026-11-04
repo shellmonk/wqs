@@ -386,12 +386,13 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     private RollupResult apply(ProjectionTransaction transaction) {
-        return inTx().execute(status -> new RollupUpdater(jdbc(), new OwnerMonths(jdbc())).applyTransaction(transaction));
+        return inTx().execute(status -> new RollupUpdater(jdbc()).applyTransaction(transaction));
     }
 
     private void clean() {
         db().execute("delete from \"wqPrjPlay\"");
         db().execute("delete from \"wqPrjSession\"");
+        db().execute("delete from \"wqPrjPendingZero\"");
     }
 
     private Map<String, List<Map<String, Object>>> snapshot() {

@@ -65,7 +65,7 @@ public abstract class PostgresTestBase {
     protected static void clearProjection() {
         for (String table : java.util.List.of(
                 "wqPrjTransaction", "wqPrjSession", "wqPrjPlay",
-                "wqOwnerMonth", "wqPrjPendingCancel",
+                "wqOwnerMonth", "wqPrjPendingCancel", "wqPrjPendingZero",
                 "wqIngestCursor", "wqDeadLetter")) {
             db().execute("delete from \"" + table + "\"");
         }

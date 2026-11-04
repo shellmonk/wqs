@@ -17,18 +17,18 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
 
 /**
- * Test-only JDBC-level statement recorder over the reader pool: {@link #client()} is a
+ * Test-only JDBC-level statement recorder over a pool (the reader's, or the writer's): {@link #client()} is a
  * {@link JdbcClient} whose statements join the current reader transaction (as the app's
  * {@code @ReaderJdbc} client does) and are recorded with their binds, so a test can count them
  * and re-run each one under {@code explain}.
  */
-final class StatementRecorder {
+public final class StatementRecorder {
 
     /** One bind call on a prepared statement ({@code setLong(1, 7)}, {@code setObject(2, x)}, ...). */
-    record Bind(Method setter, Object[] args) {}
+    public record Bind(Method setter, Object[] args) {}
 
     /** One executed statement: its SQL text as sent and the binds it ran with. */
-    record Executed(String sql, List<Bind> binds) {}
+    public record Executed(String sql, List<Bind> binds) {}
 
     private static final Set<String> EXECUTE = Set.of(
             "execute", "executeQuery", "executeUpdate", "executeLargeUpdate", "executeBatch", "executeLargeBatch");
@@ -37,7 +37,7 @@ final class StatementRecorder {
     private final JdbcClient client;
     private final List<Executed> executed = new ArrayList<>();
 
-    StatementRecorder(DataSource reader) {
+    public StatementRecorder(DataSource reader) {
         this.reader = reader;
         DataSource joining = new TransactionAwareDataSourceProxy(reader);
         DataSource recording = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(),
@@ -48,15 +48,15 @@ final class StatementRecorder {
         this.client = JdbcClient.create(recording);
     }
 
-    JdbcClient client() {
+    public JdbcClient client() {
         return client;
     }
 
-    List<Executed> executed() {
+    public List<Executed> executed() {
         return executed;
     }
 
-    int count() {
+    public int count() {
         return executed.size();
     }
 
@@ -64,7 +64,7 @@ final class StatementRecorder {
      * Runs {@code prefix + " " + e.sql()} (e.g. {@code "explain"}) with {@code e}'s binds on a
      * fresh reader connection, returning the first column of every row.
      */
-    List<String> rerun(String prefix, Executed e) throws SQLException {
+    public List<String> rerun(String prefix, Executed e) throws SQLException {
         try (Connection c = reader.getConnection();
              PreparedStatement ps = c.prepareStatement(prefix + " " + e.sql())) {
             for (Bind b : e.binds()) {

@@ -63,9 +63,12 @@ public class HighLevelAssembler {
             (k.kind() == 0 ? sessionKeys : transactionKeys).add(k);
         }
 
-        // The owner is the endpoint's (its read policy, plan D1); rollups hold no zero-amount sum.
-        short ownerType = transactions.policy().ownerType();
-        Map<HighLevelKey, SessionRow> sessions = sessions(tx, ownerType, userId, sessionKeys);
+        // The owner and sources are the endpoint's (its read policy, plan D1); rollups hold no
+        // zero-amount sum. The keys come from the same policy's key query, so the sources bound here
+        // filter nothing today: defence in depth should keys ever come from elsewhere (final-review M4).
+        ReadPolicy policy = transactions.policy();
+        ReadPolicy.requireOwn(transactions.view(), policy, transactions);
+        Map<HighLevelKey, SessionRow> sessions = sessions(tx, policy, userId, sessionKeys);
         Map<String, List<PlayRow>> plays = Map.of();
         Map<String, List<TxView>> txsByBatch = Map.of();
         Map<String, Map<String, List<TxView>>> txsByPlay = Map.of();
@@ -75,7 +78,7 @@ public class HighLevelAssembler {
             Map<String, SessionRow> byBatch = new HashMap<>();
             sessions.values().forEach(s -> byBatch.put(s.batchId(), s));
             if (n.level() == AggregationLevel.L2) {
-                plays = plays(tx, ownerType, userId, byBatch, n.excludeCancelled());
+                plays = plays(tx, policy, userId, byBatch, n.excludeCancelled());
             }
             Map<String, Set<String>> listedPlays = new HashMap<>();
             plays.forEach((b, ps) -> ps.forEach(
@@ -151,7 +154,7 @@ public class HighLevelAssembler {
      * dropped.
      */
     private static Map<HighLevelKey, SessionRow> sessions(
-            JdbcClient tx, short ownerType, long userId, List<HighLevelKey> keys) {
+            JdbcClient tx, ReadPolicy policy, long userId, List<HighLevelKey> keys) {
         if (keys.isEmpty()) {
             return Map.of();
         }
@@ -160,7 +163,8 @@ public class HighLevelAssembler {
         tx.sql(SESSIONS)
                 .param("ids", batchIds(keys.stream().map(HighLevelKey::refId)
                         .collect(LinkedHashSet::new, Set::add, Set::addAll)))
-                .param("ownerType", ownerType)
+                .param("ownerType", policy.ownerType())
+                .param("sources", policy.sourceCodes())
                 .param("userId", userId)
                 .query(HighLevelAssembler::sessionRow)
                 .list()
@@ -178,12 +182,13 @@ public class HighLevelAssembler {
      * per session, by the primary key prefix ("userId", "batchId").
      * Under excludeCancelled a play with no surviving transaction is omitted.
      */
-    private static Map<String, List<PlayRow>> plays(JdbcClient tx, short ownerType, long userId,
+    private static Map<String, List<PlayRow>> plays(JdbcClient tx, ReadPolicy policy, long userId,
             Map<String, SessionRow> sessions, boolean excludeCancelled) {
         Map<String, List<PlayRow>> out = new LinkedHashMap<>();
         JdbcClient.StatementSpec spec = tx.sql(excludeCancelled ? PLAYS_EXCL : PLAYS)
                 .param("ids", batchIds(sessions.keySet()))
-                .param("ownerType", ownerType)
+                .param("ownerType", policy.ownerType())
+                .param("sources", policy.sourceCodes())
                 .param("userId", userId);
         if (excludeCancelled) {
             spec = spec.param("zero", 0);
@@ -210,6 +215,7 @@ public class HighLevelAssembler {
             from "wqPrjSession"
             join unnest(cast(:ids as text[])) as "wanted" ("id") on "wqPrjSession"."batchId" = "wanted"."id"
             where "wqPrjSession"."ownerType" = :ownerType and "wqPrjSession"."userId" = :userId
+              and "wqPrjSession"."firstSource" = any (cast(:sources as smallint[]))
             """;
 
     private static final String PLAYS_FROM = """
@@ -219,7 +225,8 @@ public class HighLevelAssembler {
                    "wqPrjPlay"."totalPlaysExclCancelled", "wqPrjPlay"."totalWinsExclCancelled", "wqPrjPlay"."netExclCancelled",
                    "wqPrjPlay"."productType", "wqPrjPlay"."firstSourceId", "wqPrjPlay"."firstSource"
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqPrjPlay" on ("wqPrjPlay"."ownerType" = :ownerType and "wqPrjPlay"."userId" = :userId and "wqPrjPlay"."batchId" = "wanted"."id")
+            join "wqPrjPlay" on ("wqPrjPlay"."ownerType" = :ownerType and "wqPrjPlay"."userId" = :userId and "wqPrjPlay"."batchId" = "wanted"."id"
+                   and "wqPrjPlay"."firstSource" = any (cast(:sources as smallint[])))
             """;
     private static final String PLAYS_ORDER = """
             order by "wqPrjPlay"."startedAt" desc, "wqPrjPlay"."subBatchId" desc

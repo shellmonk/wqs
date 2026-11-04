@@ -12,6 +12,11 @@ import wqs.domain.ProjectionTransaction;
  * dead-lettered by the writer and nothing of it is written -- not even its transaction row -- while
  * the rest of its batch applies.
  * <ul>
+ *   <li>{@code sessioned-source-not-on-every-view} (final-review M1; the name predates the views): a
+ *       transaction carrying a batchId whose source the producer never batches
+ *       ({@link wqs.domain.SourceKind#carriesBatch}: only TRANSACTION and CLAIMABLE_PRIZE). Without it a
+ *       batched payment would fold its amount into a session's stored totals, which every endpoint
+ *       showing the session shows.</li>
  *   <li>{@code einstant-unsessioned} (plan D7, spec 7.4): a transaction whose product type is eInstant
  *       ({@link EInstantProperties}) and that has no batchId. The ingest half of P-7.</li>
  *   <li>{@code currency-mismatch} (plan D6, O-4): a sessioned transaction whose currency differs from its
@@ -52,6 +57,9 @@ public class IngestRules {
     public String rejection(ProjectionTransaction transaction) {
         if (transaction.isCancellation() || transaction.isZeroAmount()) {
             return null; // exempt from every rule, see the class comment
+        }
+        if (transaction.isSessioned() && !transaction.source().carriesBatch()) {
+            return RejectedTransactionDeadLetters.SESSIONED_SOURCE_NOT_ON_EVERY_VIEW;
         }
         if (!transaction.isSessioned()) {
             return eInstant.isEInstant(transaction.productType()) ? RejectedTransactionDeadLetters.EINSTANT_UNSESSIONED : null;
