@@ -2,6 +2,7 @@ package wqs.repository;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -13,6 +14,66 @@ import wqs.entity.SessionEntity;
 public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
 
     Optional<SessionEntity> findByOwnerTypeAndUserIdAndBatchId(short ownerType, long userId, String batchId);
+
+    /** A top-level entry of a level-1/2 page: {@code kind} 0 is a session, 1 a transaction without one. */
+    interface PageEntry {
+        Integer getKind();
+
+        Long getId();
+    }
+
+    String ENTRIES = """
+            select 0 as "kind", s."sessionId" as "id", s."startedAt" as "at"
+            from "wqPrjSession" s
+            where s."userId" = :userId and s."ownerType" = :ownerType
+              and s."startedAt" >= :from and s."startedAt" < :to
+              and (not :excludeCancelled or s."txCountExclCancelled" > 0)
+              and (:anyProductType or s."productType" = any(cast(:productTypes as text[])))
+              and (:anyType or exists (
+                    select 1 from "wqPrjTransaction" m
+                    where m."userId" = s."userId" and m."ownerType" = s."ownerType" and m."batchId" = s."batchId"
+                      and m."occurredAt" between s."startedAt" and s."endedAt"
+                      and not m."zeroAmount" and (not :excludeCancelled or not m."cancelled")
+                      and m."type" = any(cast(:transactionTypes as text[]))))
+            union all
+            select 1, t."transactionId", t."occurredAt"
+            from "wqPrjTransaction" t
+            where t."userId" = :userId and t."ownerType" = :ownerType and t."batchId" is null
+              and t."occurredAt" >= :from and t."occurredAt" < :to
+              and t."source" = any(cast(:sources as int[])) and not t."zeroAmount"
+              and (not :excludeCancelled or not t."cancelled")
+              and (:anyProductType or t."productType" = any(cast(:productTypes as text[])))
+              and (:anyType or t."type" = any(cast(:transactionTypes as text[])))
+            """;
+
+    /**
+     * One page of level-1/2 entries: the owner's sessions (by start) merged with their transactions
+     * that have no session, newest first; at the same instant a transaction comes before a session.
+     * A session's totals are stored, so a filter only decides whether it is listed: it must have a
+     * visible row of a requested type. Empty filter arrays mean "any" (the flags say so).
+     */
+    @Query(nativeQuery = true, value = "select e.\"kind\", e.\"id\" from (" + ENTRIES + ") e "
+            + "order by e.\"at\" desc, e.\"kind\" desc, e.\"id\" desc limit :limit offset :offset")
+    List<PageEntry> findPageEntries(@Param("userId") long userId, @Param("ownerType") short ownerType,
+                                    @Param("from") Instant from, @Param("to") Instant to,
+                                    @Param("sources") Integer[] sources,
+                                    @Param("excludeCancelled") boolean excludeCancelled,
+                                    @Param("anyProductType") boolean anyProductType,
+                                    @Param("productTypes") String[] productTypes,
+                                    @Param("anyType") boolean anyType,
+                                    @Param("transactionTypes") String[] transactionTypes,
+                                    @Param("limit") int limit, @Param("offset") long offset);
+
+    /** The number of entries {@link #findPageEntries} pages through: a plain COUNT(*). */
+    @Query(nativeQuery = true, value = "select count(*) from (" + ENTRIES + ") e")
+    long countPageEntries(@Param("userId") long userId, @Param("ownerType") short ownerType,
+                          @Param("from") Instant from, @Param("to") Instant to,
+                          @Param("sources") Integer[] sources,
+                          @Param("excludeCancelled") boolean excludeCancelled,
+                          @Param("anyProductType") boolean anyProductType,
+                          @Param("productTypes") String[] productTypes,
+                          @Param("anyType") boolean anyType,
+                          @Param("transactionTypes") String[] transactionTypes);
 
     /**
      * Adds one row to its session, creating the session on its first row, and returns the

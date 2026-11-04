@@ -30,6 +30,7 @@ create table "wqPrjTransaction" (
     "batchId"              text,
     "subBatchId"           text,
     "transactionReference" text,
+    "cancelled"            boolean       not null default false,
     "detail"               jsonb         not null default '{}',
     "ingestedAt"           timestamptz   not null default now(),
     -- A zero-amount stream transaction: stored, never shown, not counted in session or play totals.
@@ -39,6 +40,13 @@ create table "wqPrjTransaction" (
 ) partition by range ("occurredAt");
 
 create sequence "wqTransactionIdSeq" as bigint;
+
+-- Levels 1-2 page through sessions merged with the rows that have no session; this index serves
+-- the second half. A session's own rows are found by batch, bounded by the session's time span.
+create index "wqPrjTransaction_unsessioned" on "wqPrjTransaction" ("userId", "occurredAt" desc, "transactionId" desc)
+    where "batchId" is null;
+create index "wqPrjTransaction_session" on "wqPrjTransaction" ("userId", "batchId", "occurredAt")
+    where "batchId" is not null;
 
 -- ---------------------------------------------------------------------------------------------
 -- Sessions and plays
@@ -72,6 +80,8 @@ create table "wqPrjSession" (
     "netExclCancelled"         numeric(20,4) not null default 0,
     constraint "wqPrjSession_batchKey" unique ("ownerType", "userId", "batchId")
 );
+
+create index "wqPrjSession_byStart" on "wqPrjSession" ("userId", "startedAt" desc, "sessionId" desc);
 
 create table "wqPrjPlay" (
     "playId"                   bigint        generated always as identity primary key,

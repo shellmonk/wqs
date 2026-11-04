@@ -2,6 +2,8 @@ package wqs.repository;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -17,6 +19,8 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
 
         Boolean getCreated();
     }
+
+    List<PlayEntity> findBySessionIdInOrderByStartedAtDescPlayIdDesc(Collection<Long> sessionIds);
 
     Optional<PlayEntity> findByOwnerTypeAndUserIdAndBatchIdAndSubBatchId(short ownerType, long userId,
                                                                          String batchId, String subBatchId);

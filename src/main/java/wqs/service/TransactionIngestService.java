@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import wqs.dto.Contribution;
+import wqs.dto.TotalsIncrement;
 import wqs.dto.NewTransaction;
 import wqs.exception.RejectedException;
 import wqs.repository.PlayRepository;
@@ -55,12 +55,12 @@ public class TransactionIngestService {
             return Outcome.DUPLICATE; // already projected, totals included
         }
         if (t.batchId() != null && !t.zeroAmount()) {
-            addToSessionAndPlay(Contribution.of(t));
+            addToSessionAndPlay(TotalsIncrement.of(t));
         }
         return Outcome.INSERTED;
     }
 
-    private void addToSessionAndPlay(Contribution c) {
+    private void addToSessionAndPlay(TotalsIncrement c) {
         long sessionId = sessions.addRow(c.ownerType(), c.userId(), c.batchId(), c.occurredAt(), c.productId(),
                         c.productType(), c.currency(), c.plays(), c.wins(), c.net())
                 .orElseThrow(() -> currencyMismatch("session"));

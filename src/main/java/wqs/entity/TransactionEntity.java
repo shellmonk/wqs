@@ -43,6 +43,7 @@ public class TransactionEntity {
     private String batchId;
     private String subBatchId;
     private String transactionReference;
+    private boolean cancelled;
     @JdbcTypeCode(SqlTypes.JSON)
     private Map<String, String> detail;
     private Instant ingestedAt;
