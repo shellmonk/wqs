@@ -117,8 +117,16 @@ public class StreamMessageDecoder {
         if (!node.isTextual()) {
             throw new DecodeException(path + " must be a string");
         }
-        String value = node.textValue().strip();
+        String value = noNul(node.textValue(), path).strip();
         return value.isEmpty() ? null : value;
+    }
+
+    /** Postgres text and jsonb cannot hold NUL, so a write would fail on it, every time. */
+    private static String noNul(String value, String path) {
+        if (value.indexOf('\u0000') >= 0) {
+            throw new DecodeException(path + " contains a NUL character");
+        }
+        return value;
     }
 
     private static String requiredText(JsonNode parent, String path) {
@@ -166,7 +174,7 @@ public class StreamMessageDecoder {
             if (node == null || node.isNull() || node.isContainerNode()) {
                 continue;
             }
-            String value = node.isTextual() ? node.textValue().strip() : node.asText();
+            String value = node.isTextual() ? noNul(node.textValue(), path).strip() : node.asText();
             if (!value.isEmpty()) {
                 detail.put(path, value);
             }

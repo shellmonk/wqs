@@ -122,6 +122,21 @@ class StreamIngestTest extends IntegrationTest {
     }
 
     @Test
+    void a_nul_character_cannot_stall_the_stream() throws Exception {
+        String id = nextId();
+        ObjectNode node = (ObjectNode) mapper.readTree(message("transfer-out.json", id, "1-" + id, "2026-09-06T00:00:00Z"));
+        node.put("description", "A\u0000B");
+        byte[] body = mapper.writeValueAsBytes(node);
+        publish(body);
+        String after = nextId();
+        publish(message("transfer-out.json", after, "1-" + after, "2026-09-06T00:00:00Z"));
+
+        awaitRow(after);
+        assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetter\" where \"bodySha256\" = :sha")
+                .param("sha", DeadLetters.sha256(body)).query(String.class).single()).isEqualTo("unreadable");
+    }
+
+    @Test
     void a_garbage_timestamp_is_dead_lettered_and_creates_no_partition() throws Exception {
         String id = nextId();
         publish(message("transfer-out.json", id, "1-" + id, "2199-01-01T00:00:00Z"));

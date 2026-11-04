@@ -136,6 +136,18 @@ class StreamMessageDecoderTest {
     }
 
     @Test
+    void rejects_a_nul_character_in_a_column_field() {
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n).put("productId", "A\u0000B")))
+                .isInstanceOf(DecodeException.class).hasMessage("productId contains a NUL character");
+    }
+
+    @Test
+    void rejects_a_nul_character_in_a_detail_field() {
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n).put("description", "A\u0000B")))
+                .isInstanceOf(DecodeException.class).hasMessage("description contains a NUL character");
+    }
+
+    @Test
     void rejects_a_json_array() {
         assertThatThrownBy(() -> decoder.decode("[]".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DecodeException.class).hasMessage("not a JSON object");

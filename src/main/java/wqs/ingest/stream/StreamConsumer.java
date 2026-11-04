@@ -189,24 +189,42 @@ public class StreamConsumer implements SmartLifecycle {
      * A readable message whose write failed for a non-transient reason (a constraint, a bug). It is
      * dead-lettered in a fresh transaction so the stream moves on. The error keeps only the
      * exception class and SQLState: a database message can quote the row's values.
+     *
+     * <p>Only a transient failure of this fallback is retried. Any other failure means even the
+     * decoded fields cannot be stored, so the message is recorded by hash only. Nothing derived
+     * from the message can keep this loop alive.
      */
     private void deadLetterFailedWrite(long offset, byte[] body, RuntimeException failure) {
         String feed = properties.name();
         String error = failure.getClass().getSimpleName() + sqlState(failure).map(s -> " SQLState " + s).orElse("");
         log.error("Stream offset {} dead-lettered: write failed ({})", offset, error);
+        boolean withFields = true;
         Duration backoff = Duration.ofMillis(100);
         while (running) {
+            boolean fields = withFields;
             try {
                 tx.executeWithoutResult(status -> {
-                    StreamMessage m = decoder.decode(body); // it decoded before, so it decodes again
-                    deadLetters.rejected(feed, offset, m.id(), "write-failed", error, m);
+                    if (fields) {
+                        StreamMessage m = decoder.decode(body); // it decoded before, so it decodes again
+                        deadLetters.rejected(feed, offset, m.id(), "write-failed", error, m);
+                    } else {
+                        deadLetters.unreadable(feed, offset, body, "write-failed", error);
+                    }
                     cursor.saveStreamOffset(feed, offset);
                 });
                 lastOffset = offset;
                 meters.counter("wqs.ingest.stream.messages", "outcome", "dead_lettered").increment();
                 return;
             } catch (RuntimeException e) {
-                log.warn("Cannot record dead letter for stream offset {} ({}); retrying", offset, e.getClass().getSimpleName());
+                if (!TransientFailures.isTransient(e)) {
+                    if (!fields) {
+                        // Hash-only insert of fixed values failed: the database itself is broken.
+                        log.error("Cannot record dead letter for stream offset {} ({}); retrying", offset, e.getClass().getSimpleName());
+                    }
+                    withFields = false;
+                } else {
+                    log.warn("Transient failure recording dead letter for stream offset {}; retrying", offset);
+                }
                 if (!sleep(backoff)) {
                     return;
                 }
