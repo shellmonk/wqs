@@ -312,41 +312,49 @@ Two hazards follow from a timestamp-only cursor:
 
 ## 5. Data model
 
-### 5.0 Current schema (simplified 2026-11-03) — authoritative
+### 5.0 Current schema (owner-month model, 2026-11-04) — authoritative
 
-The model was simplified from 15 tables to 9 before go-live (plan
-`docs/superpowers/plans/2026-11-03-wqs-model-simplification.md`; picture:
-https://claude.ai/artifact/LzwjQAuEYdxZZNy4GF7yA2). Where §5.1–§5.7 and §7.5–§7.7 below name the
-older tables or describe month counters, a group locator or per-view tables, **this section wins**.
+The model was simplified twice before go-live: 15 → 9 tables (plan
+`docs/superpowers/plans/2026-11-03-wqs-model-simplification.md`), then 9 → 7 tables plus one small helper (plan
+`docs/superpowers/plans/2026-11-04-wqs-owner-month-model.md`; picture:
+https://claude.ai/artifact/LzwjQAuEYdxZZNy4GF7yA2). Where §5.1–§5.7, §6 and §7.2–§7.7 below name
+older tables (locator, timeline, per-view tables or views, day counters), **this section wins**.
 
-| Table / view | Key | Partitioned | Purpose |
+| Table | Key | Partitioned | Purpose |
 |---|---|---|---|
-| `"wqPrjTransaction"` | `("userId","occurredAt","transactionId")` | monthly | every projected row, stored once |
-| view `"wqPrjWebTransaction"` | — | — | `/web` reads: sources TRANSACTION and CLAIMABLE_PRIZE only |
-| view `"wqPrjCcTransaction"` | — | — | `/cc` reads: every source |
-| `"wqPrjTransactionLocator"` | `("source","sourceId")` | no | duplicate check; find a row by source id (cancels, delta versions) |
-| `"wqPrjPendingCancel"` | `("source","cancelSourceId")` | no | cancels waiting for their target |
-| `"wqPrjSession"` | `("userId","batchId")` | no | session totals ("all" and excl.-cancelled); a late earlier row only changes `"startedAt"` |
-| `"wqPrjPlay"` | `("userId","batchId","subBatchId")` | no | play totals |
-| `"wqPrjTimeline"` | `("userId","occurredAt","kind","refId")` | monthly | the list levels 1–2 page through: one row per session (kind 0) or unsessioned row; `"onWeb"`, `"visibleExclCancelled"` |
-| `"wqPrjCount"` | `("userId","viewKind","pageUnit","productType","type","day")` | monthly on `"day"` | per-day counts per view and page unit; `''` = ALL for product type and type |
+| `"wqPrjTransaction"` | `("ownerType","userId","occurredAt","transactionId")` | monthly on `"occurredAt"` | every row from all five sources, stored once — zero amounts and non-player owners included; unique `("source","sourceId","occurredAt")` catches duplicates; `"zeroAmount"` generated (`amount = 0` for stream rows) |
+| `"wqPrjSession"` | `("ownerType","userId","batchId")` | no | session totals (all and excl.-cancelled), `"txCount"` (non-zero rows), `"zeroTxCount"`, `"visibleExclCancelled"`; a late earlier row only changes `"startedAt"` |
+| `"wqPrjPlay"` | `("ownerType","userId","batchId","subBatchId")` | no | play totals, `"zeroTxCount"` |
+| `"wqOwnerMonth"` | `("ownerType","userId","month","source","unit","productType","type","zeroAmount")` | no | exact-combination counts `"cnt"` / `"cntExclCancelled"`; `unit` TX (level 0) or ENTRY (levels 1–2: a session or a standalone row; `"type" = ''`); a row exists only while its count is > 0 — it also says which months an owner has data in |
+| `"wqPrjPendingCancel"` | `("source","cancelSourceId")` | no | cancels waiting for their target; removed (and logged) after 7 days by the `pendingCancelResolution` job |
+| `"wqPrjPendingZero"` | `("ownerType","userId","batchId","subBatchId")` | no | helper: zero-amount rows that arrived before their session/play existed, so `"zeroTxCount"` is seeded without counting history; deleted once applied (added by the final-review fix wave) |
 | `"wqIngestCursor"` | `("feed")` | no | stream offset and delta watermark |
 | `"wqDeadLetter"` | `("deadLetterId")` | no | rejected input (allowlisted fields) |
 
 Rules that follow from it:
 
-- **Types are a Java enum** (`wqs.domain.TransactionType`): rows store the code as text; the enum
-  gives PLAY / WIN / NEUTRAL, and an unknown code is stored and NEUTRAL.
-- **Only TRANSACTION and CLAIMABLE_PRIZE carry a batch**, and both feed both views, so a session
-  is never mixed-visibility; the writer rejects a batched row from a `/cc`-only source.
-- **Totals** sum `"wqPrjCount"` over the whole UTC days in `[from, to)` plus a live COUNT for the
-  two partial boundary days; the request builds segments only for the user's active days (memory
-  follows activity, not range width). The `counterRows` metric counts active days. **The offset walk** walks days; the key query's lower bound is the
-  start of the day where the page ends (or `from`), so only partitions holding the page are
-  opened.
-- **`/web` isolation** is structural: `/web` code reads only the `"wqPrjWebTransaction"` view and
-  timeline rows with `"onWeb"`; a source scan forbids `wqPrjCc…` names in `/web` code.
-
+- **Owner identity is `(ownerType, userId)`**; `"1-1717"` and `"2-1717"` never share rows.
+- **Only TRANSACTION and CLAIMABLE_PRIZE carry a batch** (`SourceKind.carriesBatch()`); a batched row
+  from any other source is dead-lettered, so a session never mixes in payments, adjustments or limits.
+- **Visibility is decided at read time** by `wqs.read.ReadPolicy(sources, ownerType, includeZeroAmounts)`:
+  `/web` = TRANSACTION + CLAIMABLE_PRIZE, `/cc` = all five sources; both read `ownerType = 1` only and
+  hide zero-amount rows. Every read query binds the policy (`"source" = any(?)`, `"ownerType" = ?`,
+  `not "zeroAmount"`); a source guard rejects a read query class that does not take a `ReadPolicy`.
+  The domain knows no CC/WEB distinction.
+- **Duplicates**: `insert … on conflict ("source","sourceId","occurredAt") do nothing`; polled rows
+  compare `"versionAt"` (newer replaces, equal is a duplicate, older is stale); a changed immutable
+  field is dead-lettered. Duplicates and cancels are assumed rare.
+- **Cancels** find their target through the owner's months in `"wqOwnerMonth"`, then by
+  `("source","sourceId")` bounded to those months; not found → parked; every insert probes the
+  pending table.
+- **Levels 1–2** page through the owner's sessions (by `"startedAt"`) merged with their rows where
+  `"batchId" is null`, newest first, ties by (time desc, kind desc, id desc), kind 0 = session.
+- **Totals** sum `"wqOwnerMonth"` over the whole months in `[from, to)` plus a live COUNT for the two
+  partial edge months (skipped when the owner has no data there). **The offset walk** walks months;
+  the key query is bounded to the months the page spans, so only those partitions are opened. Very
+  busy owner-months are a known risk; the Phase 7 benchmark decides whether day counts are needed.
+- **Types are a Java enum** (`wqs.domain.TransactionType`): codes stored as text; PLAY / WIN /
+  NEUTRAL, unknown codes stored and NEUTRAL.
 
 ### 5.1 Tables
 

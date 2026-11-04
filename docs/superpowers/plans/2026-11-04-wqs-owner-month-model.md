@@ -77,4 +77,24 @@ Removed: `wqPrjTransactionLocator`, `wqPrjTimeline`, `wqPrjCount`, views `wqPrjW
 
 ## Execution notes
 
-(Rulings recorded during execution go here.)
+Executed 2026-11-04 with subagent-driven development on main. Per the user's speed preference, per-task reviews were folded into one final whole-branch review; Tasks 3 and 4 were merged into one change (user-approved).
+
+Commits: 3109bbc (T1), 074b408 (T2), 4f24482 (T3+4), 5404263 (final-review fix wave).
+
+### Rulings
+
+- R1: T2's cancel lookup derived months from wqPrjCount; T3+4 switched `OwnerMonths` to wqOwnerMonth.
+- R2: wqOwnerBounds is derived, not a table (user agreed).
+- `"zeroAmount"` = `amount = 0` for stream rows only (spec hides zero amounts only for stream transactions; polled zero rows stay visible on /cc).
+- Sessions are filtered by the read policy through `"firstSource"`; their ENTRY count is kept under that source.
+- Security (automated review + final review M1): with the sessioned-source rule gone, a batched payment could leak into /web session totals; the ingest rule was restored as `SourceKind.carriesBatch()` (reason name `sessioned-source-not-on-every-view` kept).
+- Final review I1: seeding `"zeroTxCount"` by scanning history on every new play/session was replaced by incremental maintenance via the helper table `"wqPrjPendingZero"`.
+- Accepted: first-seen polled rows probe `(source, sourceId)` across partitions (keeps immutable-field dead-lettering); a stream id resent with a different timestamp is stored twice (duplicates rare); M6 non-player rows go through ingest rules; M7 more stream/poller deadlock retries.
+
+### Deferred minors
+
+- Zero-amount stream row and polled prize creating the same session concurrently can miss each other (same race as before under read committed); would show as `zeroTxCount` drift.
+- `"wqPrjPendingZero"` rows for groups that never get a non-zero row stay (tiny).
+- The D1 source guard reads source text; a table name built at runtime would bypass it (none today).
+- Busy owner-months: month-granular walk leaves a larger residual offset; the Phase 7 benchmark decides on day counts.
+- Spec §5.1–§7.7 prose still describes older structures; §5.0 is authoritative.
