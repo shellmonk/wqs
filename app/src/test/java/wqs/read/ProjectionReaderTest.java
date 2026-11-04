@@ -99,8 +99,10 @@ class ProjectionReaderTest extends ReadPropertyBase {
         }
         applyBatches(d);
         List<Segment> segments = RangeDecomposition.newestFirst(from, to);
-        assertThat(segments.stream().filter(s -> s.tier() == Segment.Tier.DAY)).hasSizeGreaterThanOrEqualTo(1_000);
-        assertThat(segments.stream().filter(s -> s.tier() == Segment.Tier.LIVE)).hasSize(2);
+        assertThat(segments).extracting(Segment::tier)
+                .containsExactly(Segment.Tier.LIVE, Segment.Tier.DAY, Segment.Tier.LIVE);
+        assertThat(java.time.Duration.between(segments.get(1).start(), segments.get(1).end()).toDays())
+                .as("whole days from counters").isGreaterThanOrEqualTo(1_000);
 
         for (ViewKind v : ViewKind.values()) {
             for (boolean excl : new boolean[] {false, true}) {
@@ -117,6 +119,39 @@ class ProjectionReaderTest extends ReadPropertyBase {
                 assertThat(reader.readLevel0(queryFor(v), new Level0Request(f, from, to, mid / 7 + 1, 7)).transactions())
                         .as(as).isEqualTo(oracle.page(v, f, from, to, (mid / 7) * 7, 7));
             }
+        }
+    }
+
+    /**
+     * Final-review I1: a caller can send the whole clamped domain [1970, 2200), about 84,000 days.
+     * The segments the walk sees are bounded by the user's ACTIVE days -- one per active day, one
+     * per gap between them, plus the ends -- not by the range's length, at both page units.
+     */
+    @Test
+    void a_full_domain_range_builds_segments_per_active_day_only() {
+        applyBatches(fiveTransactions());
+        Instant from = wqs.domain.DataDomain.START;
+        Instant to = wqs.domain.DataDomain.END;
+        int activeDays = 5;
+
+        SegmentCounts level0 = readerTx.execute(status -> reader.segmentCounts(readerJdbc, webQuery, ALL, from, to));
+        SegmentCounts high = readerTx.execute(status -> reader.segmentCounts(readerJdbc, webHighLevelQuery, HL_ALL, from, to));
+
+        for (SegmentCounts sc : List.of(level0, high)) {
+            assertThat(sc.segments()).hasSizeLessThanOrEqualTo(2 * activeDays + 3);
+            assertThat(sc.counterRows()).isEqualTo(activeDays);
+            assertThat(sc.total()).isEqualTo(5);
+            // The segments still tile the range, newest first.
+            assertThat(sc.segments().get(0).end()).isEqualTo(to);
+            assertThat(sc.segments().get(sc.segments().size() - 1).start()).isEqualTo(from);
+            for (int k = 1; k < sc.segments().size(); k++) {
+                assertThat(sc.segments().get(k).end()).isEqualTo(sc.segments().get(k - 1).start());
+            }
+        }
+        // And the walk over them still lands on naive OFFSET.
+        for (long p = 1; p <= 3; p++) {
+            assertThat(reader.readLevel0(webQuery, new Level0Request(ALL, from, to, p, 2)).transactions())
+                    .isEqualTo(oracle.page(ViewKind.WEB, ALL, from, to, (p - 1) * 2, 2));
         }
     }
 

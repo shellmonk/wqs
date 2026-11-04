@@ -183,26 +183,8 @@ class HighLevelPagingTest extends ReadPropertyBase {
             return;
         }
         assertThat(recording.keysCalls).as(as).hasSize(1);
-        RecordingLevel0Query.KeysCall call = recording.keysCalls.get(0);
-        // Plan D4: the lower bound is the start of the segment holding the page's last unit --
-        // the oldest segment the page needs, never below from.
-        Segment bottom = RangeDecomposition.newestFirst(r.from(), r.to()).stream()
-                .filter(s -> s.start().equals(call.lo()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(as + ": key query lo " + call.lo() + " is no segment start"));
-        assertThat(call.lo()).as(as).isAfterOrEqualTo(r.from());
-        long need = call.offset() + call.limit();
-        assertThat(oracle.highLevelCount(v, f, call.lo(), call.hi())).as(as + " page inside [lo, hi)").isGreaterThanOrEqualTo(need);
-        if (bottom.end().isBefore(call.hi())) {
-            assertThat(oracle.highLevelCount(v, f, bottom.end(), call.hi())).as(as + " lo is the oldest segment needed")
-                    .isLessThan(need);
-        }
-        Segment target = RangeDecomposition.newestFirst(r.from(), r.to()).stream()
-                .filter(s -> s.end().equals(call.hi()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(as + ": key query hi " + call.hi() + " is no segment end"));
-        long segmentCount = oracle.highLevelCount(v, f, target.start(), call.hi());
-        assertThat(call.offset()).as(as + " residual inside " + target).isGreaterThanOrEqualTo(0).isLessThan(segmentCount);
+        WalkBounds.assertTight(recording.keysCalls.get(0), r.from(), r.to(),
+                (lo, hi) -> oracle.highLevelCount(v, f, lo, hi), as);
     }
 
     // ------------------------------------------------------------------ the dataset

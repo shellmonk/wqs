@@ -134,7 +134,7 @@ class WebProjectionSecurityTest extends ApiTestBase {
      * view and the "onWeb" timeline predicate. A payment is never visible through the view, never a
      * /web page unit, never a nested /web transaction and never in a /web total. A payment can never
      * join a session either: the writer rejects a sessioned transaction of a source that does not
-     * feed every view, so a session -- here one whose only transaction is cancelled -- looks the
+     * feed every view (dead-lettered as sessioned-source-not-on-every-view), so a session -- here one whose only transaction is cancelled -- looks the
      * same on both endpoints.
      */
     @Test
@@ -143,10 +143,12 @@ class WebProjectionSecurityTest extends ApiTestBase {
                 sessioned(SourceKind.TRANSACTION, "u1-s-tx", "2034-02-15T10:00:00Z", "s-web", null),
                 sessioned(SourceKind.PAYMENT, "u1-pay2", "2034-02-16T10:00:00Z", null, null),
                 sessioned(SourceKind.TRANSACTION, "u1-s-c", "2034-02-17T10:00:00Z", null, "u1-s-tx")), 2L));
-        assertThatThrownBy(() -> writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
-                sessioned(SourceKind.PAYMENT, "u1-s-pay", "2034-02-16T11:00:00Z", "s-pay", null)), 3L)))
-                .as("a sessioned payment is rejected, never projected")
-                .isInstanceOf(IllegalArgumentException.class);
+        var rejected = writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
+                sessioned(SourceKind.PAYMENT, "u1-s-pay", "2034-02-16T11:00:00Z", "s-pay", null)), 3L));
+        assertThat(rejected.deadLettered()).as("a sessioned payment is rejected, never projected").isEqualTo(1);
+        assertThat(rejected.projected()).isZero();
+        assertThat(db().value("select \"error\" from \"wqDeadLetter\" where \"sourceId\" = 'u1-s-pay'", String.class))
+                .isEqualTo("sessioned-source-not-on-every-view");
         List<String> payments = List.of("u1-payment", "u1-pay2");
 
         assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" where \"source\" = ?", String.class,

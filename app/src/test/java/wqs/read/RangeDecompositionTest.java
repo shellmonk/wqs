@@ -27,14 +27,11 @@ class RangeDecompositionTest {
         return new Segment(t(from), t(to), tier);
     }
 
-    /** Plan D3: the full clamped domain [1970, 2200) decomposes into its whole days, no live end. */
+    /** Plan D3, final-review I1: the full clamped domain [1970, 2200) is ONE DAY run, no live end. */
     @Test
-    void full_clamped_domain_is_whole_days() {
-        List<Segment> segments = RangeDecomposition.newestFirst(
-                wqs.domain.DataDomain.START, wqs.domain.DataDomain.END);
-        assertThat(segments).allMatch(s -> s.tier() == Tier.DAY);
-        assertThat(segments).hasSize((int) ChronoUnit.DAYS.between(
-                wqs.domain.DataDomain.START, wqs.domain.DataDomain.END));
+    void full_clamped_domain_is_one_day_run() {
+        assertThat(RangeDecomposition.newestFirst(wqs.domain.DataDomain.START, wqs.domain.DataDomain.END))
+                .containsExactly(new Segment(wqs.domain.DataDomain.START, wqs.domain.DataDomain.END, Tier.DAY));
     }
 
     @Test
@@ -48,9 +45,7 @@ class RangeDecompositionTest {
         assertThat(RangeDecomposition.newestFirst(t("2034-03-05T10:00:00Z"), t("2034-03-09T06:00:00Z")))
                 .containsExactly(
                         seg("2034-03-09T00:00:00Z", "2034-03-09T06:00:00Z", Tier.LIVE),
-                        seg("2034-03-08T00:00:00Z", "2034-03-09T00:00:00Z", Tier.DAY),
-                        seg("2034-03-07T00:00:00Z", "2034-03-08T00:00:00Z", Tier.DAY),
-                        seg("2034-03-06T00:00:00Z", "2034-03-07T00:00:00Z", Tier.DAY),
+                        seg("2034-03-06T00:00:00Z", "2034-03-09T00:00:00Z", Tier.DAY),
                         seg("2034-03-05T10:00:00Z", "2034-03-06T00:00:00Z", Tier.LIVE));
     }
 
@@ -58,27 +53,25 @@ class RangeDecompositionTest {
     void exact_boundaries_produce_no_live_segment() {
         assertThat(RangeDecomposition.newestFirst(t("2034-01-01T00:00:00Z"), t("2034-01-04T00:00:00Z")))
                 .containsExactly(
-                        seg("2034-01-03T00:00:00Z", "2034-01-04T00:00:00Z", Tier.DAY),
-                        seg("2034-01-02T00:00:00Z", "2034-01-03T00:00:00Z", Tier.DAY),
-                        seg("2034-01-01T00:00:00Z", "2034-01-02T00:00:00Z", Tier.DAY));
+                        seg("2034-01-01T00:00:00Z", "2034-01-04T00:00:00Z", Tier.DAY));
     }
 
     @Test
     void to_on_a_day_boundary_has_no_trailing_live() {
         assertThat(RangeDecomposition.newestFirst(t("2034-01-30T12:00:00Z"), t("2034-02-02T00:00:00Z")))
                 .containsExactly(
-                        seg("2034-02-01T00:00:00Z", "2034-02-02T00:00:00Z", Tier.DAY),
-                        seg("2034-01-31T00:00:00Z", "2034-02-01T00:00:00Z", Tier.DAY),
+                        seg("2034-01-31T00:00:00Z", "2034-02-02T00:00:00Z", Tier.DAY),
                         seg("2034-01-30T12:00:00Z", "2034-01-31T00:00:00Z", Tier.LIVE));
     }
 
     @Test
     void five_year_range_counts() {
         List<Segment> s = RangeDecomposition.newestFirst(t("2030-01-15T13:00:00Z"), t("2035-01-15T09:00:00Z"));
-        // 2030-01-16 .. 2035-01-14 inclusive: 1,827 days spanning 5 years, two of them leap (2032).
-        assertThat(s.stream().filter(x -> x.tier() == Tier.DAY)).hasSize(
-                (int) ChronoUnit.DAYS.between(LocalDate.parse("2030-01-16"), LocalDate.parse("2035-01-15")));
-        assertThat(s.stream().filter(x -> x.tier() == Tier.LIVE)).hasSize(2);
+        // Five years: the two partial days and ONE run of whole days, 2030-01-16 .. 2035-01-14.
+        assertThat(s).containsExactly(
+                seg("2035-01-15T00:00:00Z", "2035-01-15T09:00:00Z", Tier.LIVE),
+                seg("2030-01-16T00:00:00Z", "2035-01-15T00:00:00Z", Tier.DAY),
+                seg("2030-01-15T13:00:00Z", "2030-01-16T00:00:00Z", Tier.LIVE));
     }
 
     @Test
@@ -125,7 +118,7 @@ class RangeDecompositionTest {
             switch (s.tier()) {
                 case DAY -> {
                     assertThat(s.start()).isEqualTo(d.atStartOfDay(ZoneOffset.UTC).toInstant());
-                    assertThat(s.end()).isEqualTo(d.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant());
+                    assertThat(s.end().getEpochSecond() % 86_400).isZero();
                 }
                 case LIVE -> {
                     live++;
@@ -135,5 +128,6 @@ class RangeDecompositionTest {
             }
         }
         assertThat(live).isLessThanOrEqualTo(2);
+        assertThat(segs).hasSizeLessThanOrEqualTo(3);
     }
 }

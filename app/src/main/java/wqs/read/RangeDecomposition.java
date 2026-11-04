@@ -8,9 +8,11 @@ import java.util.List;
 import wqs.read.Segment.Tier;
 
 /**
- * Splits [from, to) into whole UTC days and the live remainders at either end, newest first
- * (spec 7.5, plan D3). Whole days are read from the per-day counters, the partial boundary days by
- * a live count.
+ * Splits [from, to) into at most three segments, newest first (spec 7.5, plan D3): the partial
+ * day at the upper end (LIVE), ONE run of whole UTC days (DAY), and the partial day at the lower
+ * end (LIVE). The whole days are read from the per-day counters, the partial days by a live count.
+ * The output size never depends on the range's length, so any caller-supplied range is cheap to
+ * decompose; {@link ProjectionReader} splits the DAY run by its active days.
  */
 public final class RangeDecomposition {
 
@@ -24,7 +26,7 @@ public final class RangeDecomposition {
         }
         Instant fromCeilDay = ceilDay(from);
         Instant toFloorDay = floorDay(to);
-        List<Segment> out = new ArrayList<>();
+        List<Segment> out = new ArrayList<>(3);
         if (fromCeilDay.isAfter(toFloorDay)) {
             out.add(new Segment(from, to, Tier.LIVE));
             return out;
@@ -32,10 +34,8 @@ public final class RangeDecomposition {
         if (to.isAfter(toFloorDay)) {
             out.add(new Segment(toFloorDay, to, Tier.LIVE));
         }
-        for (Instant d = toFloorDay; d.isAfter(fromCeilDay); ) {
-            Instant prev = d.minusSeconds(DAY_SECONDS);
-            out.add(new Segment(prev, d, Tier.DAY));
-            d = prev;
+        if (toFloorDay.isAfter(fromCeilDay)) {
+            out.add(new Segment(fromCeilDay, toFloorDay, Tier.DAY));
         }
         if (from.isBefore(fromCeilDay)) {
             out.add(new Segment(from, fromCeilDay, Tier.LIVE));

@@ -5,8 +5,8 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumMap;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -276,55 +276,58 @@ public class ProjectionReader {
     }
 
     /**
-     * Counts each segment of {@link RangeDecomposition#newestFirst} (plan D3): whole UTC days from
-     * the unit's per-day counters (absent row = 0), the partial boundary days by a live count. The
-     * DAY segments form one contiguous run between the two LIVE ends, read in ONE query over that
-     * run's index range, so even a multi-year range fetches only its sparse day rows.
+     * Counts [from, to) per segment (plan D3). {@link RangeDecomposition#newestFirst} gives at most
+     * one DAY run between two LIVE ends; the run's day counters are read in ONE query (absent day
+     * = 0) and the run is split newest-first into one segment per active day, each gap of empty
+     * days becoming a single zero-count segment. The LIVE ends get a live count. So the list is at
+     * most 2 x active days + 3 long, whatever the range's length, and every segment with a
+     * non-zero count is one day or a LIVE end -- where the walk lands (plan D4).
      */
     private SegmentCounts segmentCounts(JdbcClient tx, Unit<?> u, Instant from, Instant to) {
-        List<Segment> segments = RangeDecomposition.newestFirst(from, to);
-        Map<LocalDate, Long> days = new HashMap<>();
-        for (List<Segment> run : dayRuns(segments)) {
-            days.putAll(counters.dayCounts(tx, u.userId(), u.view(), u.pageUnit(), u.productTypes(),
-                    u.typeCodes(), u.excludeCancelled(),
-                    day(run.get(run.size() - 1)), day(run.get(0))));
+        List<Segment> decomposed = RangeDecomposition.newestFirst(from, to);
+        // The counters are read FIRST, before any live count: their statement opens the read's
+        // snapshot, as it always has (a concurrent commit cannot slip in ahead of it).
+        Map<LocalDate, Long> days = Map.of();
+        for (Segment s : decomposed) {
+            if (s.tier() == Tier.DAY) {
+                days = counters.dayCounts(tx, u.userId(), u.view(), u.pageUnit(),
+                        u.productTypes(), u.typeCodes(), u.excludeCancelled(),
+                        day(s.start()), day(s.end()).minusDays(1));
+            }
         }
-        long[] counts = new long[segments.size()];
+        List<Segment> segments = new ArrayList<>();
+        List<Long> counts = new ArrayList<>();
         int counterRows = 0;
-        for (int i = 0; i < segments.size(); i++) {
-            Segment s = segments.get(i);
+        for (Segment s : decomposed) {
             if (s.tier() == Tier.LIVE) {
-                counts[i] = u.count().count(tx, s.start(), s.end());
+                segments.add(s);
+                counts.add(u.count().count(tx, s.start(), s.end()));
                 continue;
             }
-            Long stored = days.get(day(s));
-            if (stored != null) {
-                counts[i] = stored;
+            List<LocalDate> active = new ArrayList<>(days.keySet());
+            active.sort(Comparator.reverseOrder());
+            Instant cursor = s.end();
+            for (LocalDate d : active) {
+                Instant dayStart = d.atStartOfDay(ZoneOffset.UTC).toInstant();
+                Instant dayEnd = dayStart.plusSeconds(86_400);
+                if (dayEnd.isBefore(cursor)) {
+                    segments.add(new Segment(dayEnd, cursor, Tier.DAY));
+                    counts.add(0L);
+                }
+                segments.add(new Segment(dayStart, dayEnd, Tier.DAY));
+                counts.add(days.get(d));
                 counterRows++;
+                cursor = dayStart;
+            }
+            if (cursor.isAfter(s.start())) {
+                segments.add(new Segment(s.start(), cursor, Tier.DAY));
+                counts.add(0L);
             }
         }
-        return new SegmentCounts(segments, counts, counterRows);
+        return new SegmentCounts(segments, counts.stream().mapToLong(Long::longValue).toArray(), counterRows);
     }
 
-    /** Maximal runs of adjacent DAY segments, in list order; LIVE segments split runs. */
-    private static List<List<Segment>> dayRuns(List<Segment> segments) {
-        List<List<Segment>> out = new ArrayList<>();
-        List<Segment> current = null;
-        for (Segment s : segments) {
-            if (s.tier() == Tier.LIVE) {
-                current = null;
-                continue;
-            }
-            if (current == null) {
-                current = new ArrayList<>();
-                out.add(current);
-            }
-            current.add(s);
-        }
-        return out;
-    }
-
-    private static LocalDate day(Segment s) {
-        return LocalDate.ofInstant(s.start(), ZoneOffset.UTC);
+    private static LocalDate day(Instant i) {
+        return LocalDate.ofInstant(i, ZoneOffset.UTC);
     }
 }

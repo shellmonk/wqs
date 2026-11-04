@@ -238,8 +238,9 @@ public class RollupUpdater {
      * The sessioned-source rule: only sources that feed EVERY view (TRANSACTION and CLAIMABLE_PRIZE
      * today, the only ones that carry a batch id) may open or join a session. A session therefore
      * never mixes sources, and one "visibleExclCancelled" on its timeline row is right for both
-     * endpoints. Anything else is bad data: the exception is not transient, so the transaction is
-     * dead-lettered.
+     * endpoints. {@link IngestRules#rejection} rejects such a transaction by name
+     * ({@code sessioned-source-not-on-every-view}) before anything of it is written, so this is an
+     * assertion: reaching it is a bug, and the non-transient exception dead-letters the transaction.
      */
     static void requireSessionable(ProjectionTransaction transaction) {
         if (!transaction.source().views().containsAll(EnumSet.allOf(ViewKind.class))) {

@@ -18,6 +18,7 @@ public interface RejectedTransactionDeadLetters {
     String CURRENCY_MISMATCH = "currency-mismatch";
     String EINSTANT_UNSESSIONED = "einstant-unsessioned";
     String IMMUTABLE_FIELD_CHANGED = "immutable-field-changed";
+    String SESSIONED_SOURCE_NOT_ON_EVERY_VIEW = "sessioned-source-not-on-every-view";
 
     /**
      * @param offset the transaction's own stream offset, or null when unknown

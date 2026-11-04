@@ -50,6 +50,40 @@ class ViewSourceIsolationTest {
         assertThat(timelineWithoutOnWeb(mainSources(WEB))).isEmpty();
     }
 
+    /**
+     * Final-review M2: the top-level {@code wqs/read} files (non-recursive) are shared code that
+     * also serves /web -- the walk, counters, assembly. Today they name only "wqPrjCount",
+     * "wqPrjSession" and "wqPrjPlay"; they must never name the operator view ({@code wqPrjCc...})
+     * or the base transaction table, nor read the timeline without "onWeb".
+     */
+    @Test
+    void shared_read_sources_never_name_an_operator_table_or_the_base_table() {
+        List<Path> shared = sharedReadSources();
+        assertThat(mentionsIn(shared, "wqprjcc")).isEmpty();
+        assertThat(mentionsIn(shared, BASE_TABLE)).isEmpty();
+        assertThat(timelineWithoutOnWebIn(shared)).isEmpty();
+    }
+
+    /** Proves the shared scan can fail, and that it does not descend into the endpoint packages. */
+    @Test
+    void the_shared_scan_reports_leaks_and_is_not_recursive(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve("SharedWalk.java"),
+                "class SharedWalk { String sql = \"select 1 from \\\"WQPRJCCTRANSACTION\\\"\"; }");
+        Files.writeString(dir.resolve("SharedBase.java"),
+                "class SharedBase { String sql = \"select 1 from \\\"wqPrjTransaction\\\"\"; }");
+        Files.writeString(dir.resolve("SharedClean.java"),
+                "class SharedClean { String sql = \"select 1 from \\\"wqPrjSession\\\"\"; }");
+        Path cc = Files.createDirectory(dir.resolve("cc"));
+        Files.writeString(cc.resolve("CcQuery.java"),
+                "class CcQuery { String sql = \"select 1 from \\\"wqPrjCcTransaction\\\"\"; }");
+
+        List<Path> shared = topLevelJavaFiles(dir);
+        assertThat(shared).extracting(f -> f.getFileName().toString())
+                .containsExactly("SharedBase.java", "SharedClean.java", "SharedWalk.java");
+        assertThat(mentionsIn(shared, "wqprjcc")).singleElement().asString().contains("SharedWalk.java:1");
+        assertThat(mentionsIn(shared, BASE_TABLE)).singleElement().asString().contains("SharedBase.java:1");
+    }
+
     @Test
     void cc_sources_never_name_a_web_table() {
         assertThat(mentions(mainSources(CC), "wqprjweb")).isEmpty();
@@ -93,13 +127,36 @@ class ViewSourceIsolationTest {
      * comment mentioning "onWeb" does not count).
      */
     private static List<String> timelineWithoutOnWeb(List<Path> dirs) {
-        return dirs.stream().flatMap(d -> javaFiles(d).stream())
+        return timelineWithoutOnWebIn(dirs.stream().flatMap(d -> javaFiles(d).stream()).toList());
+    }
+
+    private static List<String> timelineWithoutOnWebIn(List<Path> files) {
+        return files.stream()
                 .filter(file -> {
                     String text = normalise(String.join("\n", read(file)));
                     return text.contains("\"wqprjtimeline\"") && !text.contains(ON_WEB);
                 })
                 .map(Path::toString)
                 .toList();
+    }
+
+    /** The top-level wqs/read Java files, required to exist (no hollow pass). */
+    private static List<Path> sharedReadSources() {
+        Path root = Stream.of(Path.of("src/main/java"), Path.of("app/src/main/java"))
+                .filter(Files::isDirectory).findFirst()
+                .orElseThrow(() -> new IllegalStateException("main sources not found from " + Path.of("").toAbsolutePath()));
+        List<Path> files = topLevelJavaFiles(root.resolve("wqs/read"));
+        assertThat(files).as("shared read sources").isNotEmpty();
+        return files;
+    }
+
+    /** The Java files directly in {@code dir}, not in its subpackages. */
+    private static List<Path> topLevelJavaFiles(Path dir) {
+        try (Stream<Path> files = Files.list(dir)) {
+            return files.filter(f -> Files.isRegularFile(f) && f.toString().endsWith(".java")).sorted().toList();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     /** The package directories, each required to exist and hold Java sources (no hollow pass). */
@@ -116,7 +173,11 @@ class ViewSourceIsolationTest {
 
     /** {@code file:line: text} for every line containing {@code needle}, case-insensitively, escapes read as quotes. */
     private static List<String> mentions(List<Path> dirs, String needle) {
-        return dirs.stream().flatMap(d -> javaFiles(d).stream()).flatMap(file -> {
+        return mentionsIn(dirs.stream().flatMap(d -> javaFiles(d).stream()).toList(), needle);
+    }
+
+    private static List<String> mentionsIn(List<Path> files, String needle) {
+        return files.stream().flatMap(file -> {
             List<String> lines = read(file);
             return java.util.stream.IntStream.range(0, lines.size())
                     .filter(i -> normalise(lines.get(i)).contains(needle))

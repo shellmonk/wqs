@@ -35,6 +35,9 @@ import wqs.gen.TxTypes;
 @SpringBootTest
 class KeyQueryPruningTest extends ReadPropertyBase {
 
+    // 2037-2041 on purpose: PartitionManagerTest drops every *_2031_* partition and
+    // PartitionRolloverServiceTest drops 2032-06..09, and this test needs all 60 months of its range
+    // provisioned and untouched by other classes sharing the container.
     private static final Instant FROM = Instant.parse("2037-01-01T00:00:00Z");
     private static final Instant TO = Instant.parse("2042-01-01T00:00:00Z");
     private static final Pattern TRANSACTION_PARTITION = Pattern.compile("wqPrjTransaction_(\\d{4}_\\d{2})");

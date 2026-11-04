@@ -98,26 +98,7 @@ class OffsetPropertyTest extends ReadPropertyBase {
             return;
         }
         assertThat(keysCalls).as(as).hasSize(1);
-        RecordingLevel0Query.KeysCall call = keysCalls.get(0);
-        // Plan D4: the lower bound is the start of the segment holding the page's last unit --
-        // the oldest segment the page needs, never below from.
-        Segment bottom = RangeDecomposition.newestFirst(q.from(), q.to()).stream()
-                .filter(s -> s.start().equals(call.lo()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(as + ": key query lo " + call.lo() + " is no segment start"));
-        assertThat(call.lo()).as(as).isAfterOrEqualTo(q.from());
-        long need = call.offset() + call.limit();
-        assertThat(oracleCount.apply(call.lo(), call.hi())).as(as + " page inside [lo, hi)").isGreaterThanOrEqualTo(need);
-        if (bottom.end().isBefore(call.hi())) {
-            assertThat(oracleCount.apply(bottom.end(), call.hi())).as(as + " lo is the oldest segment needed")
-                    .isLessThan(need);
-        }
-        Segment target = RangeDecomposition.newestFirst(q.from(), q.to()).stream()
-                .filter(s -> s.end().equals(call.hi()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(as + ": key query hi " + call.hi() + " is no segment end"));
-        long segmentCount = oracleCount.apply(target.start(), call.hi());
-        assertThat(call.offset()).as(as + " residual inside " + target).isGreaterThanOrEqualTo(0).isLessThan(segmentCount);
+        WalkBounds.assertTight(keysCalls.get(0), q.from(), q.to(), oracleCount, as);
     }
 
     @Provide

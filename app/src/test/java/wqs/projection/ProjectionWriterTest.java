@@ -203,6 +203,32 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
+    /**
+     * Task 3 ruling, named: a sessioned transaction of a source that does not feed every view (a
+     * cc-only payment carrying a batch) is rejected as {@code sessioned-source-not-on-every-view}
+     * before anything of it is written; the rest of its batch applies.
+     */
+    @Test
+    void a_sessioned_cc_only_transaction_dead_letters_alone() {
+        ProjectionTransaction sessionedPayment = new ProjectionTransaction(
+                7L, SourceKind.PAYMENT, "pay-s", WHEN, null, null, "b-pay", "p-pay",
+                TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
+
+        WriteResult result = writer.apply(new ProjectionBatch(STREAM,
+                List.of(tx("before"), sessionedPayment, tx("after")), 6L, List.of(4L, 5L, 6L)));
+
+        assertThat(result.deadLettered()).isEqualTo(1);
+        assertThat(result.projected()).isEqualTo(2);
+        assertThat(db().count("\"wqPrjTransactionLocator\" where \"sourceId\" = 'pay-s'"))
+                .as("not even the locator").isZero();
+        assertThat(db().count("\"wqPrjSession\" where \"batchId\" = 'b-pay'")).isZero();
+        assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" order by 1", String.class))
+                .containsExactly("after", "before");
+        assertThat(deadLetters()).containsExactly("pay-s|5|sessioned-source-not-on-every-view");
+        assertThat(offsetStore.read(STREAM)).contains(6L);
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+    }
+
     /** D7 / P-7: an eInstant transaction must be sessioned; one that is not is dead-lettered. */
     @Test
     void einstant_without_batch_dead_letters() {

@@ -10,8 +10,8 @@ import java.time.ZoneOffset;
  * partition provisioner refuses, at startup, any window that could create a partition outside it.
  * "wqPrjTransaction" has no default partition, so no row can exist outside a provisioned month.
  *
- * <p>It also bounds any range decomposition to ~2,760 months, and keeps every bound inside
- * Postgres' timestamptz range.
+ * <p>It also keeps every bound inside Postgres' timestamptz range. (A range's decomposition is at
+ * most three segments whatever its length; see RangeDecomposition.)
  */
 public final class DataDomain {
 
