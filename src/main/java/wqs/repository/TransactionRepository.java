@@ -64,10 +64,13 @@ public interface TransactionRepository
                                             @Param("sources") Collection<Short> sources,
                                             @Param("includeCancelled") boolean includeCancelled);
 
-    /** Rows by id, bounded to the request's range so only its partitions are read. */
+    /**
+     * Rows by id. {@code from}/{@code to} (inclusive) must span the rows' own times: the primary key
+     * leads with ("userId", "occurredAt"), so a tight span reads only those rows, not the owner's history.
+     */
     @Query("""
             select t from TransactionEntity t
-            where t.userId = :userId and t.transactionId in :ids and t.occurredAt >= :from and t.occurredAt < :to
+            where t.userId = :userId and t.transactionId in :ids and t.occurredAt >= :from and t.occurredAt <= :to
             """)
     List<TransactionEntity> findByIds(@Param("userId") long userId, @Param("ids") Collection<Long> ids,
                                       @Param("from") Instant from, @Param("to") Instant to);

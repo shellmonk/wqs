@@ -15,11 +15,16 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
 
     Optional<SessionEntity> findByOwnerTypeAndUserIdAndBatchId(short ownerType, long userId, String batchId);
 
-    /** A top-level entry of a level-1/2 page: {@code kind} 0 is a session, 1 a transaction without one. */
+    /**
+     * A top-level entry of a level-1/2 page: {@code kind} 0 is a session, 1 a transaction without
+     * one; {@code at} its time (the session's start, or the transaction's occurredAt).
+     */
     interface PageEntry {
         Integer getKind();
 
         Long getId();
+
+        Instant getAt();
     }
 
     String ENTRIES = """
@@ -29,10 +34,12 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
               and s."startedAt" >= :from and s."startedAt" < :to
               and (not :excludeCancelled or s."txCountExclCancelled" > 0)
               and (:anyProductType or s."productType" = any(cast(:productTypes as text[])))
-              and (:anyType or exists (
-                    select 1 from "wqPrjTransaction" m
-                    where m."userId" = s."userId" and m."ownerType" = s."ownerType" and m."batchId" = s."batchId"
-                      and m."occurredAt" between s."startedAt" and s."endedAt"
+              and (:anyType or s."batchId" in (
+                    -- One pass over the owner's matching rows (a session's rows are never before its
+                    -- start, so from bounds them), instead of one probe per session.
+                    select m."batchId" from "wqPrjTransaction" m
+                    where m."userId" = :userId and m."ownerType" = :ownerType and m."batchId" is not null
+                      and m."occurredAt" >= :from
                       and m."source" = any(cast(:sources as int[])) and not m."zeroAmount"
                       and (not :excludeCancelled or not m."cancelled")
                       and m."type" = any(cast(:transactionTypes as text[]))))
@@ -53,7 +60,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
      * A session's totals are stored, so a filter only decides whether it is listed: it must have a
      * visible row of a requested type. Empty filter arrays mean "any" (the flags say so).
      */
-    @Query(nativeQuery = true, value = "select e.\"kind\", e.\"id\" from (" + ENTRIES + ") e "
+    @Query(nativeQuery = true, value = "select e.\"kind\", e.\"id\", e.\"at\" from (" + ENTRIES + ") e "
             + "order by e.\"at\" desc, e.\"kind\" desc, e.\"id\" desc limit :limit offset :offset")
     List<PageEntry> findPageEntries(@Param("userId") long userId, @Param("ownerType") short ownerType,
                                     @Param("from") Instant from, @Param("to") Instant to,

@@ -92,17 +92,26 @@ public class ProjectionService {
                         r.pageSize(), r.offset());
 
         List<Long> sessionIds = ids(entries, 0);
-        List<Long> transactionIds = ids(entries, 1);
         Map<Long, SessionView> sessionViews = sessionViews(policy, userId, sessionIds, r);
-        Map<Long, TxView> transactionViews = transactionIds.isEmpty() ? Map.of()
-                : transactions.findByIds(userId, transactionIds, r.from(), r.to()).stream()
-                        .collect(Collectors.toMap(TransactionEntity::getTransactionId, mapper::toView));
+        Map<Long, TxView> transactionViews = transactionViews(userId, entries);
 
         List<HighLevelEntry> data = entries.stream()
                 .map(e -> e.getKind() == 0 ? (HighLevelEntry) sessionViews.get(e.getId()) : transactionViews.get(e.getId()))
                 .filter(Objects::nonNull)
                 .toList();
         return ProjectionResponse.of(r, total, data);
+    }
+
+    /** The page's transactions without a session, looked up within the page's own time span. */
+    private Map<Long, TxView> transactionViews(long userId, List<PageEntry> entries) {
+        List<PageEntry> rows = entries.stream().filter(e -> e.getKind() == 1).toList();
+        if (rows.isEmpty()) {
+            return Map.of();
+        }
+        Instant from = rows.stream().map(PageEntry::getAt).min(Comparator.naturalOrder()).orElseThrow();
+        Instant to = rows.stream().map(PageEntry::getAt).max(Comparator.naturalOrder()).orElseThrow();
+        return transactions.findByIds(userId, rows.stream().map(PageEntry::getId).toList(), from, to).stream()
+                .collect(Collectors.toMap(TransactionEntity::getTransactionId, mapper::toView));
     }
 
     /** The page's sessions with their transactions (level 1), or their plays and transactions (level 2). */

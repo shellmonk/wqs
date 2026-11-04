@@ -53,5 +53,18 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.named('test', Test) {
-    useJUnitPlatform()
+    useJUnitPlatform { excludeTags 'benchmark' }
+}
+
+// Read-side benchmark (src/test/java/wqs/benchmark): seeds ~3M rows into its own Postgres
+// container and writes build/benchmark/read-benchmark.md. Opt-in: never part of `build`.
+tasks.register('benchmark', Test) {
+    description = 'Runs the read-side benchmark (tag benchmark).'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'benchmark' }
+    maxHeapSize = '2g'
+    outputs.upToDateWhen { false }
+    testLogging { showStandardStreams = true }
 }
