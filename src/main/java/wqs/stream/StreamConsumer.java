@@ -248,6 +248,7 @@ public class StreamConsumer implements SmartLifecycle {
         Duration backoff = Duration.ofMillis(100);
         while (running) {
             try {
+                ingest.preparePartitions(items); // before the batch transaction: see PartitionDdlService
                 StreamBatchResult result = ingest.ingestBatch(feed, items);
                 lastOffset = batch.getLast().offset();
                 meters.summary("wqs.ingest.stream.batch.size").record(batch.size());

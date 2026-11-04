@@ -49,7 +49,7 @@ class IngestBenchmark extends IntegrationTest {
         for (int batchSize : new int[] {1, 500}) {
             String stream = "bench-" + batchSize + "-" + UUID.randomUUID();
             preload(stream, batchSize);
-            StreamProperties properties = new StreamProperties(true, "unused", stream, batchSize, Duration.ofMillis(200));
+            StreamProperties properties = new StreamProperties(true, "unused", stream, null, batchSize, Duration.ofMillis(200));
             StreamConsumer consumer = new StreamConsumer(streams, properties, decoder, ingest, new SimpleMeterRegistry());
             long t0 = System.nanoTime();
             consumer.start();

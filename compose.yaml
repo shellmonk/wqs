@@ -1,4 +1,6 @@
-# Local infrastructure for running WQS on a laptop: `docker compose up -d` (Colima works).
+# Local infrastructure for running WQS on a laptop (Colima works):
+#   docker compose up -d                      Postgres and RabbitMQ only (run the app from the IDE or bootRun)
+#   ./gradlew bootJar && docker compose --profile app up -d --build    ... and the app in a container
 services:
   postgres:
     image: postgres:16
@@ -23,6 +25,27 @@ services:
     ports:
       - "5552:5552"   # stream protocol
       - "15672:15672" # management UI (guest/guest)
+
+  wqs:
+    profiles: [app]
+    build: .
+    depends_on:
+      postgres:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/wqs
+      WQS_STREAM_ENABLED: "true"
+      WQS_STREAM_URI: rabbitmq-stream://rabbitmq:5552
+      # The broker advertises localhost (for clients on the host); this container must use the service name.
+      WQS_STREAM_CONNECT_HOST: rabbitmq
+      # Local and trusted only: there is no authentication yet.
+      WQS_API_CC_ENABLED: "true"
+      WQS_API_WEB_PLAYER_HEADER: "true"
+    ports:
+      - "8080:8080"
+    restart: on-failure
 
 configs:
   rabbit_plugins:

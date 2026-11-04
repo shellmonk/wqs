@@ -62,6 +62,8 @@ wqs:
     enabled: false
     uri: rabbitmq-stream://localhost:5552
     name: wallet-transactions
+    # Optional: connect to this host instead of the one the broker advertises (load balancer, containers).
+    connect-host:
     # Messages are committed in batches: up to batch-size, or what arrived within batch-max-wait.
     batch-size: 500
     batch-max-wait: 200ms

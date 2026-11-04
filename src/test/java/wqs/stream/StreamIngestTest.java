@@ -212,6 +212,22 @@ class StreamIngestTest extends IntegrationTest {
     }
 
     @Test
+    void a_batch_spanning_months_without_partitions_is_stored_and_reads_keep_working() throws Exception {
+        // 2023 has no partitions yet: one batch reaching a new month must not wait for its own lock.
+        List<String> ids = new java.util.ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            String id = nextId();
+            ids.add(id);
+            String month = i < 10 ? "2023-01-31T23:59:" : i < 20 ? "2023-02-01T00:00:" : "2023-03-01T00:00:";
+            send(message("transfer-out.json", id, "1-" + id, month + String.format("%02d", i % 60) + "Z"));
+        }
+        flush();
+        await().atMost(Duration.ofSeconds(20)).until(() -> ids.stream().allMatch(id -> rows(id) == 1));
+        assertThat(jdbc.sql("select count(*) from \"wqPrjTransaction\" where \"occurredAt\" < '2023-04-01'")
+                .query(Long.class).single()).isGreaterThanOrEqualTo(30);
+    }
+
+    @Test
     void each_month_gets_its_own_partition() throws Exception {
         String id = nextId();
         publish(message("transfer-out.json", id, "1-" + id, "2025-03-31T23:59:59.999999Z"));

@@ -19,18 +19,38 @@ Testcontainers. One Gradle build file (Groovy DSL).
 ## Run locally
 
 ```bash
-colima start                      # or any Docker engine
-docker compose up -d              # Postgres on 55432, RabbitMQ streams on 5552, UI on 15672
-./gradlew bootRun                 # http://localhost:8080/actuator/health
+colima start                                           # or any Docker engine
+./gradlew bootJar
+docker compose --profile app up -d --build             # Postgres, RabbitMQ (streams) and the app on :8080
+./gradlew publishSamples -Pcount=200 -Pplayer=1717     # push sample wallet messages onto the stream
 ```
 
+Then:
+
+```bash
+FROM=$(date -u -v-31d +%Y-%m-%dT%H:%M:%SZ); TO=$(date -u -v+1d +%Y-%m-%dT%H:%M:%SZ)
+curl "localhost:8080/cc/wallet-data/rest/v1/projection/1717?from=$FROM&to=$TO&aggregationLevel=1"
+curl -H 'X-Player-Id: 1717' "localhost:8080/web/wallet-data/rest/v1/projection?from=$FROM&to=$TO"
+```
+
+- API docs: http://localhost:8080/swagger-ui.html (OpenAPI at `/v3/api-docs`).
+- RabbitMQ UI: http://localhost:15672 (guest/guest).
+- `docker compose up -d` without the profile starts only Postgres (host port 55432) and RabbitMQ,
+  for running the app from the IDE or with `./gradlew bootRun`.
+
+**No authentication yet.** Both endpoints are closed by default: `/cc` answers 403 unless
+`wqs.api.cc-enabled=true`, `/web` answers 401 unless `wqs.api.web-player-header=true` (it then
+trusts an `X-Player-Id` header that any caller can set). The compose app turns both on: local use only.
+
 The stream consumer is off by default. Enable it on exactly one replica with
-`WQS_STREAM_ENABLED=true`.
+`WQS_STREAM_ENABLED=true`. When the broker advertises an address the app cannot reach (a load
+balancer, another container), set `WQS_STREAM_CONNECT_HOST`.
 
 ## Build and test
 
 ```bash
 ./gradlew clean build
+./gradlew benchmark        # opt-in: read and ingest benchmarks, results in build/benchmark/
 ```
 
 Tests run against real Postgres and RabbitMQ containers through Testcontainers. On Colima, point

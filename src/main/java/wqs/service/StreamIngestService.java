@@ -19,6 +19,7 @@ import wqs.exception.RejectedException;
 import wqs.mapper.TransactionMapper;
 import wqs.repository.DeadLetterRepository;
 import wqs.repository.IngestCursorRepository;
+import wqs.repository.TransactionRepository;
 import wqs.util.Hashes;
 
 /**
@@ -31,15 +32,18 @@ public class StreamIngestService {
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
 
     private final TransactionIngestService ingest;
+    private final PartitionService partitions;
     private final TransactionMapper mapper;
     private final IngestCursorRepository cursors;
     private final DeadLetterRepository deadLetters;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
-    public StreamIngestService(TransactionIngestService ingest, TransactionMapper mapper, IngestCursorRepository cursors,
-                               DeadLetterRepository deadLetters, ObjectMapper objectMapper, Clock clock) {
+    public StreamIngestService(TransactionIngestService ingest, PartitionService partitions, TransactionMapper mapper,
+                               IngestCursorRepository cursors, DeadLetterRepository deadLetters, ObjectMapper objectMapper,
+                               Clock clock) {
         this.ingest = ingest;
+        this.partitions = partitions;
         this.mapper = mapper;
         this.cursors = cursors;
         this.deadLetters = deadLetters;
@@ -56,7 +60,28 @@ public class StreamIngestService {
     }
 
     /**
-     * Projects a batch of messages in ONE transaction and stores the last offset. A refused message
+     * Creates the partitions a batch will write to. Call it BEFORE {@link #ingestBatch}, outside any
+     * transaction: once the batch has written to the table, creating a partition would wait for the
+     * batch's own lock. Garbage months are skipped here; the batch rejects them.
+     */
+    public void preparePartitions(List<StreamBatchItem> items) {
+        items.stream()
+                .filter(StreamBatchItem.Readable.class::isInstance)
+                .map(i -> ((StreamBatchItem.Readable) i).message().created())
+                .map(at -> java.time.YearMonth.from(at.atOffset(java.time.ZoneOffset.UTC)))
+                .distinct()
+                .forEach(month -> {
+                    try {
+                        partitions.ensure(TransactionRepository.TABLE, month.atDay(1).atStartOfDay().toInstant(java.time.ZoneOffset.UTC));
+                    } catch (RejectedException garbage) {
+                        // rejected again, per message, inside the batch
+                    }
+                });
+    }
+
+    /**
+     * Projects a batch of messages in ONE transaction and stores the last offset. The batch's
+     * partitions must already exist ({@link #preparePartitions}). A refused message
      * throws {@link BatchItemRejectedException} naming its offset, and the whole batch rolls back;
      * the caller retries it with that message as {@link StreamBatchItem.Refused}.
      */

@@ -13,6 +13,8 @@ import org.springframework.validation.annotation.Validated;
  * RabbitMQ stream connection. Off by default, so contexts without a broker (tests, tooling)
  * start; deployments set {@code WQS_STREAM_ENABLED=true}.
  *
+ * @param connectHost  optional: connect to this host whatever address the broker advertises (a
+ *                     broker behind a load balancer, or in another container); null to use the advertised one
  * @param batchSize    messages committed together in one transaction, at most
  * @param batchMaxWait how long a batch waits to fill once its first message has arrived
  */
@@ -22,5 +24,6 @@ public record StreamProperties(
         @DefaultValue("false") boolean enabled,
         @NotBlank @DefaultValue("rabbitmq-stream://localhost:5552") String uri,
         @NotBlank @DefaultValue("wallet-transactions") String name,
+        String connectHost,
         @Min(1) @Max(10_000) @DefaultValue("500") int batchSize,
         @NotNull @DefaultValue("200ms") Duration batchMaxWait) {}

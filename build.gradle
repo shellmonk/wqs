@@ -29,6 +29,7 @@ dependencies {
     implementation 'org.flywaydb:flyway-database-postgresql'
     implementation 'com.rabbitmq:stream-client:0.18.0'
     implementation "org.mapstruct:mapstruct:${mapstructVersion}"
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.7.0'
     runtimeOnly 'org.postgresql:postgresql'
 
     compileOnly "org.projectlombok:lombok:${lombokVersion}"
@@ -67,4 +68,15 @@ tasks.register('benchmark', Test) {
     maxHeapSize = '2g'
     outputs.upToDateWhen { false }
     testLogging { showStandardStreams = true }
+}
+
+// Publishes generated wallet messages to the local stream (docker compose):
+//   ./gradlew publishSamples [-Pcount=200] [-Pplayer=1717]
+tasks.register('publishSamples', JavaExec) {
+    description = 'Publishes sample walAccountTransactions messages to the local RabbitMQ stream.'
+    group = 'application'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'wqs.tools.PublishSamples'
+    args = [project.findProperty('count') ?: '200', project.findProperty('player') ?: '1717',
+            project.findProperty('streamUri') ?: 'rabbitmq-stream://localhost:5552']
 }
