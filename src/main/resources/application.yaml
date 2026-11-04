@@ -72,3 +72,6 @@ wqs:
     # it is dead-lettered and creates no partition.
     floor: 2010-01
     max-months-ahead: 12
+    # The partition-maintenance job (at startup, then hourly) keeps this many future months created,
+    # so ingest itself rarely has to create one.
+    create-ahead-months: 3

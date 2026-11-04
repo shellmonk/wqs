@@ -29,6 +29,16 @@ public class PartitionService {
         this.clock = clock;
     }
 
+    /** Creates the current month's partition of {@code table} and the next {@code createAheadMonths}. Returns how many months it checked. */
+    public int ensureAhead(String table) {
+        YearMonth now = YearMonth.now(clock.withZone(ZoneOffset.UTC));
+        int months = Math.min(properties.createAheadMonths(), properties.maxMonthsAhead());
+        for (int i = 0; i <= months; i++) {
+            ensure(table, now.plusMonths(i).atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
+        }
+        return months + 1;
+    }
+
     /**
      * Ensures {@code table} has the partition holding {@code at}. A month outside the allowed range
      * is a garbage timestamp: {@link RejectedException} {@code occurred-at-out-of-range}.
