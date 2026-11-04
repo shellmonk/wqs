@@ -22,6 +22,7 @@ import wqs.IntegrationTest;
 import wqs.config.StreamProperties;
 import wqs.service.StreamIngestService;
 import wqs.stream.StreamConsumer;
+import wqs.stream.StreamLeadership;
 import wqs.stream.StreamMessageDecoder;
 
 /**
@@ -40,6 +41,7 @@ class IngestBenchmark extends IntegrationTest {
     @Autowired StreamIngestService ingest;
     @Autowired JdbcClient jdbc;
     @Autowired ObjectMapper mapper;
+    @Autowired @org.springframework.beans.factory.annotation.Qualifier("writerDataSource") javax.sql.DataSource writer;
 
     @Test
     void measure() throws Exception {
@@ -50,7 +52,8 @@ class IngestBenchmark extends IntegrationTest {
             String stream = "bench-" + batchSize + "-" + UUID.randomUUID();
             preload(stream, batchSize);
             StreamProperties properties = new StreamProperties(true, "unused", stream, null, batchSize, Duration.ofMillis(200));
-            StreamConsumer consumer = new StreamConsumer(streams, properties, decoder, ingest, new SimpleMeterRegistry());
+            StreamConsumer consumer = new StreamConsumer(streams, properties, decoder, ingest,
+                    new StreamLeadership(writer, properties), new SimpleMeterRegistry());
             long t0 = System.nanoTime();
             consumer.start();
             while (offset(stream) < MESSAGES - 1) {

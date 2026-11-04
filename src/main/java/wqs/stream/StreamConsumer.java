@@ -4,10 +4,13 @@ import com.rabbitmq.stream.Consumer;
 import com.rabbitmq.stream.Environment;
 import com.rabbitmq.stream.Message;
 import com.rabbitmq.stream.OffsetSpecification;
+import com.rabbitmq.stream.NoOffsetException;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
@@ -55,8 +58,11 @@ import wqs.util.TransientFailures;
  *   <li>Transient database failure: retried with backoff on the same message, never dead-lettered.</li>
  * </ul>
  *
- * <p>If the broker is unreachable at start-up, subscribing is retried in the background with
- * backoff; the application stays up. Exactly one replica may run this (wqs.stream.enabled).
+ * <p>Every replica may enable this: only the one holding the {@link StreamLeadership} lock consumes,
+ * the others wait on standby and take over when it goes away. If the broker is unreachable,
+ * subscribing is retried in the background with backoff; the application stays up for reads.
+ * Writes are idempotent (the unique key and insert-if-absent), so the short overlap possible when a
+ * leader loses its lock mid-batch cannot double-count.
  */
 @Component
 @ConditionalOnProperty(name = "wqs.stream.enabled", havingValue = "true")
@@ -64,15 +70,25 @@ public class StreamConsumer implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(StreamConsumer.class);
     private static final Duration MAX_BACKOFF = Duration.ofSeconds(30);
+    private static final Duration STANDBY_POLL = Duration.ofSeconds(5);
+    private static final Duration LEADERSHIP_CHECK = Duration.ofSeconds(5);
+
+    /** Where this replica's consumer is. */
+    public enum State { STOPPED, STANDBY, CONNECTING, CONSUMING }
 
     private final Environment environment;
     private final StreamProperties properties;
     private final StreamMessageDecoder decoder;
     private final StreamIngestService ingest;
+    private final StreamLeadership leadership;
     private final MeterRegistry meters;
 
     private volatile boolean running;
-    private volatile Thread subscriber;
+    /** True during a leadership term: while this replica holds the lock and consumes. */
+    private volatile boolean consuming;
+    private volatile State state = State.STOPPED;
+    private volatile Instant lastCommitAt;
+    private volatile Thread supervisor;
     private volatile Consumer consumer;
     private volatile Thread worker;
     private volatile BlockingQueue<Received> queue;
@@ -83,12 +99,51 @@ public class StreamConsumer implements SmartLifecycle {
     record Received(long offset, byte[] body) {}
 
     public StreamConsumer(Environment environment, StreamProperties properties, StreamMessageDecoder decoder,
-                          StreamIngestService ingest, MeterRegistry meters) {
+                          StreamIngestService ingest, StreamLeadership leadership, MeterRegistry meters) {
         this.environment = environment;
         this.properties = properties;
         this.decoder = decoder;
         this.ingest = ingest;
+        this.leadership = leadership;
         this.meters = meters;
+        Gauge.builder("wqs.ingest.stream.leader", this, c -> c.state == State.CONSUMING ? 1 : 0)
+                .description("1 on the replica that consumes the stream").strongReference(true).register(meters);
+        Gauge.builder("wqs.ingest.stream.lag", this, c -> c.lag().orElse(Double.NaN))
+                .description("Messages in the stream not yet committed (leader only)").strongReference(true).register(meters);
+        Gauge.builder("wqs.ingest.stream.last.commit.age", this, c -> c.lastCommitAt == null ? Double.NaN
+                        : Duration.between(c.lastCommitAt, Instant.now()).toMillis() / 1000.0)
+                .description("Seconds since the last committed batch (leader only)").baseUnit("seconds")
+                .strongReference(true).register(meters);
+    }
+
+    public State state() {
+        return state;
+    }
+
+    public long lastCommittedOffset() {
+        return lastOffset;
+    }
+
+    public Instant lastCommitAt() {
+        return lastCommitAt;
+    }
+
+    /**
+     * Messages in the stream after the last committed one; empty when not consuming or the broker
+     * cannot say. A lower bound: the broker reports the first offset of its last committed chunk.
+     */
+    public java.util.OptionalDouble lag() {
+        if (state != State.CONSUMING) {
+            return java.util.OptionalDouble.empty();
+        }
+        try {
+            long head = environment.queryStreamStats(properties.name()).committedChunkId();
+            return java.util.OptionalDouble.of(Math.max(0, head - lastOffset));
+        } catch (NoOffsetException empty) {
+            return java.util.OptionalDouble.of(0);
+        } catch (RuntimeException e) {
+            return java.util.OptionalDouble.empty();
+        }
     }
 
     @Override
@@ -97,19 +152,68 @@ public class StreamConsumer implements SmartLifecycle {
             return;
         }
         running = true;
-        queue = new ArrayBlockingQueue<>(2 * properties.batchSize());
-        worker = Thread.ofVirtual().name("wqs-stream-batches").start(this::work);
-        subscriber = Thread.ofVirtual().name("wqs-stream-subscribe").start(this::subscribe);
+        supervisor = Thread.ofVirtual().name("wqs-stream-supervisor").start(this::supervise);
     }
 
     @Override
     public synchronized void stop() {
         running = false;
-        // The subscriber may be sleeping in its retry backoff: interrupt it.
-        join(subscriber, true);
-        // The worker finishes the batch it is committing (an interrupt during database I/O would
-        // break the connection) and then stops taking batches. Only after it has stopped is the
-        // queue cleared, so no batch is ever committed past a gap in the offsets.
+        consuming = false;
+        // The supervisor may be sleeping (standby, backoff, lock check): interrupt it. It ends the
+        // current term and releases the lock on its way out.
+        join(supervisor, true);
+        state = State.STOPPED;
+    }
+
+    /** Takes the lock (or waits on standby), consumes while holding it, and starts over if it is lost. */
+    private void supervise() {
+        while (running) {
+            if (!leadership.tryAcquire()) {
+                state = State.STANDBY;
+                if (!sleep(STANDBY_POLL)) {
+                    break;
+                }
+                continue;
+            }
+            try {
+                lead();
+            } finally {
+                endTerm();
+                leadership.release();
+            }
+        }
+        state = State.STOPPED;
+    }
+
+    private void lead() {
+        log.info("This replica holds the lock for stream {}: consuming", properties.name());
+        state = State.CONNECTING;
+        consuming = true;
+        queue = new ArrayBlockingQueue<>(2 * properties.batchSize());
+        worker = Thread.ofVirtual().name("wqs-stream-batches").start(this::work);
+        if (!subscribe()) {
+            return;
+        }
+        state = State.CONSUMING;
+        while (running) {
+            if (!sleep(LEADERSHIP_CHECK)) {
+                return;
+            }
+            if (!leadership.stillHeld()) {
+                log.error("Lost the lock for stream {}: stopping consumption on this replica", properties.name());
+                return;
+            }
+        }
+    }
+
+    /**
+     * Ends a leadership term. The worker finishes the batch it is committing (an interrupt during
+     * database I/O would break the connection) and then stops taking batches. Only after it has
+     * stopped is the queue cleared, so no batch is ever committed past a gap in the offsets.
+     */
+    private void endTerm() {
+        consuming = false;
+        boolean interrupted = Thread.interrupted(); // so the join below really waits
         join(worker, false);
         Consumer c = consumer;
         consumer = null;
@@ -118,7 +222,10 @@ public class StreamConsumer implements SmartLifecycle {
         }
         BlockingQueue<Received> q = queue;
         if (q != null) {
-            q.clear(); // not committed: read again from the stored offset on restart
+            q.clear(); // not committed: read again from the stored offset by the next leader
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -141,12 +248,14 @@ public class StreamConsumer implements SmartLifecycle {
         return running;
     }
 
-    private void subscribe() {
+    /** Subscribes after the stored offset, retrying with backoff. False when the term ended first. */
+    private boolean subscribe() {
         Duration backoff = Duration.ofSeconds(1);
-        while (running) {
+        while (running && consuming) {
             try {
                 OptionalLong stored = ingest.lastOffset(properties.name());
                 lastOffset = stored.orElse(-1);
+                stored.ifPresent(this::detectRetentionGap);
                 OffsetSpecification from = stored.isPresent()
                         ? OffsetSpecification.offset(stored.getAsLong() + 1)
                         : OffsetSpecification.first();
@@ -156,14 +265,33 @@ public class StreamConsumer implements SmartLifecycle {
                         .messageHandler((context, message) -> handle(context.offset(), message))
                         .build();
                 log.info("Consuming stream {} after offset {}", properties.name(), lastOffset);
-                return;
+                return true;
             } catch (RuntimeException e) {
                 log.warn("Cannot subscribe to stream {} ({}); retrying in {}", properties.name(), e.toString(), backoff);
-                if (!sleep(backoff)) {
-                    return;
+                if (!sleep(backoff) || !leadership.stillHeld()) {
+                    return false;
                 }
                 backoff = min(backoff.multipliedBy(2), MAX_BACKOFF);
             }
+        }
+        return false;
+    }
+
+    /**
+     * Retention may have deleted messages this service never read (a long outage). They are gone,
+     * and reading resumes at the oldest message left: that must be loud, never silent.
+     */
+    private void detectRetentionGap(long stored) {
+        try {
+            long first = environment.queryStreamStats(properties.name()).firstOffset();
+            if (first > stored + 1) {
+                long lost = first - stored - 1;
+                log.error("Stream {}: {} messages (offsets {}..{}) were removed by retention before they were read; "
+                        + "they are missing from the projection", properties.name(), lost, stored + 1, first - 1);
+                meters.counter("wqs.ingest.stream.lost.messages").increment(lost);
+            }
+        } catch (RuntimeException e) {
+            // an empty stream, or stats unavailable: nothing to compare
         }
     }
 
@@ -176,7 +304,7 @@ public class StreamConsumer implements SmartLifecycle {
         try {
             // A full queue holds the broker back. Wait in short steps so stopping is never blocked;
             // a message dropped while stopping is read again from the stored offset on restart.
-            while (running) {
+            while (consuming) {
                 if (queue.offer(received, 100, TimeUnit.MILLISECONDS)) {
                     return;
                 }
@@ -188,7 +316,7 @@ public class StreamConsumer implements SmartLifecycle {
 
     /** The single worker: takes batches off the queue, in offset order, and commits them. */
     private void work() {
-        while (running) {
+        while (consuming) {
             List<Received> batch;
             try {
                 batch = nextBatch();
@@ -246,11 +374,12 @@ public class StreamConsumer implements SmartLifecycle {
             }
         }
         Duration backoff = Duration.ofMillis(100);
-        while (running) {
+        while (consuming) {
             try {
                 ingest.preparePartitions(items); // before the batch transaction: see PartitionDdlService
                 StreamBatchResult result = ingest.ingestBatch(feed, items);
                 lastOffset = batch.getLast().offset();
+                lastCommitAt = Instant.now();
                 meters.summary("wqs.ingest.stream.batch.size").record(batch.size());
                 count("stored", result.stored());
                 count("already_stored", result.alreadyStored());
@@ -289,10 +418,11 @@ public class StreamConsumer implements SmartLifecycle {
     /** The fallback: one message in its own transaction, with the per-message failure handling. */
     private void handleOne(long offset, byte[] body) {
         Duration backoff = Duration.ofMillis(100);
-        while (running) {
+        while (consuming) {
             try {
                 String outcome = process(offset, body);
                 lastOffset = offset;
+                lastCommitAt = Instant.now();
                 meters.counter("wqs.ingest.stream.messages", "outcome", outcome).increment();
                 return;
             } catch (RuntimeException e) {
@@ -345,7 +475,7 @@ public class StreamConsumer implements SmartLifecycle {
         log.error("Stream offset {} dead-lettered: write failed ({})", offset, error);
         boolean withFields = true;
         Duration backoff = Duration.ofMillis(100);
-        while (running) {
+        while (consuming) {
             boolean fields = withFields;
             try {
                 if (fields) {

@@ -42,8 +42,8 @@ curl -H 'X-Player-Id: 1717' "localhost:8080/web/wallet-data/rest/v1/projection?f
 `wqs.api.cc-enabled=true`, `/web` answers 401 unless `wqs.api.web-player-header=true` (it then
 trusts an `X-Player-Id` header that any caller can set). The compose app turns both on: local use only.
 
-The stream consumer is off by default. Enable it on exactly one replica with
-`WQS_STREAM_ENABLED=true`. When the broker advertises an address the app cannot reach (a load
+The stream consumer is off by default. `WQS_STREAM_ENABLED=true` may be set on every replica: a
+Postgres advisory lock lets one consume and the rest stand by (see `docs/operations.md`). When the broker advertises an address the app cannot reach (a load
 balancer, another container), set `WQS_STREAM_CONNECT_HOST`.
 
 ## Build and test

@@ -46,6 +46,13 @@ management:
     web:
       exposure:
         include: health,info,prometheus
+  endpoint:
+    health:
+      show-components: always   # db, streamConsumer, ... with their status (details stay hidden)
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
 
 wqs:
   api:
@@ -58,7 +65,7 @@ wqs:
       hikari:
         maximum-pool-size: 32
   stream:
-    # Exactly one replica may consume the stream: WQS_STREAM_ENABLED=true on that one only.
+    # Any number of replicas may enable it: a Postgres advisory lock lets one consume, the rest stand by.
     enabled: false
     uri: rabbitmq-stream://localhost:5552
     name: wallet-transactions
