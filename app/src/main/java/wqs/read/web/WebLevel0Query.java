@@ -15,10 +15,14 @@ import wqs.read.TransactionEntry;
 import wqs.read.TransactionKey;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
+import wqs.read.ReadPolicy;
 
 /** Level-0 reads of the web view; reads only the "wqPrjWebTransaction" view (transactions and claimable prizes). */
 @Component
 public class WebLevel0Query implements Level0Query {
+
+    /** What /web shows (plan D1), bound into every statement below. */
+    private static final ReadPolicy POLICY = ReadPolicy.WEB;
 
     private static final String COUNT = """
             select count(*) from "wqPrjWebTransaction"
@@ -40,7 +44,7 @@ public class WebLevel0Query implements Level0Query {
                    "wqPrjWebTransaction"."cancels", "wqPrjWebTransaction"."detail", "wqPrjWebTransaction"."ingestedAt", "wqPrjWebTransaction"."productType"
             from "wqPrjWebTransaction"
             join unnest(cast(:ids as bigint[])) as "wanted" ("id") on "wqPrjWebTransaction"."transactionId" = "wanted"."id"
-            where ("wqPrjWebTransaction"."userId" = :userId
+            where ("wqPrjWebTransaction"."ownerType" = :ownerType and "wqPrjWebTransaction"."userId" = :userId
                    and "wqPrjWebTransaction"."occurredAt" between cast(:min as timestamptz) and cast(:max as timestamptz))
             """;
 
@@ -53,6 +57,11 @@ public class WebLevel0Query implements Level0Query {
     @Override
     public ViewKind view() {
         return ViewKind.WEB;
+    }
+
+    @Override
+    public ReadPolicy policy() {
+        return POLICY;
     }
 
     @Override
@@ -86,6 +95,7 @@ public class WebLevel0Query implements Level0Query {
         Map<TransactionKey, TransactionEntry> byKey = new HashMap<>();
         tx.sql(FETCH)
                 .param("ids", ids)
+                .param("ownerType", POLICY.ownerType())
                 .param("userId", userId)
                 .param("min", utc(min))
                 .param("max", utc(max))
@@ -109,8 +119,10 @@ public class WebLevel0Query implements Level0Query {
      */
     private static String range(Level0Filter f) {
         StringBuilder c = new StringBuilder("""
-                ("wqPrjWebTransaction"."userId" = :userId and "wqPrjWebTransaction"."occurredAt" >= cast(:lo as timestamptz) \
+                ("wqPrjWebTransaction"."ownerType" = :ownerType and "wqPrjWebTransaction"."userId" = :userId \
+                and "wqPrjWebTransaction"."occurredAt" >= cast(:lo as timestamptz) \
                 and "wqPrjWebTransaction"."occurredAt" < cast(:hi as timestamptz)""");
+        c.append(POLICY.zeroAmountFilter("\"wqPrjWebTransaction\""));
         if (f.excludeCancelled()) {
             c.append(" and not (\"wqPrjWebTransaction\".\"cancelled\")");
         }
@@ -124,7 +136,8 @@ public class WebLevel0Query implements Level0Query {
     }
 
     private static JdbcClient.StatementSpec range(JdbcClient.StatementSpec spec, Level0Filter f, Instant lo, Instant hi) {
-        spec = spec.param("userId", f.userId()).param("lo", utc(lo)).param("hi", utc(hi));
+        spec = spec.param("ownerType", POLICY.ownerType()).param("userId", f.userId())
+                .param("lo", utc(lo)).param("hi", utc(hi));
         if (!f.productTypes().isEmpty()) {
             spec = spec.param("productTypes", f.productTypes());
         }

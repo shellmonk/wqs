@@ -71,6 +71,11 @@ class KeyQueryPruningTest extends ReadPropertyBase {
                 }
 
                 @Override
+                public ReadPolicy policy() {
+                    return q.policy();
+                }
+
+                @Override
                 public long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi) {
                     return q.count(tx, f, lo, hi);
                 }
@@ -106,6 +111,11 @@ class KeyQueryPruningTest extends ReadPropertyBase {
                 @Override
                 public ViewKind view() {
                     return q.view();
+                }
+
+                @Override
+                public ReadPolicy policy() {
+                    return q.policy();
                 }
 
                 @Override

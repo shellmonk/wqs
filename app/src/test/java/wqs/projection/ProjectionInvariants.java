@@ -27,9 +27,11 @@ import wqs.domain.MoneyDirection;
  *       ("occurredAt", "sourceId", "source") (plan D6); its productId is the same transaction's, so the
  *       pair always belongs to one transaction. A session is single-currency (mismatches are
  *       dead-lettered), so its currency is any transaction's -- MIN here.</li>
- *   <li>A zero-amount transaction is in the locator only ("zeroAmount"), in no table checked here; a
- *       zero-amount cancel's target is in the locator's "cancels" and still counts as a
- *       cancel.</li>
+ *   <li>Every owner is ("ownerType", "userId"): every grouping and join below carries both.</li>
+ *   <li>A zero-amount transaction ("zeroAmount") is a transaction row like any other, counted at
+ *       TRANSACTION under its own "zeroAmount" = true counter rows, but in no rollup sum, no group key and
+ *       no page unit; a session's and play's "zeroTxCount" counts them (plan D6), and a group exists
+ *       only once it has a non-zero row. A zero-amount cancel cancels like any other.</li>
  *   <li>Counters are sparse: a stored row with cntAll = 0 is itself drift.</li>
  * </ul>
  */
@@ -43,7 +45,7 @@ public final class ProjectionInvariants {
      * sources).
      */
     public static final String WEB_TIMELINE = """
-            (select "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
+            (select "ownerType", "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
                     "visibleExclCancelled"
              from "wqPrjTimeline" where "onWeb")""";
     /** A table name double-quoted, or a parenthesised relation such as {@link #WEB_TIMELINE} as is. */
@@ -52,7 +54,7 @@ public final class ProjectionInvariants {
     }
 
     public static final String CC_TIMELINE = """
-            (select "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
+            (select "ownerType", "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
                     "visibleExclCancelled"
              from "wqPrjTimeline")""";
 
@@ -75,7 +77,7 @@ public final class ProjectionInvariants {
     /**
      * Cancellation itself (spec 6.3), on "wqPrjTransaction" (each transaction is stored once, so
      * both views see the same flag): a transaction is "cancelled" exactly when a
-     * cancel for it exists -- a cancel transaction row, or a zero-amount cancel's locator row -- same source, same user, "cancels" = its sourceId -- and then
+     * cancel row for it exists -- same source, same owner, "cancels" = its sourceId -- and then
      * "cancelledBy" is the least such cancel's sourceId (null otherwise). And "wqPrjPendingCancel"
      * holds exactly the cancels whose target is absent (no locator row with that source,
      * sourceId and user).
@@ -86,45 +88,43 @@ public final class ProjectionInvariants {
     public List<String> cancellationDrift() {
         List<String> drift = new ArrayList<>();
         String cancels = "c.\"cancels\" is not null and btrim(c.\"cancels\") <> ''";
-        // Every cancel: projected cancel rows, and zero-amount cancels, which live in the locator
-        // only (spec 4.1) yet still cancel their target.
+        // Every cancel is a transaction row, zero-amount ones included.
         String allCancels = """
-                select c."source", c."userId", c."sourceId", c."cancels" as target
+                select c."source", c."ownerType", c."userId", c."sourceId", c."cancels" as target
                 from "wqPrjTransaction" c where %s
-                union all
-                select l."source", l."userId", l."sourceId", l."cancels"
-                from "wqPrjTransactionLocator" l where l."zeroAmount" and l."cancels" is not null
                 """.formatted(cancels);
         drift.addAll(sql.rows("""
                 with cancel as (
-                    select "source", "userId", target, min("sourceId") as "by"
+                    select "source", "ownerType", "userId", target, min("sourceId") as "by"
                     from (%1$s) all_cancels
-                    group by 1, 2, 3
+                    group by 1, 2, 3, 4
                 )
                 select case when i."cancelled" and k.target is null then 'cancelled without a cancel'
                             when not i."cancelled" and k.target is not null then 'cancel not applied'
                             else 'cancelledBy mismatch' end as problem,
-                       i."userId", i."source", i."sourceId",
+                       i."ownerType", i."userId", i."source", i."sourceId",
                        i."cancelled" as "storedCancelled",
                        k."by" as "expectedCancelledBy", i."cancelledBy" as "storedCancelledBy"
                 from "wqPrjTransaction" i
                 left join cancel k
-                  on k."source" = i."source" and k."userId" = i."userId" and k.target = i."sourceId"
+                  on k."source" = i."source" and k."ownerType" = i."ownerType" and k."userId" = i."userId"
+                 and k.target = i."sourceId"
                 where i."cancelled" <> (k.target is not null)
                    or i."cancelledBy" is distinct from k."by"
-                order by 2, 3, 4
+                order by 2, 3, 4, 5
                 """.formatted(allCancels))
                 .stream().map(ProjectionInvariants::describe).toList());
         drift.addAll(sql.rows("""
                 with expected as (
-                    select c."source", c."sourceId", c.target as "cancels", c."userId"
+                    select c."source", c."sourceId", c.target as "cancels", c."ownerType", c."userId"
                     from (%2$s) c
                     where not exists (select 1 from "wqPrjTransactionLocator" l
                                       where l."source" = c."source" and l."sourceId" = c.target
-                                        and l."userId" = c."userId")
+                                        and l."ownerType" = c."ownerType" and l."userId" = c."userId")
                 )
                 select case when e."sourceId" is null then 'unexpected pending cancel'
                             else 'missing pending cancel' end as problem,
+                       coalesce(e."ownerType", p."ownerType") as "ownerType",
                        coalesce(e."userId", p."userId") as "userId",
                        coalesce(e."source", p."source") as "source",
                        coalesce(e."sourceId", p."cancelSourceId") as "cancelSourceId",
@@ -132,9 +132,9 @@ public final class ProjectionInvariants {
                 from expected e
                 full outer join "wqPrjPendingCancel" p
                   on p."source" = e."source" and p."cancelSourceId" = e."sourceId"
-                 and p."cancelsSourceId" = e."cancels" and p."userId" = e."userId"
+                 and p."cancelsSourceId" = e."cancels" and p."ownerType" = e."ownerType" and p."userId" = e."userId"
                 where e."sourceId" is null or p."cancelSourceId" is null
-                order by 2, 3, 4
+                order by 2, 3, 4, 5
                 """.formatted(cancels, allCancels))
                 .stream().map(ProjectionInvariants::describe).toList());
         return drift;
@@ -156,32 +156,33 @@ public final class ProjectionInvariants {
     public List<String> counterDrift() {
         return sql.rows("""
                 with src as (
-                    select 1 as v, 0 as u, "userId", "occurredAt" as t, "productType" as p,
-                           not "cancelled" as vis, "type" as ty from "wqPrjWebTransaction"
+                    select 1 as v, 0 as u, "ownerType" as o, "userId", "occurredAt" as t, "productType" as p,
+                           not "cancelled" as vis, "type" as ty, "zeroAmount" as z from "wqPrjWebTransaction"
                   union all
-                    select 2, 0, "userId", "occurredAt", "productType", not "cancelled", "type"
+                    select 2, 0, "ownerType", "userId", "occurredAt", "productType", not "cancelled", "type", "zeroAmount"
                     from "wqPrjCcTransaction"
                   union all
-                    select 1, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", ''
+                    select 1, 1, "ownerType", "userId", "occurredAt", "productType", "visibleExclCancelled", '', false
                     from %1$s web
                   union all
-                    select 2, 1, "userId", "occurredAt", "productType", "visibleExclCancelled", ''
+                    select 2, 1, "ownerType", "userId", "occurredAt", "productType", "visibleExclCancelled", '', false
                     from %2$s cc
                 ),
                 keyed as (
-                    select distinct v, u, "userId", pk.prod, tk.typ, t, vis, src_id
+                    select distinct v, u, o, "userId", z, pk.prod, tk.typ, t, vis, src_id
                     from (select row_number() over () as src_id, * from src) s,
                          lateral (values (s.p), ('')) as pk(prod),
                          lateral (values (s.ty), ('')) as tk(typ)
                     where pk.prod is not null
                 ),
                 expected as (
-                    select "userId", v, u, prod, typ, (t at time zone 'UTC')::date as "day",
+                    select o, "userId", v, u, z, prod, typ, (t at time zone 'UTC')::date as "day",
                            count(*) as "cntAll", count(*) filter (where vis) as "cntExcl"
-                    from keyed group by 1, 2, 3, 4, 5, 6
+                    from keyed group by 1, 2, 3, 4, 5, 6, 7, 8
                 ),
                 stored as (
-                    select "userId", "viewKind"::int as v, "pageUnit"::int as u,
+                    select "ownerType"::int as o, "userId", "viewKind"::int as v, "pageUnit"::int as u,
+                           "zeroAmount" as z,
                            "productType" as prod, "type" as typ, "day", "cntAll",
                            "cntExclCancelled" as "cntExcl"
                     from "wqPrjCount"
@@ -189,8 +190,10 @@ public final class ProjectionInvariants {
                 select case when e."userId" is null then 'orphan counter row'
                             when s."userId" is null then 'missing counter row'
                             else 'counter mismatch' end as problem,
+                       coalesce(e.o, s.o) as "ownerType",
                        coalesce(e."userId", s."userId") as "userId",
                        coalesce(e.v, s.v) as "viewKind",
+                       coalesce(e.z, s.z) as "zeroAmount",
                        case coalesce(e.u, s.u) when 0 then 'TRANSACTION' else 'HIGH_LEVEL' end as "pageUnit",
                        coalesce(e.prod, s.prod) as "productType",
                        coalesce(e.typ, s.typ) as "type",
@@ -199,11 +202,11 @@ public final class ProjectionInvariants {
                        e."cntExcl" as "expectedExcl", s."cntExcl" as "storedExcl"
                 from expected e
                 full outer join stored s
-                  on s."userId" = e."userId" and s.v = e.v and s.u = e.u
+                  on s.o = e.o and s."userId" = e."userId" and s.v = e.v and s.u = e.u and s.z = e.z
                  and s.prod = e.prod and s.typ = e.typ and s."day" = e."day"
                 where e."userId" is null or s."userId" is null
                    or e."cntAll" <> s."cntAll" or e."cntExcl" <> s."cntExcl"
-                order by 2, 3, 4, 5, 6, 7
+                order by 2, 3, 4, 5, 6, 7, 8, 9
                 """.formatted(WEB_TIMELINE, CC_TIMELINE))
                 .stream().map(ProjectionInvariants::describe).toList();
     }
@@ -225,13 +228,19 @@ public final class ProjectionInvariants {
         String plays = money(MoneyDirection.PLAY);
         String wins = money(MoneyDirection.WIN);
         String sessioned = """
-                select i."userId", i."batchId", i."subBatchId", i."occurredAt", i."productId",
+                select i."ownerType", i."userId", i."batchId", i."subBatchId", i."occurredAt", i."productId",
                        i."productType", i."currency"::text as currency, i."cancelled",
                        i."sourceId", i."source",
                        %s as plays, %s as wins
                 from "wqPrjTransaction" i
-                where i."batchId" is not null and %s
+                where i."batchId" is not null and %s and not i."zeroAmount"
                 """.formatted(plays, wins, NOT_A_CANCELLATION);
+        // A group's zero-amount rows: only its "zeroTxCount" (plan D6).
+        String zeros = """
+                select i."ownerType", i."userId", i."batchId", i."subBatchId"
+                from "wqPrjTransaction" i
+                where i."batchId" is not null and %s and i."zeroAmount"
+                """.formatted(NOT_A_CANCELLATION);
         String folded = """
                 count(*)::int as "txCount",
                 count(*) filter (where not "cancelled")::int as "txCountExclCancelled",
@@ -260,54 +269,63 @@ public final class ProjectionInvariants {
                 or e."productId" is distinct from s."productId"
                 or e."productType" is distinct from s."productType"
                 or e.currency is distinct from s.currency::text
+                or coalesce(z.n, 0) is distinct from s."zeroTxCount"
                 """;
 
         List<String> drift = new ArrayList<>();
         drift.addAll(sql.rows("""
                 with transactions as (%1$s),
                 expected as (
-                    select "userId", "batchId", %2$s,
+                    select "ownerType", "userId", "batchId", %2$s,
                            count(distinct "subBatchId")::int as "playCount",
                            count(distinct "subBatchId") filter (where not "cancelled")::int
                              as "playCountExclCancelled"
-                    from transactions group by 1, 2
-                )
+                    from transactions group by 1, 2, 3
+                ),
+                z as (select "ownerType", "userId", "batchId", count(*)::int as n from (%4$s) zr group by 1, 2, 3)
                 select case when e."batchId" is null then 'orphan session row'
                             when s."batchId" is null then 'missing session row'
                             else 'session mismatch' end as problem,
+                       coalesce(e."ownerType", s."ownerType") as "ownerType",
                        coalesce(e."userId", s."userId") as "userId",
                        coalesce(e."batchId", s."batchId") as "batchId",
-                       e::text as expected, s::text as stored
+                       e::text as expected, s::text as stored, z.n as "expectedZeroTxCount"
                 from expected e
                 full outer join "wqPrjSession" s
-                  on s."userId" = e."userId" and s."batchId" = e."batchId"
+                  on s."ownerType" = e."ownerType" and s."userId" = e."userId" and s."batchId" = e."batchId"
+                left join z on z."ownerType" = s."ownerType" and z."userId" = s."userId" and z."batchId" = s."batchId"
                 where e."batchId" is null or s."batchId" is null
                    or %3$s
                    or e."playCount" is distinct from s."playCount"
                    or e."playCountExclCancelled" is distinct from s."playCountExclCancelled"
-                order by 2, 3
-                """.formatted(sessioned, folded, compared))
+                order by 2, 3, 4
+                """.formatted(sessioned, folded, compared, zeros))
                 .stream().map(ProjectionInvariants::describe).toList());
         drift.addAll(sql.rows("""
                 with transactions as (%1$s),
                 expected as (
-                    select "userId", "batchId", "subBatchId", %2$s
-                    from transactions where "subBatchId" is not null group by 1, 2, 3
-                )
+                    select "ownerType", "userId", "batchId", "subBatchId", %2$s
+                    from transactions where "subBatchId" is not null group by 1, 2, 3, 4
+                ),
+                z as (select "ownerType", "userId", "batchId", "subBatchId", count(*)::int as n
+                      from (%4$s) zr where "subBatchId" is not null group by 1, 2, 3, 4)
                 select case when e."batchId" is null then 'orphan play row'
                             when s."batchId" is null then 'missing play row'
                             else 'play mismatch' end as problem,
+                       coalesce(e."ownerType", s."ownerType") as "ownerType",
                        coalesce(e."userId", s."userId") as "userId",
                        coalesce(e."batchId", s."batchId") as "batchId",
                        coalesce(e."subBatchId", s."subBatchId") as "subBatchId",
-                       e::text as expected, s::text as stored
+                       e::text as expected, s::text as stored, z.n as "expectedZeroTxCount"
                 from expected e
                 full outer join "wqPrjPlay" s
-                  on s."userId" = e."userId" and s."batchId" = e."batchId"
+                  on s."ownerType" = e."ownerType" and s."userId" = e."userId" and s."batchId" = e."batchId"
                  and s."subBatchId" = e."subBatchId"
+                left join z on z."ownerType" = s."ownerType" and z."userId" = s."userId"
+                 and z."batchId" = s."batchId" and z."subBatchId" = s."subBatchId"
                 where e."batchId" is null or s."batchId" is null or %3$s
-                order by 2, 3, 4
-                """.formatted(sessioned, folded, compared))
+                order by 2, 3, 4, 5
+                """.formatted(sessioned, folded, compared, zeros))
                 .stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }
@@ -334,29 +352,30 @@ public final class ProjectionInvariants {
                 {"WEB", "wqPrjWebTransaction", WEB_TIMELINE}, {"CC", "wqPrjCcTransaction", CC_TIMELINE}}) {
             drift.addAll(sql.rows("""
                     with session_key as (
-                        select i."userId", i."batchId", min(i."occurredAt") as "startedAt",
+                        select i."ownerType", i."userId", i."batchId", min(i."occurredAt") as "startedAt",
                                (array_agg(i."productId"
                                     order by i."occurredAt", i."sourceId", i."source"))[1] as "productId",
                                (array_agg(i."productType"
                                     order by i."occurredAt", i."sourceId", i."source"))[1] as "productType",
                                min(i."currency"::text) as currency
                         from "wqPrjTransaction" i
-                        where i."batchId" is not null and %3$s
-                        group by 1, 2
+                        where i."batchId" is not null and %3$s and not i."zeroAmount"
+                        group by 1, 2, 3
                     ),
                     expected as (
-                        select k."userId", k."startedAt" as "occurredAt", 0::smallint as kind,
+                        select k."ownerType", k."userId", k."startedAt" as "occurredAt", 0::smallint as kind,
                                k."batchId" as "refId", k."productId", k."productType", k.currency,
                                bool_or(not i."cancelled") as visible
                         from "%1$s" i
-                        join session_key k on k."userId" = i."userId" and k."batchId" = i."batchId"
-                        where %3$s
-                        group by 1, 2, 3, 4, 5, 6, 7
+                        join session_key k on k."ownerType" = i."ownerType" and k."userId" = i."userId"
+                         and k."batchId" = i."batchId"
+                        where %3$s and not i."zeroAmount"
+                        group by 1, 2, 3, 4, 5, 6, 7, 8
                       union all
-                        select i."userId", i."occurredAt", i."source", i."sourceId", i."productId",
+                        select i."ownerType", i."userId", i."occurredAt", i."source", i."sourceId", i."productId",
                                i."productType", i."currency"::text, not i."cancelled"
                         from "%1$s" i
-                        where i."batchId" is null and %3$s
+                        where i."batchId" is null and %3$s and not i."zeroAmount"
                     )
                     select case when e."refId" is null then 'orphan page row'
                                 when h."refId" is null then 'missing page row'
@@ -368,6 +387,7 @@ public final class ProjectionInvariants {
                                   then 'page row currency mismatch'
                                 else 'page row visibility mismatch' end as problem,
                            '%4$s' as view,
+                           coalesce(e."ownerType", h."ownerType") as "ownerType",
                            coalesce(e."userId", h."userId") as "userId",
                            coalesce(e.kind, h."kind") as kind,
                            coalesce(e."refId", h."refId") as "refId",
@@ -379,14 +399,15 @@ public final class ProjectionInvariants {
                            e.visible as "expectedVisible", h."visibleExclCancelled" as "storedVisible"
                     from expected e
                     full outer join %2$s h
-                      on h."userId" = e."userId" and h."kind" = e.kind and h."refId" = e."refId"
+                      on h."ownerType" = e."ownerType" and h."userId" = e."userId" and h."kind" = e.kind
+                     and h."refId" = e."refId"
                     where e."refId" is null or h."refId" is null
                        or e."occurredAt" <> h."occurredAt"
                        or e."productId" is distinct from h."productId"
                        or e."productType" is distinct from h."productType"
                        or e.currency is distinct from h."currency"::text
                        or e.visible <> h."visibleExclCancelled"
-                    order by 3, 4, 5
+                    order by 3, 4, 5, 6
                     """.formatted(view[1], view[2], NOT_A_CANCELLATION, view[0]))
                     .stream().map(ProjectionInvariants::describe).toList());
         }
@@ -410,7 +431,7 @@ public final class ProjectionInvariants {
                 select 'unsessioned eInstant transaction' as problem,
                        i."userId", i."source", i."sourceId", i."productType"
                 from "wqPrjTransaction" i
-                where i."batchId" is null and i."productType" = any(?::text[]) and %s
+                where i."batchId" is null and i."productType" = any(?::text[]) and %s and not i."zeroAmount"
                 order by 2, 3, 4
                 """.formatted(NOT_A_CANCELLATION), (Object) types)
                 .stream().map(ProjectionInvariants::describe).toList());

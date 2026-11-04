@@ -47,6 +47,11 @@ import wqs.domain.ViewKind;
  *       pair one transaction's id with another's type). A transaction replaces the label when it re-anchors
  *       the group, or ties its startedAt with a lower (sourceId, source); a null pair is a pair
  *       like any other.</li>
+ *   <li>"zeroTxCount" = the group's zero-amount rows (plan D6), which are stored but add nothing
+ *       else: no count, money, start or label, and they never create a group. A zero-amount row
+ *       joining an existing group adds one; a group's first non-zero row counts the zero-amount
+ *       rows already stored for it (by the "_batch" index), so any arrival order converges.</li>
+ *   <li>Keys are owner keys: ("ownerType", "userId", "batchId"[, "subBatchId"]).</li>
  *   <li>"currency" = the first-arriving transaction's. A session is single-currency: a transaction of another
  *       currency is dead-lettered before it gets here ({@link IngestRules}), so every transaction agrees
  *       and arrival order cannot matter.</li>
@@ -58,29 +63,29 @@ public class RollupUpdater {
     /** Locks an existing play row; empty when the play does not exist yet. */
     private static final String LOCK_PLAY = """
             select "startedAt" from "wqPrjPlay"
-            where "userId" = ? and "batchId" = ? and "subBatchId" = ?
+            where "ownerType" = ? and "userId" = ? and "batchId" = ? and "subBatchId" = ?
             for update
             """;
     /** Locks an existing session row and reads the key fields a fold may change. */
     private static final String LOCK_SESSION = """
             select "startedAt", "productId", "productType" from "wqPrjSession"
-            where "userId" = ? and "batchId" = ?
+            where "ownerType" = ? and "userId" = ? and "batchId" = ?
             for update
             """;
 
     private static final String INSERT_PLAY = """
-            insert into "wqPrjPlay" ("userId", "batchId", "subBatchId", "startedAt", "endedAt", "productId",
+            insert into "wqPrjPlay" ("ownerType", "userId", "batchId", "subBatchId", "startedAt", "endedAt", "productId",
                     "productType", "currency", "firstSourceId", "firstSource", "txCount",
                     "txCountExclCancelled", "totalPlays", "totalWins", "net", "totalPlaysExclCancelled",
-                    "totalWinsExclCancelled", "netExclCancelled")
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "totalWinsExclCancelled", "netExclCancelled", "zeroTxCount")
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
     private static final String INSERT_SESSION = """
-            insert into "wqPrjSession" ("userId", "batchId", "startedAt", "endedAt", "productId", "productType",
+            insert into "wqPrjSession" ("ownerType", "userId", "batchId", "startedAt", "endedAt", "productId", "productType",
                     "currency", "firstSourceId", "firstSource", "txCount", "txCountExclCancelled",
                     "playCount", "playCountExclCancelled", "totalPlays", "totalWins", "net",
-                    "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled", "zeroTxCount")
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
     /** Creates the group's row; returns nothing when a concurrent writer created it first. */
@@ -98,7 +103,7 @@ public class RollupUpdater {
      * {@link #isFirst}: an SQL constant chosen in Java, never a value.
      */
     private static final String FOLD_PLAY = INSERT_PLAY + """
-            on conflict ("userId", "batchId", "subBatchId") do update set
+            on conflict ("ownerType", "userId", "batchId", "subBatchId") do update set
                 "startedAt" = least("wqPrjPlay"."startedAt", excluded."startedAt"),
                 "endedAt" = greatest("wqPrjPlay"."endedAt", excluded."endedAt"),
                 "productId" = case when %1$s then excluded."productId" else "wqPrjPlay"."productId" end,
@@ -116,7 +121,7 @@ public class RollupUpdater {
             returning "txCountExclCancelled"
             """;
     private static final String FOLD_SESSION = INSERT_SESSION + """
-            on conflict ("userId", "batchId") do update set
+            on conflict ("ownerType", "userId", "batchId") do update set
                 "startedAt" = least("wqPrjSession"."startedAt", excluded."startedAt"),
                 "endedAt" = greatest("wqPrjSession"."endedAt", excluded."endedAt"),
                 "productId" = case when %1$s then excluded."productId" else "wqPrjSession"."productId" end,
@@ -134,6 +139,25 @@ public class RollupUpdater {
                 "totalWinsExclCancelled" = "wqPrjSession"."totalWinsExclCancelled" + excluded."totalWinsExclCancelled",
                 "netExclCancelled" = "wqPrjSession"."netExclCancelled" + excluded."netExclCancelled"
             returning "productId", "productType", "currency"
+            """;
+
+    /**
+     * The zero-amount rows already stored for a group that is being created, through the "_batch"
+     * index (no time bound: a group's rows may lie in any partition). Cancellations never fold, so
+     * a zero-amount cancellation is not counted either. {@code %s}: the play predicate or nothing.
+     */
+    private static final String ZERO_ROWS = """
+            select count(*) from "wqPrjTransaction"
+            where "ownerType" = ? and "userId" = ? and "batchId" = ?%s
+              and "zeroAmount" and "cancels" is null
+            """;
+    private static final String PLAY_ZERO = """
+            update "wqPrjPlay" set "zeroTxCount" = "wqPrjPlay"."zeroTxCount" + 1
+            where "ownerType" = ? and "userId" = ? and "batchId" = ? and "subBatchId" = ?
+            """;
+    private static final String SESSION_ZERO = """
+            update "wqPrjSession" set "zeroTxCount" = "wqPrjSession"."zeroTxCount" + 1
+            where "ownerType" = ? and "userId" = ? and "batchId" = ?
             """;
 
     private static final RowMapper<SessionLabel> SESSION_LABEL = (rs, n) -> new SessionLabel(
@@ -175,6 +199,10 @@ public class RollupUpdater {
         if (!transaction.isSessioned() || transaction.isCancellation()) {
             return RollupResult.NONE;
         }
+        if (transaction.isZeroAmount()) {
+            countZero(transaction);
+            return RollupResult.NONE;
+        }
         requireSessionable(transaction);
 
         MoneyDirection direction = TransactionType.directionOf(transaction.type());
@@ -189,7 +217,7 @@ public class RollupUpdater {
             Integer survivors = null;
             OffsetDateTime playStart = lockPlay(transaction);
             if (playStart == null) {
-                survivors = claimPlay(c);
+                survivors = claimPlay(c, zeroRows(transaction, true));
                 playIsNew = survivors != null;
                 if (!playIsNew) {
                     playStart = lockPlay(transaction); // a concurrent writer created it first
@@ -207,7 +235,7 @@ public class RollupUpdater {
         SessionKey before = lockSession(transaction);
         SessionLabel label = null;
         if (before == null) {
-            label = claimSession(c, playIsNew, playIsLive);
+            label = claimSession(c, playIsNew, playIsLive, zeroRows(transaction, false));
             if (label == null) {
                 before = lockSession(transaction); // a concurrent writer created it first
             }
@@ -250,10 +278,35 @@ public class RollupUpdater {
         }
     }
 
+    /**
+     * A zero-amount row joins its play and session as "zeroTxCount" only (plan D6); a group that
+     * does not exist yet counts it when its first non-zero row creates it ({@link #zeroRows}).
+     */
+    private void countZero(ProjectionTransaction transaction) {
+        if (transaction.hasPlay()) {
+            jdbc.sql(PLAY_ZERO)
+                    .params(transaction.ownerType(), transaction.userId(), transaction.batchId(), transaction.subBatchId())
+                    .update();
+        }
+        jdbc.sql(SESSION_ZERO)
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId())
+                .update();
+    }
+
+    /** The zero-amount rows stored so far for the transaction's play ({@code play}) or session. */
+    private int zeroRows(ProjectionTransaction transaction, boolean play) {
+        var spec = jdbc.sql(ZERO_ROWS.formatted(play ? " and \"subBatchId\" = ?" : ""))
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId());
+        if (play) {
+            spec = spec.param(transaction.subBatchId());
+        }
+        return spec.query(Integer.class).single();
+    }
+
     /** The play's startedAt, its row locked for the rest of the transaction; null if no play yet. */
     private OffsetDateTime lockPlay(ProjectionTransaction transaction) {
         return jdbc.sql(LOCK_PLAY)
-                .params(transaction.userId(), transaction.batchId(), transaction.subBatchId())
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId(), transaction.subBatchId())
                 .query((rs, n) -> rs.getObject("startedAt", OffsetDateTime.class))
                 .optional()
                 .orElse(null);
@@ -262,7 +315,7 @@ public class RollupUpdater {
     /** The session's key fields before this transaction, its row locked; null if no session yet. */
     private SessionKey lockSession(ProjectionTransaction transaction) {
         return jdbc.sql(LOCK_SESSION)
-                .params(transaction.userId(), transaction.batchId())
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId())
                 .query((rs, n) -> new SessionKey(rs.getObject("startedAt", OffsetDateTime.class),
                         rs.getString("productId"), rs.getString("productType")))
                 .optional()
@@ -270,31 +323,31 @@ public class RollupUpdater {
     }
 
     /** @return the new play's txCountExclCancelled (1), or null when the play already existed. */
-    private Integer claimPlay(Contribution c) {
-        return jdbc.sql(CLAIM_PLAY).params(playValues(c)).query(Integer.class).optional().orElse(null);
+    private Integer claimPlay(Contribution c, int zeroTxCount) {
+        return jdbc.sql(CLAIM_PLAY).params(playValues(c, zeroTxCount)).query(Integer.class).optional().orElse(null);
     }
 
     /** @return the play's txCountExclCancelled after the fold. */
     private int foldPlay(Contribution c, OffsetDateTime startedAt) {
         return jdbc.sql(FOLD_PLAY.formatted(isFirst(c, startedAt, "\"wqPrjPlay\"")))
-                .params(playValues(c))
+                .params(playValues(c, 0)) // "zeroTxCount" is not folded
                 .query(Integer.class)
                 .single();
     }
 
-    private static Object[] playValues(Contribution c) {
+    private static Object[] playValues(Contribution c, int zeroTxCount) {
         ProjectionTransaction transaction = c.transaction();
-        return new Object[] {transaction.userId(), transaction.batchId(), transaction.subBatchId(),
+        return new Object[] {transaction.ownerType(), transaction.userId(), transaction.batchId(), transaction.subBatchId(),
                 timestamptz(c.at()), timestamptz(c.at()), text(transaction.productId()),
                 text(transaction.productType()), transaction.currency(), transaction.sourceId(),
                 (short) transaction.source().code(), 1, 1, c.plays(), c.wins(), c.net(), c.plays(),
-                c.wins(), c.net()};
+                c.wins(), c.net(), zeroTxCount};
     }
 
     /** @return the new session's labels, or null when the session already existed. */
-    private SessionLabel claimSession(Contribution c, boolean playIsNew, boolean playIsLive) {
+    private SessionLabel claimSession(Contribution c, boolean playIsNew, boolean playIsLive, int zeroTxCount) {
         return jdbc.sql(CLAIM_SESSION)
-                .params(sessionValues(c, playIsNew, playIsLive))
+                .params(sessionValues(c, playIsNew, playIsLive, zeroTxCount))
                 .query(SESSION_LABEL)
                 .optional()
                 .orElse(null);
@@ -309,18 +362,18 @@ public class RollupUpdater {
     private SessionLabel foldSession(
             Contribution c, OffsetDateTime startedAt, boolean playIsNew, boolean playIsLive) {
         return jdbc.sql(FOLD_SESSION.formatted(isFirst(c, startedAt, "\"wqPrjSession\"")))
-                .params(sessionValues(c, playIsNew, playIsLive))
+                .params(sessionValues(c, playIsNew, playIsLive, 0)) // "zeroTxCount" is not folded
                 .query(SESSION_LABEL)
                 .single();
     }
 
-    private static Object[] sessionValues(Contribution c, boolean playIsNew, boolean playIsLive) {
+    private static Object[] sessionValues(Contribution c, boolean playIsNew, boolean playIsLive, int zeroTxCount) {
         ProjectionTransaction transaction = c.transaction();
-        return new Object[] {transaction.userId(), transaction.batchId(), timestamptz(c.at()),
+        return new Object[] {transaction.ownerType(), transaction.userId(), transaction.batchId(), timestamptz(c.at()),
                 timestamptz(c.at()), text(transaction.productId()), text(transaction.productType()),
                 transaction.currency(), transaction.sourceId(), (short) transaction.source().code(), 1, 1,
                 playIsNew ? 1 : 0, playIsLive ? 1 : 0, c.plays(), c.wins(), c.net(), c.plays(), c.wins(),
-                c.net()};
+                c.net(), zeroTxCount};
     }
 
     /** The session's labels after a fold: the first transaction's product pair, and the currency. */

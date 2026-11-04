@@ -17,7 +17,9 @@ import wqs.domain.ProjectionTransaction;
  * sees it is decided by the per-endpoint SQL views over that table, never here.
  *
  * The locator insert IS the idempotency gate: ON CONFLICT DO NOTHING affecting zero rows means
- * the event has already been applied, so no source needs its own dedupe logic (spec 5.4).
+ * the event has already been applied, so no source needs its own dedupe logic (spec 5.4). Every
+ * transaction takes this path, zero-amount and non-player ones included; "zeroAmount" is a
+ * generated column, never written.
  */
 @Component
 public class TransactionInserter {
@@ -26,20 +28,15 @@ public class TransactionInserter {
             select nextval('"wqTransactionIdSeq"')
             """;
     private static final String GATE = """
-            insert into "wqPrjTransactionLocator" ("source", "sourceId", "userId", "occurredAt", "transactionId", "versionAt")
-            values (?, ?, ?, ?, ?, ?)
-            on conflict do nothing
-            """;
-    private static final String GATE_LOCATOR_ONLY = """
-            insert into "wqPrjTransactionLocator" ("source", "sourceId", "userId", "occurredAt", "transactionId", "zeroAmount", "cancels")
-            values (?, ?, ?, ?, nextval('"wqTransactionIdSeq"'), true, ?)
+            insert into "wqPrjTransactionLocator" ("source", "sourceId", "ownerType", "userId", "occurredAt", "transactionId", "versionAt")
+            values (?, ?, ?, ?, ?, ?, ?)
             on conflict do nothing
             """;
     private static final String INSERT_TRANSACTION = """
-            insert into "wqPrjTransaction" ("userId", "transactionId", "source", "sourceId", "occurredAt", "productId",
+            insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId", "occurredAt", "productId",
                     "productType", "batchId", "subBatchId", "type", "amount", "currency", "balanceAfter",
                     "cancels", "detail")
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
             """;
 
     private final JdbcClient jdbc;
@@ -69,8 +66,8 @@ public class TransactionInserter {
         OffsetDateTime occurredAt = transaction.occurredAt().atOffset(ZoneOffset.UTC);
 
         int gated = jdbc.sql(GATE)
-                .params((short) transaction.source().code(), transaction.sourceId(), transaction.userId(),
-                        timestamptz(occurredAt), transactionId, timestamptz(versionAt))
+                .params((short) transaction.source().code(), transaction.sourceId(), transaction.ownerType(),
+                        transaction.userId(), timestamptz(occurredAt), transactionId, timestamptz(versionAt))
                 .update();
 
         if (gated == 0) {
@@ -78,30 +75,13 @@ public class TransactionInserter {
         }
 
         jdbc.sql(INSERT_TRANSACTION)
-                .params(transaction.userId(), transactionId, (short) transaction.source().code(), transaction.sourceId(),
+                .params(transaction.ownerType(), transaction.userId(), transactionId,
+                        (short) transaction.source().code(), transaction.sourceId(),
                         timestamptz(occurredAt), text(transaction.productId()), text(transaction.productType()),
                         text(transaction.batchId()), text(transaction.subBatchId()), text(transaction.type()), transaction.amount(),
                         text(transaction.currency()), numeric(transaction.balanceAfter()), text(transaction.cancels()),
                         text(transaction.detailJson()))
                 .update();
         return true;
-    }
-
-    /**
-     * Records a zero-amount transaction in the locator ONLY (spec 4.1, plan D8): it stays idempotent and a
-     * cancel referencing it resolves, but it is written to no transaction row. A zero-amount cancel keeps its
-     * target in "cancels" here, having no transaction row to carry it.
-     *
-     * @return true if newly recorded, false if already applied.
-     */
-    @Transactional(propagation = Propagation.MANDATORY)
-    public boolean recordLocatorOnly(ProjectionTransaction transaction) {
-        if (transaction.amount().signum() != 0) {
-            throw new IllegalArgumentException("only a zero-amount transaction is locator-only: " + transaction.sourceId());
-        }
-        return jdbc.sql(GATE_LOCATOR_ONLY)
-                .params((short) transaction.source().code(), transaction.sourceId(), transaction.userId(),
-                        timestamptz(transaction.occurredAt()), text(transaction.cancels()))
-                .update() == 1;
     }
 }

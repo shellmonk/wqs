@@ -10,7 +10,8 @@ import wqs.domain.SourceKind;
  * versioned upsert needs beside it. Lives with {@link StreamPayload} in the projection package so
  * the writer can consume it without depending on the ingest package (spec 8.5 layering).
  *
- * @param ownerType the owner's user type; only 1 (player) is projected (the writer's gate, R1)
+ * @param ownerType the owner's user type, equal to {@code transaction.ownerType()}; every type is
+ *                  stored, the read policy decides what an endpoint shows
  * @param userId    the owner's id, equal to {@code transaction.userId()}
  * @param version   the row's change timestamp ({@code updated}; {@code statusDate} for adjustment
  *                  requests): applied when strictly newer than the stored one (spec 4, D6)
@@ -21,8 +22,9 @@ public record DeltaRow(SourceKind source, int ownerType, long userId, Instant ve
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(version, "version");
         Objects.requireNonNull(transaction, "transaction");
-        if (transaction.source() != source || transaction.userId() != userId) {
-            throw new IllegalArgumentException("transaction must carry the row's source and userId");
+        if (transaction.source() != source || transaction.userId() != userId
+                || transaction.ownerType() != ownerType) {
+            throw new IllegalArgumentException("transaction must carry the row's source, ownerType and userId");
         }
     }
 }

@@ -10,6 +10,7 @@ import wqs.domain.ViewKind;
 import wqs.read.HighLevelFilter;
 import wqs.read.HighLevelKey;
 import wqs.read.HighLevelQuery;
+import wqs.read.ReadPolicy;
 
 /**
  * Level-1/2 reads of the cc view's page index (spec 5.6): every "wqPrjTimeline" row. Every
@@ -19,6 +20,12 @@ import wqs.read.HighLevelQuery;
  */
 @Component
 public class CcHighLevelQuery implements HighLevelQuery {
+
+    /**
+     * What /cc shows (plan D1): the owner type is bound below. The page index holds no
+     * zero-amount row (a zero-amount transaction is in no page unit), so there is nothing else to hide.
+     */
+    private static final ReadPolicy POLICY = ReadPolicy.CC;
 
     private static final String COUNT = """
             select count(*) from "wqPrjTimeline"
@@ -36,6 +43,11 @@ public class CcHighLevelQuery implements HighLevelQuery {
     @Override
     public ViewKind view() {
         return ViewKind.CC;
+    }
+
+    @Override
+    public ReadPolicy policy() {
+        return POLICY;
     }
 
     @Override
@@ -57,7 +69,7 @@ public class CcHighLevelQuery implements HighLevelQuery {
     /** The key-range predicate, value-free: the filter only decides which fixed fragments appear. */
     private static String range(HighLevelFilter f) {
         StringBuilder c = new StringBuilder("""
-                ("wqPrjTimeline"."userId" = :userId and "wqPrjTimeline"."occurredAt" >= cast(:lo as timestamptz) \
+                ("wqPrjTimeline"."ownerType" = :ownerType and "wqPrjTimeline"."userId" = :userId and "wqPrjTimeline"."occurredAt" >= cast(:lo as timestamptz) \
                 and "wqPrjTimeline"."occurredAt" < cast(:hi as timestamptz)""");
         if (f.excludeCancelled()) {
             c.append(" and \"wqPrjTimeline\".\"visibleExclCancelled\" = true");
@@ -70,7 +82,8 @@ public class CcHighLevelQuery implements HighLevelQuery {
 
     private static JdbcClient.StatementSpec range(
             JdbcClient.StatementSpec spec, HighLevelFilter f, Instant lo, Instant hi) {
-        spec = spec.param("userId", f.userId()).param("lo", utc(lo)).param("hi", utc(hi));
+        spec = spec.param("ownerType", POLICY.ownerType()).param("userId", f.userId())
+                .param("lo", utc(lo)).param("hi", utc(hi));
         if (!f.productTypes().isEmpty()) {
             spec = spec.param("productTypes", f.productTypes());
         }

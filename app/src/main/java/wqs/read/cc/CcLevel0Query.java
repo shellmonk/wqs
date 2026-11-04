@@ -15,10 +15,14 @@ import wqs.read.TransactionEntry;
 import wqs.read.TransactionKey;
 import wqs.read.Level0Filter;
 import wqs.read.Level0Query;
+import wqs.read.ReadPolicy;
 
 /** Level-0 reads of the cc view; reads only the "wqPrjCcTransaction" view (every source). */
 @Component
 public class CcLevel0Query implements Level0Query {
+
+    /** What /cc shows (plan D1), bound into every statement below. */
+    private static final ReadPolicy POLICY = ReadPolicy.CC;
 
     private static final String COUNT = """
             select count(*) from "wqPrjCcTransaction"
@@ -40,7 +44,7 @@ public class CcLevel0Query implements Level0Query {
                    "wqPrjCcTransaction"."cancels", "wqPrjCcTransaction"."detail", "wqPrjCcTransaction"."ingestedAt", "wqPrjCcTransaction"."productType"
             from "wqPrjCcTransaction"
             join unnest(cast(:ids as bigint[])) as "wanted" ("id") on "wqPrjCcTransaction"."transactionId" = "wanted"."id"
-            where ("wqPrjCcTransaction"."userId" = :userId
+            where ("wqPrjCcTransaction"."ownerType" = :ownerType and "wqPrjCcTransaction"."userId" = :userId
                    and "wqPrjCcTransaction"."occurredAt" between cast(:min as timestamptz) and cast(:max as timestamptz))
             """;
 
@@ -53,6 +57,11 @@ public class CcLevel0Query implements Level0Query {
     @Override
     public ViewKind view() {
         return ViewKind.CC;
+    }
+
+    @Override
+    public ReadPolicy policy() {
+        return POLICY;
     }
 
     @Override
@@ -86,6 +95,7 @@ public class CcLevel0Query implements Level0Query {
         Map<TransactionKey, TransactionEntry> byKey = new HashMap<>();
         tx.sql(FETCH)
                 .param("ids", ids)
+                .param("ownerType", POLICY.ownerType())
                 .param("userId", userId)
                 .param("min", utc(min))
                 .param("max", utc(max))
@@ -109,8 +119,10 @@ public class CcLevel0Query implements Level0Query {
      */
     private static String range(Level0Filter f) {
         StringBuilder c = new StringBuilder("""
-                ("wqPrjCcTransaction"."userId" = :userId and "wqPrjCcTransaction"."occurredAt" >= cast(:lo as timestamptz) \
+                ("wqPrjCcTransaction"."ownerType" = :ownerType and "wqPrjCcTransaction"."userId" = :userId \
+                and "wqPrjCcTransaction"."occurredAt" >= cast(:lo as timestamptz) \
                 and "wqPrjCcTransaction"."occurredAt" < cast(:hi as timestamptz)""");
+        c.append(POLICY.zeroAmountFilter("\"wqPrjCcTransaction\""));
         if (f.excludeCancelled()) {
             c.append(" and not (\"wqPrjCcTransaction\".\"cancelled\")");
         }
@@ -124,7 +136,8 @@ public class CcLevel0Query implements Level0Query {
     }
 
     private static JdbcClient.StatementSpec range(JdbcClient.StatementSpec spec, Level0Filter f, Instant lo, Instant hi) {
-        spec = spec.param("userId", f.userId()).param("lo", utc(lo)).param("hi", utc(hi));
+        spec = spec.param("ownerType", POLICY.ownerType()).param("userId", f.userId())
+                .param("lo", utc(lo)).param("hi", utc(hi));
         if (!f.productTypes().isEmpty()) {
             spec = spec.param("productTypes", f.productTypes());
         }

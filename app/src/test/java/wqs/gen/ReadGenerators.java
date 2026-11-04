@@ -157,7 +157,7 @@ public final class ReadGenerators {
                         cancelSpecs().injectNull(0.8),
                         Arbitraries.strings().alpha().ofMinLength(1).ofMaxLength(4)
                                 .map(c -> "{\"gameCode\": \"" + c + "\"}").injectNull(0.5),
-                        // Never zero: a zero-amount transaction is locator-only (spec 4.1) and in no view.
+                        // Never zero: a zero-amount transaction is stored but hidden by the read policy (plan D1).
                         Arbitraries.longs().between(-50_000, 50_000).filter(cents -> cents != 0),
                         sessions)
                 .as(TransactionSpec::new);

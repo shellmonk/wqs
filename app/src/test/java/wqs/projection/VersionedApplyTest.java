@@ -208,18 +208,26 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(writer.applyDelta(batch(V2, sameAmount)).updated()).isEqualTo(1);
     }
 
+    /** Store everything: a non-player row is stored under its own owner type, never as the player of the same id. */
     @Test
-    void non_player_writes_nothing() {
-        double skipped = meters.counter("wqs.ingest.skipped", "reason", "non-player").count();
+    void non_player_row_is_stored_under_its_owner_type() {
         DeltaRow retailer = row(SourceKind.PAYMENT, 2, "pay9", T0, null, new BigDecimal("5.0000"), "EUR", V1, null);
 
         DeltaResult result = writer.applyDelta(batch(null, retailer));
 
-        assertThat(result.skipped()).isEqualTo(1);
-        for (String table : List.of("wqPrjTransactionLocator", "wqPrjTransaction", "wqPrjTimeline", "wqPrjCount", "wqDeadLetter")) {
-            assertThat(count(table)).as(table).isZero();
+        assertThat(result.inserted()).isEqualTo(1);
+        for (String table : List.of("wqPrjTransactionLocator", "wqPrjTransaction", "wqPrjTimeline")) {
+            assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 2 and \"userId\" = 1",
+                    Integer.class)).as(table).isEqualTo(1);
+            assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 1",
+                    Integer.class)).as(table).isZero();
         }
-        assertThat(meters.counter("wqs.ingest.skipped", "reason", "non-player").count()).isEqualTo(skipped + 1);
+        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where \"ownerType\" <> 2", Integer.class)).isZero();
+        assertThat(count("wqDeadLetter")).isZero();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+
+        // A redelivery is a duplicate, as for any owner.
+        assertThat(writer.applyDelta(batch(null, retailer)).duplicates()).isEqualTo(1);
     }
 
     @Test
@@ -282,7 +290,7 @@ class VersionedApplyTest extends PostgresTestBase {
             BigDecimal amount, String currency, Instant version, String detail) {
         boolean prize = source == SourceKind.CLAIMABLE_PRIZE;
         return new DeltaRow(source, ownerType, 1L, version, new ProjectionTransaction(
-                1L, source, id, occurredAt, prize ? "P11" : null, prize ? "lotto" : null, batchId, null,
+                (short) ownerType, 1L, source, id, occurredAt, prize ? "P11" : null, prize ? "lotto" : null, batchId, null,
                 TxTypes.NEUTRAL, amount, currency, null, null, detail));
     }
 

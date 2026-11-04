@@ -40,7 +40,7 @@ class CounterReaderTest extends Level0TestSupport {
                 transaction(TRANSACTION, "x", "2034-02-03T12:00:00Z", "P11", "a", null));
         Level0Filter all = new Level0Filter(USER, false);
 
-        var days = counters.dayCounts(readerJdbc, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
+        var days = counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
                 LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-28"));
         assertThat(days).containsEntry(LocalDate.parse("2034-01-10"),
                 web.count(readerJdbc, all, Instant.parse("2034-01-10T00:00:00Z"), Instant.parse("2034-01-11T00:00:00Z")));
@@ -49,14 +49,14 @@ class CounterReaderTest extends Level0TestSupport {
         assertThat(days).containsOnlyKeys(LocalDate.parse("2034-01-10"), LocalDate.parse("2034-02-03"));
 
         // excl column: "a" is cancelled
-        assertThat(counters.dayCounts(readerJdbc, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, true,
+        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, true,
                 LocalDate.parse("2034-01-01"), LocalDate.parse("2034-01-31")))
                 .containsEntry(LocalDate.parse("2034-01-10"), 1L);
 
-        assertThat(counters.dayCounts(readerJdbc, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
+        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
                 LocalDate.parse("2034-01-09"), LocalDate.parse("2034-01-12")))
                 .containsOnly(java.util.Map.entry(LocalDate.parse("2034-01-10"), 2L));
-        assertThat(counters.dayCounts(readerJdbc, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
+        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
                 LocalDate.parse("2034-01-11"), LocalDate.parse("2034-01-12"))).isEmpty();
     }
 
@@ -71,8 +71,8 @@ class CounterReaderTest extends Level0TestSupport {
         Instant hi = Instant.parse("2034-01-11T00:00:00Z");
         long webLive = web.count(readerJdbc, all, lo, hi);
         long ccLive = cc.count(readerJdbc, all, lo, hi);
-        assertThat(counters.dayCounts(readerJdbc, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false, day, day)).containsEntry(day, webLive);
-        assertThat(counters.dayCounts(readerJdbc, USER, ViewKind.CC, TX_UNIT, NONE, NO_TYPES, false, day, day)).containsEntry(day, ccLive);
+        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false, day, day)).containsEntry(day, webLive);
+        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.CC, USER, ViewKind.CC, TX_UNIT, NONE, NO_TYPES, false, day, day)).containsEntry(day, ccLive);
         assertThat(webLive).isNotEqualTo(ccLive);
     }
 
@@ -96,10 +96,10 @@ class CounterReaderTest extends Level0TestSupport {
         LocalDate marEnd = LocalDate.parse("2034-03-31");
         // A run of days summed over the month, and the single day: the same totals.
         java.util.function.BiFunction<java.util.Set<String>, java.util.Set<String>, Long> month =
-                (p, t) -> counters.dayCounts(readerJdbc, USER, ViewKind.WEB, TX_UNIT, p, t, false, mar, marEnd)
+                (p, t) -> counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, p, t, false, mar, marEnd)
                         .values().stream().mapToLong(Long::longValue).sum();
         java.util.function.BiFunction<java.util.Set<String>, java.util.Set<String>, Long> daily =
-                (p, t) -> counters.dayCounts(readerJdbc, USER, ViewKind.WEB, TX_UNIT, p, t, false, day, day)
+                (p, t) -> counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, p, t, false, day, day)
                         .getOrDefault(day, 0L);
 
         for (var f : java.util.List.of(month, daily)) {

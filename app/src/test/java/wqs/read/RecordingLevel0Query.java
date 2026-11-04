@@ -26,6 +26,11 @@ final class RecordingLevel0Query implements Level0Query {
     }
 
     @Override
+    public ReadPolicy policy() {
+        return delegate.policy();
+    }
+
+    @Override
     public long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi) {
         countCalls++;
         return delegate.count(tx, f, lo, hi);

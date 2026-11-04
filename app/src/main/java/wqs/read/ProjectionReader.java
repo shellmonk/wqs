@@ -161,12 +161,12 @@ public class ProjectionReader {
     // ------------------------------------------------------------------ the walk, per page unit
 
     /**
-     * What the walk needs of one page unit: its counter key (unit, view, user, product types,
+     * What the walk needs of one page unit: its counter key (unit, view, read policy, user, product types,
      * transaction types -- always empty for HIGH_LEVEL, whose counters carry none (plan D4) --
      * and excludeCancelled), a live count and an ordered key query over a sub-range.
      */
     private record Unit<K>(
-            PageUnit pageUnit, ViewKind view, long userId, Set<String> productTypes, Set<String> typeCodes,
+            PageUnit pageUnit, ViewKind view, ReadPolicy policy, long userId, Set<String> productTypes, Set<String> typeCodes,
             boolean excludeCancelled, LiveCount count, KeyQuery<K> keys, Function<K, Instant> occurredAt) {}
 
     @FunctionalInterface
@@ -180,7 +180,7 @@ public class ProjectionReader {
     }
 
     private static Unit<TransactionKey> transactionUnit(Level0Query q, Level0Filter f) {
-        return new Unit<>(PageUnit.TRANSACTION, q.view(), f.userId(), f.productTypes(), f.typeCodes(),
+        return new Unit<>(PageUnit.TRANSACTION, q.view(), q.policy(), f.userId(), f.productTypes(), f.typeCodes(),
                 f.excludeCancelled(),
                 (tx, lo, hi) -> q.count(tx, f, lo, hi),
                 (tx, lo, hi, offset, limit) -> q.keys(tx, f, lo, hi, offset, limit),
@@ -188,7 +188,7 @@ public class ProjectionReader {
     }
 
     private static Unit<HighLevelKey> highLevelUnit(HighLevelQuery q, HighLevelFilter f) {
-        return new Unit<>(PageUnit.HIGH_LEVEL, q.view(), f.userId(), f.productTypes(), Set.of(),
+        return new Unit<>(PageUnit.HIGH_LEVEL, q.view(), q.policy(), f.userId(), f.productTypes(), Set.of(),
                 f.excludeCancelled(),
                 (tx, lo, hi) -> q.count(tx, f, lo, hi),
                 (tx, lo, hi, offset, limit) -> q.keys(tx, f, lo, hi, offset, limit),
@@ -290,7 +290,7 @@ public class ProjectionReader {
         Map<LocalDate, Long> days = Map.of();
         for (Segment s : decomposed) {
             if (s.tier() == Tier.DAY) {
-                days = counters.dayCounts(tx, u.userId(), u.view(), u.pageUnit(),
+                days = counters.dayCounts(tx, u.policy(), u.userId(), u.view(), u.pageUnit(),
                         u.productTypes(), u.typeCodes(), u.excludeCancelled(),
                         day(s.start()), day(s.end()).minusDays(1));
             }

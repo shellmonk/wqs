@@ -27,15 +27,16 @@ import wqs.domain.ViewKind;
  * unsessioned set -- P-7 constrains the view's non-cancellation rows -- and a real eInstant
  * TT_CANCEL may arrive with an empty batchContext. Rejecting it would leave its original
  * silently live.
- * Zero-amount transactions are decided before these rules: they are written to no view or rollup, so
- * neither rule's invariant can be broken by one.
+ * A zero-amount transaction ({@link ProjectionTransaction#isZeroAmount}) is exempt too: it is stored
+ * but never shown, never opens, anchors or labels a session and adds nothing to its sums (plan D6),
+ * so none of the rules' invariants can be broken by one.
  */
 @Component
 public class IngestRules {
 
     private static final String SESSION_CURRENCY = """
             select "currency" from "wqPrjSession"
-            where "userId" = ? and "batchId" = ?
+            where "ownerType" = ? and "userId" = ? and "batchId" = ?
             """;
 
     private final JdbcClient jdbc;
@@ -54,8 +55,8 @@ public class IngestRules {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public String rejection(ProjectionTransaction transaction) {
-        if (transaction.isCancellation()) {
-            return null; // exempt from both rules, see the class comment
+        if (transaction.isCancellation() || transaction.isZeroAmount()) {
+            return null; // exempt from every rule, see the class comment
         }
         if (transaction.isSessioned()
                 && !transaction.source().views().containsAll(EnumSet.allOf(ViewKind.class))) {
@@ -67,7 +68,7 @@ public class IngestRules {
             return eInstant.isEInstant(transaction.productType()) ? RejectedTransactionDeadLetters.EINSTANT_UNSESSIONED : null;
         }
         String sessionCurrency = jdbc.sql(SESSION_CURRENCY)
-                .params(transaction.userId(), transaction.batchId())
+                .params(transaction.ownerType(), transaction.userId(), transaction.batchId())
                 .query(String.class)
                 .optional()
                 .orElse(null);

@@ -19,6 +19,7 @@ import wqs.gen.TxTypes;
 
 class CounterUpdaterTest extends PostgresTestBase {
 
+    private static final short P = 1;
     private static final Instant T0 = Instant.parse("2034-10-17T14:00:00Z");
     private static final Instant NEXT_DAY = Instant.parse("2034-10-18T01:00:00Z");
     private static final Instant NEXT_MONTH = Instant.parse("2034-11-02T01:00:00Z");
@@ -78,7 +79,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     void high_level_counts_are_tracked_separately_from_transaction_counts() {
         run(u -> {
             u.countTransaction(tx("t1", "t11"));
-            u.countHighLevel(1L, ViewKind.WEB, "t11", T0);
+            u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0);
         });
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.TRANSACTION, "", T0)).isEqualTo(1);
@@ -87,7 +88,7 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @Test
     void high_level_counting_is_per_view() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isEqualTo(1);
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isEqualTo(1);
@@ -98,7 +99,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     void uncounting_reduces_only_the_excl_cancelled_tally() {
         run(u -> u.countTransaction(tx("t1", "t11")));
 
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, T0));
+        run(u -> u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, false, T0));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.TRANSACTION, "t11", T0)).isEqualTo(1);
         assertThat(dayExcl(ViewKind.WEB, PageUnit.TRANSACTION, "t11", T0)).isZero();
@@ -108,13 +109,13 @@ class CounterUpdaterTest extends PostgresTestBase {
     @Test
     void a_move_deletes_the_counter_rows_it_empties_so_state_is_path_independent() {
         // Counted directly at its final key...
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t7", NEXT_DAY));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t7", NEXT_DAY));
         List<String> direct = allCounterRows();
         db().execute("delete from \"wqPrjCount\"");
 
         // ...or counted elsewhere first and moved there (spec P-1: identical state either way).
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t7", NEXT_DAY, true));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, "t7", NEXT_DAY, true));
 
         assertThat(allCounterRows()).isEqualTo(direct);
         assertThat(db().value("select count(*)::int from \"wqPrjCount\" where \"cntAll\" = 0", Integer.class)).isZero();
@@ -124,7 +125,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     void uncounting_keeps_a_row_whose_cntAll_is_still_positive() {
         run(u -> u.countTransaction(tx("t1", "t11")));
 
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, T0));
+        run(u -> u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, false, T0));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.TRANSACTION, "t11", T0)).isEqualTo(1);
         assertThat(dayExcl(ViewKind.WEB, PageUnit.TRANSACTION, "t11", T0)).isZero();
@@ -132,9 +133,9 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @Test
     void a_move_across_days_shifts_day_rows_and_keeps_the_month_total() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
 
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, true));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, true));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isZero();
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", NEXT_DAY)).isEqualTo(1);
@@ -146,9 +147,9 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @Test
     void a_move_across_months_shifts_the_month_totals_too() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
 
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_MONTH, true));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, "t11", NEXT_MONTH, true));
 
         assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isZero();
         assertThat(monthCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isZero();
@@ -158,9 +159,9 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @Test
     void a_product_only_move_shifts_the_own_product_row_and_leaves_the_sentinel() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
 
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t12", T0, true));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, "t12", T0, true));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isZero();
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t12", T0)).isEqualTo(1);
@@ -172,11 +173,11 @@ class CounterUpdaterTest extends PostgresTestBase {
     @Test
     void an_invisible_row_moves_only_cntAll() {
         run(u -> {
-            u.countHighLevel(1L, ViewKind.WEB, "t11", T0);
-            u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, T0);
+            u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0);
+            u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, false, T0);
         });
 
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, false));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, false));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", NEXT_DAY)).isEqualTo(1);
         assertThat(dayExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", NEXT_DAY)).isZero();
@@ -186,9 +187,9 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @Test
     void a_move_to_the_same_day_and_product_changes_nothing() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
 
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", T0.plusSeconds(60), true));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, "t11", T0.plusSeconds(60), true));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isEqualTo(1);
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isEqualTo(1);
@@ -197,9 +198,9 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @Test
     void a_null_product_before_a_move_counts_the_sentinel_only_and_gains_the_new_product() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, null, T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, null, T0));
 
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, null, T0, "t11", T0, true));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, null, T0, "t11", T0, true));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isEqualTo(1);
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isEqualTo(1);
@@ -212,9 +213,9 @@ class CounterUpdaterTest extends PostgresTestBase {
 
     @Test
     void a_null_product_after_a_move_drops_the_old_product_and_keeps_the_sentinel() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
 
-        run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, null, NEXT_DAY, true));
+        run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, null, NEXT_DAY, true));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isZero();
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", NEXT_DAY)).isEqualTo(1);
@@ -228,7 +229,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     @Test
     void decrementing_a_missing_row_throws() {
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                run(u -> u.moveHighLevel(1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, true)))
+                run(u -> u.moveHighLevel(P, 1L, ViewKind.WEB, "t11", T0, "t11", NEXT_DAY, true)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("wqPrjCount")
                 .hasMessageContaining("productType='t11'")
@@ -238,31 +239,31 @@ class CounterUpdaterTest extends PostgresTestBase {
     @Test
     void uncounting_twice_throws_instead_of_clamping() {
         run(u -> u.countTransaction(tx("t1", "t11")));
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, T0));
+        run(u -> u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, false, T0));
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, T0)))
+                run(u -> u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.TRANSACTION, "t11", TxTypes.PLAY, false, T0)))
                 .isInstanceOf(RuntimeException.class);
         assertThat(dayCount(ViewKind.WEB, PageUnit.TRANSACTION, "t11", T0)).isEqualTo(1);
     }
 
     @Test
     void recounting_restores_only_the_excl_cancelled_tally_and_is_strict() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "t11", T0));
-        run(u -> u.uncountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "t11", T0));
+        run(u -> u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, false, T0));
 
-        run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, T0));
+        run(u -> u.recountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, false, T0));
 
         assertThat(dayCount(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isEqualTo(1);
         assertThat(dayExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", T0)).isEqualTo(1);
         assertThat(monthExcl(ViewKind.WEB, PageUnit.HIGH_LEVEL, "", T0)).isEqualTo(1);
         // Excl above cntAll: the CHECK rejects it.
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                run(u -> u.recountExclCancelled(1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, T0)))
+                run(u -> u.recountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, false, T0)))
                 .isInstanceOf(RuntimeException.class);
         // No row to restore: never created.
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                run(u -> u.recountExclCancelled(1L, ViewKind.CC, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, T0)))
+                run(u -> u.recountExclCancelled(P, 1L, ViewKind.CC, PageUnit.HIGH_LEVEL, "t11", CounterSentinels.ALL_TYPES, false, T0)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("expected 1");
         assertThat(rows("wqPrjCount")).isEqualTo(2);
@@ -302,8 +303,8 @@ class CounterUpdaterTest extends PostgresTestBase {
     @Test
     void high_level_row_uses_type_sentinel_only() {
         run(u -> {
-            u.countHighLevel(1L, ViewKind.CC, "instants", T0);
-            u.countHighLevel(1L, ViewKind.CC, null, T0);
+            u.countHighLevel(P, 1L, ViewKind.CC, "instants", T0);
+            u.countHighLevel(P, 1L, ViewKind.CC, null, T0);
         });
 
         assertThat(dayKeys(ViewKind.CC, PageUnit.HIGH_LEVEL))
@@ -314,8 +315,7 @@ class CounterUpdaterTest extends PostgresTestBase {
     void cancel_moves_excl_counts_on_all_four_keys() {
         run(u -> u.countTransaction(tx("t1", "instants")));
 
-        run(u -> u.uncountExclCancelled(
-                1L, ViewKind.WEB, PageUnit.TRANSACTION, "instants", TxTypes.PLAY, T0));
+        run(u -> u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.TRANSACTION, "instants", TxTypes.PLAY, false, T0));
 
         for (String table : new String[] {"wqPrjCount"}) {
             var rows = db().rows("select \"cntAll\", \"cntExclCancelled\" from \"" + table
@@ -325,18 +325,16 @@ class CounterUpdaterTest extends PostgresTestBase {
             assertThat(rows).extracting(r -> r.get("cntExclCancelled", Long.class)).containsOnly(0L);
         }
 
-        run(u -> u.recountExclCancelled(
-                1L, ViewKind.WEB, PageUnit.TRANSACTION, "instants", TxTypes.PLAY, T0));
+        run(u -> u.recountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.TRANSACTION, "instants", TxTypes.PLAY, false, T0));
         assertThat(db().maps("select 1 from \"wqPrjCount\" where \"cntExclCancelled\" = 0"))
                 .isEmpty();
     }
 
     @Test
     void high_level_cancel_moves_excl_on_both_type_sentinel_keys() {
-        run(u -> u.countHighLevel(1L, ViewKind.WEB, "instants", T0));
+        run(u -> u.countHighLevel(P, 1L, ViewKind.WEB, "instants", T0));
 
-        run(u -> u.uncountExclCancelled(
-                1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "instants", CounterSentinels.ALL_TYPES, T0));
+        run(u -> u.uncountExclCancelled(P, 1L, ViewKind.WEB, PageUnit.HIGH_LEVEL, "instants", CounterSentinels.ALL_TYPES, false, T0));
 
         assertThat(db().maps("select 1 from \"wqPrjCount\" where \"cntExclCancelled\" = 0"))
                 .hasSize(2);

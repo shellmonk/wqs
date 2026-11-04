@@ -258,12 +258,11 @@ class StreamConsumerTest extends PostgresTestBase {
     }
 
     /**
-     * Security gate (spec 4.1, D8): owner "2-7" is NOT player 7. A non-player event writes nothing
-     * at all -- no locator, transaction, rollup, page row or counter -- is counted, and the offset still
-     * moves past it, alone or behind a buffered player event.
+     * Store everything: owner "2-7" is stored under owner type 2, NEVER as player 7 -- the owner type
+     * is part of every owner key -- and the offset moves past it like any projected event.
      */
     @Test
-    void non_player_owner_is_skipped_and_counted() {
+    void non_player_owner_is_stored_under_its_own_owner_type() {
         StreamConsumer consumer = consumer(1, Duration.ofMillis(200));
         consumer.start();
 
@@ -272,32 +271,19 @@ class StreamConsumerTest extends PostgresTestBase {
         consumer.poll();
 
         for (String table : java.util.List.of("wqPrjTransactionLocator", "wqPrjTransaction",
-                "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCount",
-                "wqPrjPendingCancel", "wqDeadLetter")) {
-            assertThat(count(table)).as(table).isZero();
+                "wqPrjSession", "wqPrjPlay", "wqPrjTimeline")) {
+            assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 2 and \"userId\" = 7",
+                    Integer.class)).as(table).isEqualTo(1);
+            assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 1",
+                    Integer.class)).as(table).isZero();
         }
+        assertThat(count("wqDeadLetter")).isZero();
         assertThat(offsetStore.read("wallet-transactions")).contains(4L);
-        assertThat(skipped("non-player")).isEqualTo(1.0);
-        assertThat(skipped("zero-amount")).as("pre-registered").isZero();
     }
 
+    /** Store everything: a zero-amount event is stored (the read policy hides it) and the offset advances. */
     @Test
-    void a_non_player_event_behind_a_buffered_player_event_is_covered_by_the_batch_offset() {
-        StreamConsumer consumer = consumer(10, Duration.ofMillis(200));
-        consumer.start();
-
-        source.queue(payload("tx-1"), 5);
-        source.queue(nonPlayer("np-1"), 6);
-        source.deliverAll();
-        consumer.stop(); // flushes the buffered batch
-
-        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
-        assertThat(skipped("non-player")).isEqualTo(1.0);
-        assertThat(offsetStore.read("wallet-transactions")).contains(6L);
-    }
-
-    @Test
-    void a_zero_amount_event_is_counted_as_skipped() {
+    void a_zero_amount_event_is_stored() {
         StreamConsumer consumer = consumer(1, Duration.ofMillis(200));
         consumer.start();
 
@@ -306,16 +292,10 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.poll();
 
-        assertThat(skipped("zero-amount")).isEqualTo(1.0);
         assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
-        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(db().value("select count(*)::int from \"wqPrjTransaction\" where \"zeroAmount\"", Integer.class))
+                .isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(3L);
-    }
-
-    private double skipped(String reason) {
-        var counter = registry.find("wqs.ingest.skipped").tag("reason", reason).counter();
-        assertThat(counter).as("wqs.ingest.skipped{reason=" + reason + "}").isNotNull();
-        return counter.count();
     }
 
     private StreamPayload nonPlayer(String id) {

@@ -25,6 +25,7 @@ public interface StreamPayloadMapper {
     /** Types whose {@code transactionReference} names the transaction they cancel (spec 4.1). */
     Set<String> CANCEL_TYPES = Set.of("TT_CANCEL", "CANCEL", "TT_TOMBSTONE");
 
+    @Mapping(target = "ownerType", source = "userType")
     @Mapping(target = "sourceId", source = "id")
     @Mapping(target = "occurredAt", source = "created")
     @Mapping(target = "balanceAfter", source = "totalPostBalance")

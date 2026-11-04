@@ -24,6 +24,11 @@ final class RecordingHighLevelQuery implements HighLevelQuery {
     }
 
     @Override
+    public ReadPolicy policy() {
+        return delegate.policy();
+    }
+
+    @Override
     public long count(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi) {
         countCalls++;
         return delegate.count(tx, f, lo, hi);

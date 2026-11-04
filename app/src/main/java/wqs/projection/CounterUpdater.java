@@ -47,6 +47,11 @@ import wqs.domain.ViewKind;
  * failure aborts the projection transaction, which the consumer turns into per-transaction fallback
  * and dead-letter: loud and replayable instead of silent counter drift (spec P-2).
  *
+ * Every row is an owner's ("ownerType", "userId"), and carries "zeroAmount": a zero-amount stream
+ * transaction (plan D6) is counted at TRANSACTION under "zeroAmount" = true, apart from every other
+ * row, so a total that hides zero amounts reads only the false rows. HIGH_LEVEL rows are always
+ * false: a zero-amount transaction is in no page unit.
+ *
  * All mutators require a surrounding transaction (callers supply it).
  */
 @Component
@@ -64,8 +69,10 @@ public class CounterUpdater {
     @Transactional(propagation = Propagation.MANDATORY)
     public void countTransaction(ProjectionTransaction transaction) {
         for (ViewKind view : transaction.source().views()) {
-            apply(keys(PageUnit.TRANSACTION, transaction.productType(), transaction.type(), transaction.occurredAt()), transaction.userId(),
-                    view, PageUnit.TRANSACTION, +1, true);
+            apply(keys(PageUnit.TRANSACTION, transaction.productType(), transaction.type(), transaction.occurredAt()),
+                    new Owner(transaction.ownerType(), transaction.userId(), view, PageUnit.TRANSACTION,
+                            transaction.isZeroAmount()),
+                    +1, true);
         }
     }
 
@@ -75,9 +82,9 @@ public class CounterUpdater {
      * product type and the sentinel.
      */
     @Transactional(propagation = Propagation.MANDATORY)
-    public void countHighLevel(long userId, ViewKind view, String productType, Instant at) {
-        apply(keys(PageUnit.HIGH_LEVEL, productType, ALL_TYPES, at), userId, view, PageUnit.HIGH_LEVEL,
-                +1, true);
+    public void countHighLevel(short ownerType, long userId, ViewKind view, String productType, Instant at) {
+        apply(keys(PageUnit.HIGH_LEVEL, productType, ALL_TYPES, at),
+                new Owner(ownerType, userId, view, PageUnit.HIGH_LEVEL, false), +1, true);
     }
 
     /**
@@ -89,7 +96,7 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void moveHighLevel(
-            long userId, ViewKind view,
+            short ownerType, long userId, ViewKind view,
             String fromProductType, Instant from,
             String toProductType, Instant to,
             boolean visibleExclCancelled) {
@@ -99,8 +106,9 @@ public class CounterUpdater {
         removed.removeAll(newKeys);
         Set<Key> added = new LinkedHashSet<>(newKeys);
         added.removeAll(oldKeys);
-        apply(removed, userId, view, PageUnit.HIGH_LEVEL, -1, visibleExclCancelled);
-        apply(added, userId, view, PageUnit.HIGH_LEVEL, +1, visibleExclCancelled);
+        Owner owner = new Owner(ownerType, userId, view, PageUnit.HIGH_LEVEL, false);
+        apply(removed, owner, -1, visibleExclCancelled);
+        apply(added, owner, +1, visibleExclCancelled);
     }
 
     /**
@@ -109,10 +117,11 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void uncountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, String productType, String type,
-            Instant at) {
+            short ownerType, long userId, ViewKind view, PageUnit unit, String productType, String type,
+            boolean zeroAmount, Instant at) {
+        Owner owner = new Owner(ownerType, userId, view, unit, zeroAmount);
         for (Key key : keys(unit, productType, type, at)) {
-            decrementExcl(userId, view, unit, key);
+            updateExcl(owner, key, -1);
         }
     }
 
@@ -125,16 +134,20 @@ public class CounterUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void recountExclCancelled(
-            long userId, ViewKind view, PageUnit unit, String productType, String type,
-            Instant at) {
+            short ownerType, long userId, ViewKind view, PageUnit unit, String productType, String type,
+            boolean zeroAmount, Instant at) {
+        Owner owner = new Owner(ownerType, userId, view, unit, zeroAmount);
         for (Key key : keys(unit, productType, type, at)) {
-            incrementExcl(userId, view, unit, key);
+            updateExcl(owner, key, +1);
         }
     }
 
     // --- internals -----------------------------------------------------------------------
 
-    /** One counter row address. */
+    /** Everything of a counter row's address but its (productType, type, day) key. */
+    private record Owner(short ownerType, long userId, ViewKind view, PageUnit unit, boolean zeroAmount) {}
+
+    /** One counter row address within an {@link Owner}. */
     private record Key(String productType, String type, LocalDate day) {}
 
     /**
@@ -162,29 +175,28 @@ public class CounterUpdater {
         return keys;
     }
 
-    private void apply(
-            Set<Key> keys, long userId, ViewKind view, PageUnit unit, int delta, boolean excl) {
+    private void apply(Set<Key> keys, Owner owner, int delta, boolean excl) {
         for (Key key : keys) {
             if (delta > 0) {
-                increment(userId, view, unit, key, excl);
+                increment(owner, key, excl);
             } else {
-                decrement(userId, view, unit, key, excl);
+                decrement(owner, key, excl);
             }
         }
     }
 
     /** The row key every statement below addresses, appended after its SET values. */
     private static final String ROW_IS = """
-            where "userId" = ? and "viewKind" = ? and "pageUnit" = ? and "productType" = ?
-              and "type" = ? and "day" = ?
+            where "ownerType" = ? and "userId" = ? and "viewKind" = ? and "pageUnit" = ?
+              and "productType" = ? and "type" = ? and "zeroAmount" = ? and "day" = ?
             """;
 
     // The table name comes from a fixed constant only; every value is bound.
     private static final String INCREMENT = """
-            insert into "wqPrjCount" ("userId", "viewKind", "pageUnit", "productType", "type", "day",
-                    "cntAll", "cntExclCancelled")
-            values (?, ?, ?, ?, ?, ?, ?, ?)
-            on conflict ("userId", "viewKind", "pageUnit", "productType", "type", "day")
+            insert into "wqPrjCount" ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type",
+                    "zeroAmount", "day", "cntAll", "cntExclCancelled")
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type", "zeroAmount", "day")
             do update set "cntAll" = "wqPrjCount"."cntAll" + ?,
                           "cntExclCancelled" = "wqPrjCount"."cntExclCancelled" + ?
             """;
@@ -196,18 +208,15 @@ public class CounterUpdater {
                     + " \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" - ?\n" + ROW_IS
                     + "returning \"cntAll\"";
     private static final String DELETE = "delete from \"wqPrjCount\"\n" + ROW_IS;
-    private static final String DECREMENT_EXCL =
-            "update \"wqPrjCount\" set \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" - ?\n"
-                    + ROW_IS;
-    private static final String INCREMENT_EXCL =
+    private static final String UPDATE_EXCL =
             "update \"wqPrjCount\" set \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" + ?\n"
                     + ROW_IS;
 
-    private void increment(long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
+    private void increment(Owner owner, Key key, boolean excl) {
         long exclDelta = excl ? 1L : 0L;
         jdbc.sql(INCREMENT)
-                .params(userId, (short) view.code(), unit.code(), key.productType(), key.type(),
-                        key.day(), 1L, exclDelta, 1L, exclDelta)
+                .params(rowIs(owner, key))
+                .params(1L, exclDelta, 1L, exclDelta)
                 .update();
     }
 
@@ -217,55 +226,49 @@ public class CounterUpdater {
      * row at every key a page unit passed through, making stored state depend on arrival order
      * (spec P-1). cntExclCancelled &lt;= cntAll (CHECK), so a deleted row holds nothing.
      */
-    private void decrement(long userId, ViewKind view, PageUnit unit, Key key, boolean excl) {
+    private void decrement(Owner owner, Key key, boolean excl) {
         var statement = excl
                 ? jdbc.sql(DECREMENT_WITH_EXCL).params(1L, 1L)
                 : jdbc.sql(DECREMENT).param(1L);
         Long remaining = statement
-                .params(userId, (short) view.code(), unit.code(), key.productType(), key.type(),
-                        key.day())
+                .params(rowIs(owner, key))
                 .query(Long.class)
                 .optional()
                 .orElse(null);
-        requireOneRow(remaining == null ? 0 : 1, userId, view, unit, key);
+        requireOneRow(remaining == null ? 0 : 1, owner, key);
         if (remaining == 0L) {
             jdbc.sql(DELETE)
-                    .params(rowIs(userId, view, unit, key))
+                    .params(rowIs(owner, key))
                     .update();
         }
     }
 
-    private void decrementExcl(long userId, ViewKind view, PageUnit unit, Key key) {
-        int rows = jdbc.sql(DECREMENT_EXCL)
-                .param(1L)
-                .params(rowIs(userId, view, unit, key))
+    /** Adds {@code delta} to cntExclCancelled only; the row must exist. */
+    private void updateExcl(Owner owner, Key key, long delta) {
+        int rows = jdbc.sql(UPDATE_EXCL)
+                .param(delta)
+                .params(rowIs(owner, key))
                 .update();
-        requireOneRow(rows, userId, view, unit, key);
+        requireOneRow(rows, owner, key);
     }
 
-    private void incrementExcl(long userId, ViewKind view, PageUnit unit, Key key) {
-        int rows = jdbc.sql(INCREMENT_EXCL)
-                .param(1L)
-                .params(rowIs(userId, view, unit, key))
-                .update();
-        requireOneRow(rows, userId, view, unit, key);
-    }
-
-    private static void requireOneRow(
-            int rows, long userId, ViewKind view, PageUnit unit, Key key) {
+    private static void requireOneRow(int rows, Owner owner, Key key) {
         if (rows != 1) {
             throw new IllegalStateException(
                     "counter update hit " + rows + " rows, expected 1: table="
-                            + TABLE + " userId=" + userId + " view=" + view
-                            + " unit=" + unit + " productType='" + key.productType() + "'"
+                            + TABLE + " ownerType=" + owner.ownerType() + " userId=" + owner.userId()
+                            + " view=" + owner.view() + " unit=" + owner.unit()
+                            + " productType='" + key.productType() + "'"
                             + " type='" + key.type() + "'"
+                            + " zeroAmount=" + owner.zeroAmount()
                             + " day=" + key.day());
         }
     }
 
     /** The bind values of {@link #ROW_IS}, in order. */
-    private static Object[] rowIs(long userId, ViewKind view, PageUnit unit, Key key) {
+    private static Object[] rowIs(Owner owner, Key key) {
         return new Object[] {
-                userId, (short) view.code(), unit.code(), key.productType(), key.type(), key.day()};
+                owner.ownerType(), owner.userId(), (short) owner.view().code(), owner.unit().code(),
+                key.productType(), key.type(), owner.zeroAmount(), key.day()};
     }
 }

@@ -35,20 +35,20 @@ public class VersionedApplier {
     enum Verdict { ABSENT, NEWER, DUPLICATE, STALE }
 
     /** The stored identity of a polled row: its locator. */
-    record Stored(long userId, Instant occurredAt, long transactionId, Instant versionAt) {}
+    record Stored(short ownerType, long userId, Instant occurredAt, long transactionId, Instant versionAt) {}
 
     private static final String LOCATOR = """
-            select "userId", "occurredAt", "transactionId", "versionAt" from "wqPrjTransactionLocator"
+            select "ownerType", "userId", "occurredAt", "transactionId", "versionAt" from "wqPrjTransactionLocator"
             where "source" = ? and "sourceId" = ?
             """;
     private static final String IMMUTABLES = """
             select "amount", "currency", "type", "productId", "productType", "batchId", "subBatchId"
             from "wqPrjTransaction"
-            where "userId" = ? and "occurredAt" = ? and "transactionId" = ?
+            where "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "transactionId" = ?
             """;
     private static final String UPDATE_DETAIL = """
             update "wqPrjTransaction" set "detail" = cast(? as jsonb)
-            where "userId" = ? and "occurredAt" = ? and "transactionId" = ?
+            where "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "transactionId" = ?
             """;
     private static final String UPDATE_VERSION = """
             update "wqPrjTransactionLocator" set "versionAt" = ?
@@ -56,7 +56,7 @@ public class VersionedApplier {
             """;
 
     /** A locator row as read; {@code versionAt} is null for a stream transaction. */
-    private record Locator(long userId, OffsetDateTime occurredAt, long transactionId, OffsetDateTime versionAt) {}
+    private record Locator(short ownerType, long userId, OffsetDateTime occurredAt, long transactionId, OffsetDateTime versionAt) {}
 
     /** The immutable fields (D6) of a stored transaction row. */
     private record Immutables(
@@ -74,7 +74,7 @@ public class VersionedApplier {
     public Stored stored(DeltaRow row) {
         Locator locator = jdbc.sql(LOCATOR)
                 .params((short) row.source().code(), row.transaction().sourceId())
-                .query((rs, n) -> new Locator(rs.getLong("userId"),
+                .query((rs, n) -> new Locator(rs.getShort("ownerType"), rs.getLong("userId"),
                         rs.getObject("occurredAt", OffsetDateTime.class), rs.getLong("transactionId"),
                         rs.getObject("versionAt", OffsetDateTime.class)))
                 .optional()
@@ -88,7 +88,7 @@ public class VersionedApplier {
             throw new IllegalStateException("polled row " + row.source() + "/" + row.transaction().sourceId()
                     + " has a locator without a version");
         }
-        return new Stored(locator.userId(), locator.occurredAt().toInstant(),
+        return new Stored(locator.ownerType(), locator.userId(), locator.occurredAt().toInstant(),
                 locator.transactionId(), versionAt.toInstant());
     }
 
@@ -111,6 +111,9 @@ public class VersionedApplier {
     @Transactional(propagation = Propagation.MANDATORY)
     public String immutableFieldChanged(DeltaRow row, Stored stored) {
         ProjectionTransaction transaction = row.transaction();
+        if (transaction.ownerType() != stored.ownerType()) {
+            return "ownerType";
+        }
         if (transaction.userId() != stored.userId()) {
             return "userId";
         }
@@ -118,7 +121,7 @@ public class VersionedApplier {
             return "occurredAt";
         }
         Immutables current = jdbc.sql(IMMUTABLES)
-                .params(stored.userId(), timestamptz(stored.occurredAt()), stored.transactionId())
+                .params(stored.ownerType(), stored.userId(), timestamptz(stored.occurredAt()), stored.transactionId())
                 .query((rs, n) -> new Immutables(rs.getBigDecimal("amount"), rs.getString("currency"),
                         rs.getString("type"), rs.getString("productId"), rs.getString("productType"),
                         rs.getString("batchId"), rs.getString("subBatchId")))
@@ -157,7 +160,7 @@ public class VersionedApplier {
     public void applyNewer(DeltaRow row, Stored stored) {
         String detail = row.transaction().detailJson();
         int updated = jdbc.sql(UPDATE_DETAIL)
-                .params(text(detail), stored.userId(), timestamptz(stored.occurredAt()), stored.transactionId())
+                .params(text(detail), stored.ownerType(), stored.userId(), timestamptz(stored.occurredAt()), stored.transactionId())
                 .update();
         if (updated != 1) {
             throw new IllegalStateException("polled row " + row.source() + "/" + row.transaction().sourceId()

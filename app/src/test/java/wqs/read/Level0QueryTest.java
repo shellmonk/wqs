@@ -87,9 +87,9 @@ class Level0QueryTest extends Level0TestSupport {
         try {
             // One set-based statement instead of a 40k-row batchInsert.
             db().execute("""
-                    insert into "wqPrjTransaction" ("userId", "transactionId", "source", "sourceId", "occurredAt",
+                    insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId", "occurredAt",
                                              "type", "amount", "currency")
-                    select ?, 9000000000 + i, 1, 'bulk' || i,
+                    select 1, ?, 9000000000 + i, 1, 'bulk' || i,
                            timestamptz '2034-05-01T00:00:00Z' + i * interval '1 second', 'TT_BUY', 1, 'EUR'
                     from generate_series(0, 39999) as i
                     """, USER);
@@ -217,9 +217,9 @@ class Level0QueryTest extends Level0TestSupport {
             // 60 users x 2000 rows over May 2034; USER is one of them. Set-based, like the bulk test.
             // A quarter are payments (source 4), which the /web view filters out inside the scan.
             db().execute("""
-                    insert into "wqPrjTransaction" ("userId", "transactionId", "source", "sourceId", "occurredAt",
+                    insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId", "occurredAt",
                                              "type", "amount", "currency", "productType")
-                    select ?::bigint + (i % 60), 9100000000 + i, (array[1, 3, 1, 4])[1 + (i % 4)], 'cov' || i,
+                    select 1, ?::bigint + (i % 60), 9100000000 + i, (array[1, 3, 1, 4])[1 + (i % 4)], 'cov' || i,
                            timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '20 minutes' + (i % 60) * interval '1 second',
                            (array['TT_BUY','PRIZE','TT_TRANSFER_OUT'])[1 + (i % 3)], 1, 'EUR', (array['keno','lottery','bingo'])[1 + (i % 3)]
                     from generate_series(0, 119999) as i
@@ -233,7 +233,7 @@ class Level0QueryTest extends Level0TestSupport {
             web.keys(recording.client(), f, t("2034-05-10T00:00:00Z"), t("2034-05-17T00:00:00Z"), 0, 50);
             assertThat(executed).hasSize(1);
             String plan = String.join("\n", recording.rerun("explain", executed.get(0)));
-            assertThat(plan).containsPattern("Index Only Scan using \"wqPrjTransaction_2034_05_userId_occurredAt_transactionId\\w*_idx\"")
+            assertThat(plan).containsPattern("Index Only Scan using \"wqPrjTransaction_2034_05_ownerType_userId_occurredAt_transa\\w*_idx\"")
                     .doesNotContain("Seq Scan")
                     .as("the view's source predicate is checked in the index-only scan").contains("source");
             assertThat(plan).as("partition pruning through the view").doesNotContainPattern("wqPrjTransaction_2034_0[^5]");

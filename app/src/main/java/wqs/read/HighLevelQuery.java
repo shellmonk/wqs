@@ -13,6 +13,9 @@ public interface HighLevelQuery {
 
     ViewKind view();
 
+    /** What this query's endpoint shows (plan D1): every statement binds it. */
+    ReadPolicy policy();
+
     /** Live count of page-index rows in {@code [lo, hi)}. */
     long count(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi);
 

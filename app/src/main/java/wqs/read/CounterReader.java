@@ -19,15 +19,18 @@ import wqs.domain.ViewKind;
  * the ALL-product-types sentinel when P is empty, and T' is T, or the ALL-types sentinel when T is
  * empty. That is exact because every transaction has one product type and one type. HIGH_LEVEL callers
  * always pass an empty {@code typeCodes}: HIGH_LEVEL counters carry no type.
+ *
+ * The read policy (plan D1) picks the owner type and, unless it shows zero amounts, only the
+ * "zeroAmount" = false rows: zero-amount transactions are counted apart.
  */
 @Component
 public class CounterReader {
 
-    // The count column comes from two fixed constants only; every value is bound.
+    // The count column and the zero-amount predicate come from fixed constants only; every value is bound.
     private static final String SUM = """
             select "day", cast(sum("%s") as bigint) as "cnt" from "wqPrjCount"
-            where ("userId" = :userId and "viewKind" = :viewKind and "pageUnit" = :pageUnit
-                   and "productType" in (:productTypes) and "type" in (:typeCodes)
+            where ("ownerType" = :ownerType and "userId" = :userId and "viewKind" = :viewKind
+                   and "pageUnit" = :pageUnit and "productType" in (:productTypes) and "type" in (:typeCodes)%s
                    and "day" between cast(:first as date) and cast(:last as date))
             group by "day"
             """;
@@ -37,13 +40,15 @@ public class CounterReader {
      * the product-type and type keys (plan D3).
      */
     public Map<LocalDate, Long> dayCounts(
-            JdbcClient tx, long userId, ViewKind view, PageUnit unit,
+            JdbcClient tx, ReadPolicy policy, long userId, ViewKind view, PageUnit unit,
             Set<String> productTypes, Set<String> typeCodes, boolean excludeCancelled,
             LocalDate firstDay, LocalDate lastDay) {
         Set<String> products = productTypes.isEmpty() ? Set.of(ALL_PRODUCT_TYPES) : productTypes;
         Set<String> types = typeCodes.isEmpty() ? Set.of(ALL_TYPES) : typeCodes;
         Map<LocalDate, Long> out = new LinkedHashMap<>();
-        tx.sql(SUM.formatted(excludeCancelled ? "cntExclCancelled" : "cntAll"))
+        tx.sql(SUM.formatted(excludeCancelled ? "cntExclCancelled" : "cntAll",
+                        policy.includeZeroAmounts() ? "" : " and \"zeroAmount\" = false"))
+                .param("ownerType", policy.ownerType())
                 .param("userId", userId)
                 .param("viewKind", (short) view.code())
                 .param("pageUnit", unit.code())

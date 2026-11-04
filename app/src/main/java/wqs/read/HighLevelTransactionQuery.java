@@ -18,6 +18,9 @@ public interface HighLevelTransactionQuery {
 
     ViewKind view();
 
+    /** What this query's endpoint shows (plan D1): every statement binds it. */
+    ReadPolicy policy();
+
     /**
      * The view's rows of the given sessions (by ("userId", "batchId")), newest first ("occurredAt" desc, "transactionId" desc, as level
      * 0): each session's transactions in its own {@code ["startedAt", "endedAt"]}, plus its cancellation

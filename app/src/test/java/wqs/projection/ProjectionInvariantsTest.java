@@ -73,8 +73,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_stored_zero_counter_row_is_counter_drift() {
         execute("""
-                insert into "wqPrjCount"
-                values (1, 1, 1, 'ghost', '', date '2034-03-30', 0, 0)""");
+                insert into "wqPrjCount" ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type",
+                    "zeroAmount", "day", "cntAll", "cntExclCancelled")
+                values (1, 1, 1, 1, 'ghost', '', false, date '2034-03-30', 0, 0)""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
                 .startsWith("orphan counter row").contains("productType=ghost");
@@ -109,9 +110,9 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_play_without_transactions_is_aggregation_drift() {
         execute("""
-                insert into "wqPrjPlay" ("userId", "batchId", "subBatchId", "startedAt", "endedAt",
+                insert into "wqPrjPlay" ("ownerType", "userId", "batchId", "subBatchId", "startedAt", "endedAt",
                                       "currency")
-                values (1, 'b1', 'ghost', timestamptz '2034-03-31 10:00Z',
+                values (1, 1, 'b1', 'ghost', timestamptz '2034-03-31 10:00Z',
                         timestamptz '2034-03-31 10:00Z', 'EUR')""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
@@ -177,8 +178,8 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_session_without_transactions_is_aggregation_drift() {
         execute("""
-                insert into "wqPrjSession" ("userId", "batchId", "startedAt", "endedAt", "currency")
-                values (1, 'ghost', timestamptz '2034-03-31 10:00Z', timestamptz '2034-03-31 10:00Z',
+                insert into "wqPrjSession" ("ownerType", "userId", "batchId", "startedAt", "endedAt", "currency")
+                values (1, 1, 'ghost', timestamptz '2034-03-31 10:00Z', timestamptz '2034-03-31 10:00Z',
                         'EUR')""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
@@ -341,24 +342,37 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
                 .startsWith("cancelled without a cancel").contains("sourceId=t2");
     }
 
-    /** A zero-amount cancel lives in the locator only (D8), yet still counts as t2's cancel. */
+    /** A zero-amount cancel is a transaction row like any other, and counts as t2's cancel. */
     @Test
-    void a_zero_amount_cancel_in_the_locator_is_seen_by_the_cancellation_oracle() {
+    void a_zero_amount_cancel_row_is_seen_by_the_cancellation_oracle() {
         execute("""
-                insert into "wqPrjTransactionLocator" ("source", "sourceId", "userId", "occurredAt", "transactionId",
-                    "zeroAmount", "cancels")
-                values (1, 'cz', 1, timestamptz '2034-04-01 02:00:00+00', -1, true, 't2')""");
+                insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId",
+                    "occurredAt", "type", "amount", "currency", "cancels")
+                values (1, 1, -1, 1, 'cz', timestamptz '2034-04-01 02:00:00+00', 'TT_CANCEL', 0, 'EUR', 't2')""");
 
-        assertThat(invariants.cancellationDrift()).singleElement().asString()
-                .startsWith("cancel not applied").contains("sourceId=t2");
+        assertThat(invariants.cancellationDrift()).asString().contains("cancel not applied").contains("sourceId=t2");
+    }
+
+    /** Owners are (ownerType, userId): a cancel row of owner 2-1 is not a cancel of player 1-1's t2. */
+    @Test
+    void a_cancel_of_another_owner_type_is_not_a_cancel_for_the_cancellation_oracle() {
+        execute("""
+                update "wqPrjTransaction" set "cancelled" = true, "cancelledBy" = 'cx' where "sourceId" = 't2'""");
+        execute("""
+                insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId",
+                    "occurredAt", "type", "amount", "currency", "cancels")
+                values (2, 1, -2, 1, 'cx', timestamptz '2034-04-01 02:00:00+00', 'TT_CANCEL', 1, 'EUR', 't2')""");
+
+        assertThat(invariants.cancellationDrift()).asString().contains("cancelled without a cancel")
+                .contains("sourceId=t2");
     }
 
     @Test
     void a_parked_cancel_whose_target_exists_is_cancellation_drift() {
         execute("""
-                insert into "wqPrjPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "userId",
+                insert into "wqPrjPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "ownerType", "userId",
                     "occurredAt", "type", "amount", "currency")
-                values (1, 'c9', 't2', 1, timestamptz '2034-04-01 00:00:00+00', 'TT_CANCEL', 1, 'EUR')""");
+                values (1, 'c9', 't2', 1, 1, timestamptz '2034-04-01 00:00:00+00', 'TT_CANCEL', 1, 'EUR')""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
                 .startsWith("unexpected pending cancel").contains("cancelSourceId=c9");

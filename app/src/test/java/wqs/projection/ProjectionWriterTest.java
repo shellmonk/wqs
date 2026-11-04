@@ -122,28 +122,72 @@ class ProjectionWriterTest extends PostgresTestBase {
 
     // --- Phase 5 ingest rules (spec 4.1, plan D6-D8) ---------------------------------------------
 
-    /** D8: recorded in the locator so it stays idempotent, written to nothing else. */
+    /**
+     * Store everything (plan D6): a zero-amount transaction is a transaction row like any other --
+     * deduplicated by the gate, counted apart under "zeroAmount" = true -- but in no page unit and in
+     * no session or play sum: a session's "zeroTxCount" counts it, and a session needs a non-zero row
+     * to exist at all.
+     */
     @Test
-    void zero_amount_transaction_writes_locator_only() {
+    void zero_amount_transaction_is_stored_deduplicated_and_counted_apart() {
         WriteResult first = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 1L));
 
+        assertThat(first.projected()).isEqualTo(1);
         assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
-        assertThat(db().value("select \"zeroAmount\" from \"wqPrjTransactionLocator\"", Boolean.class)).isTrue();
-        assertNothingProjected();
-        assertThat(first.projected()).isZero();
-        assertThat(first.skipped()).isEqualTo(1);
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
+        assertThat(db().value("select \"zeroAmount\" from \"wqPrjTransaction\"", Boolean.class)).isTrue();
+        assertThat(count("wqPrjTimeline")).as("no page unit").isZero();
+        assertThat(count("wqPrjSession")).as("a zero-amount row opens no session").isZero();
+        assertThat(count("wqPrjPlay")).isZero();
+        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where not \"zeroAmount\"", Integer.class))
+                .as("counted apart").isZero();
+        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where \"zeroAmount\" and \"pageUnit\" = 0",
+                Integer.class)).as("TRANSACTION, (pt, t) x (ALL) per view").isEqualTo(8);
         assertThat(offsetStore.read(STREAM)).contains(1L);
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
 
         WriteResult again = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 2L));
         assertThat(again.duplicates()).isEqualTo(1);
-        assertThat(again.skipped()).isZero();
-        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
-        assertNothingProjected();
+        assertThat(again.projected()).isZero();
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
     /**
-     * A cancel of a zero-amount transaction has its own amount, so it is projected; it resolves against
-     * the locator row, marks nothing and never parks -- in either arrival order.
+     * D6, order-independent: a session's "zeroTxCount" counts its zero-amount rows whichever arrives
+     * first, and "txCount", the sums, the start and the label are the non-zero rows' alone.
+     */
+    @Test
+    void zero_amount_rows_count_in_zero_tx_count_only_in_either_order() {
+        ProjectionTransaction live = new ProjectionTransaction(
+                7L, SourceKind.TRANSACTION, "l-1", WHEN.plusSeconds(30), "P12", "lottery", "b-z", "p-z",
+                TxTypes.PLAY, new BigDecimal("2.0000"), "EUR", null, null, null);
+        List<String> converged = null;
+        for (boolean zeroFirst : new boolean[] {true, false}) {
+            clearProjection();
+            List<ProjectionTransaction> order = zeroFirst ? List.of(zero("z-1"), live) : List.of(live, zero("z-1"));
+            writer.apply(new ProjectionBatch(STREAM, List.of(order.get(0)), 1L));
+            writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
+
+            var session = db().row("""
+                    select "txCount", "zeroTxCount", "startedAt", "productType", "totalPlays" from "wqPrjSession" """);
+            assertThat(session.get("txCount", Integer.class)).as("zeroFirst=" + zeroFirst).isEqualTo(1);
+            assertThat(session.get("zeroTxCount", Integer.class)).as("zeroFirst=" + zeroFirst).isEqualTo(1);
+            assertThat(session.get("productType", String.class)).as("the non-zero row's label").isEqualTo("lottery");
+            assertThat(db().value("select \"zeroTxCount\" from \"wqPrjPlay\"", Integer.class)).isEqualTo(1);
+            assertThat(new ProjectionInvariants(jdbc()).drift()).as("zeroFirst=" + zeroFirst).isEmpty();
+            List<String> state = ProjectionSnapshot.of(jdbc()).sessions();
+            if (converged == null) {
+                converged = state;
+            } else {
+                assertThat(state).as("same session either way").isEqualTo(converged);
+            }
+        }
+    }
+
+    /**
+     * A cancel of a zero-amount transaction resolves against its stored row -- it never parks -- in
+     * either arrival order, and marks it cancelled; it changes no visible tally.
      */
     @Test
     void cancel_of_zero_amount_transaction_resolves_and_is_itself_projected() {
@@ -155,17 +199,20 @@ class ProjectionWriterTest extends PostgresTestBase {
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(0)), 1L));
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
 
-            assertThat(count("wqPrjWebTransaction")).as("cancelFirst=" + cancelFirst).isEqualTo(1);
-            assertThat(db().value("select \"sourceId\" from \"wqPrjWebTransaction\"", String.class)).isEqualTo("c-1");
-            assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\" where \"cancelled\"", Integer.class)).isZero();
             assertThat(count("wqPrjPendingCancel")).as("cancelFirst=" + cancelFirst).isZero();
+            assertThat(db().value("select \"cancelled\" from \"wqPrjTransaction\" where \"sourceId\" = 'z-1'",
+                    Boolean.class)).as("cancelFirst=" + cancelFirst).isTrue();
+            assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\" where not \"zeroAmount\"",
+                    Integer.class)).isEqualTo(1);
+            assertThat(db().value("select \"sourceId\" from \"wqPrjWebTransaction\" where not \"zeroAmount\"",
+                    String.class)).isEqualTo("c-1");
             assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
         }
     }
 
-    /** A zero-amount cancel is itself locator-only, and still cancels its (non-zero) target. */
+    /** A zero-amount cancel is stored (and counted apart) like any zero-amount row, and still cancels its target. */
     @Test
-    void zero_amount_cancel_is_locator_only_and_still_cancels_its_target() {
+    void zero_amount_cancel_is_stored_and_still_cancels_its_target() {
         for (boolean cancelFirst : new boolean[] {false, true}) {
             clearProjection();
             ProjectionTransaction target = unsessioned("t-1", "lottery", new BigDecimal("3.0000"));
@@ -175,8 +222,9 @@ class ProjectionWriterTest extends PostgresTestBase {
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
 
             assertThat(count("wqPrjTransactionLocator")).isEqualTo(2);
-            assertThat(count("wqPrjWebTransaction")).as("only the target has a transaction row").isEqualTo(1);
-            assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqPrjWebTransaction\"").asMap().values().toArray())
+            assertThat(count("wqPrjWebTransaction")).as("both stored").isEqualTo(2);
+            assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqPrjWebTransaction\" where \"sourceId\" = 't-1'")
+                    .asMap().values().toArray())
                     .as("cancelFirst=" + cancelFirst).containsExactly(true, "c-1");
             assertThat(count("wqPrjPendingCancel")).isZero();
             assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
@@ -294,13 +342,6 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(session.get("txCount", Integer.class)).isEqualTo(2);
         assertThat(session.get("totalPlays", BigDecimal.class)).as("only the PLAY code").isEqualByComparingTo("5.0000");
         assertThat(session.get("totalWins", BigDecimal.class)).isEqualByComparingTo("0");
-    }
-
-    private void assertNothingProjected() {
-        for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay",
-                "wqPrjTimeline", "wqPrjCount", "wqPrjPendingCancel")) {
-            assertThat(count(table)).as(table).isZero();
-        }
     }
 
     private List<String> deadLetters() {

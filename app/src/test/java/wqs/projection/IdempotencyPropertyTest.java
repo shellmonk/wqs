@@ -97,15 +97,14 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
 
     /**
      * Convergence cannot see deterministic misrouting or deterministic dropping, so check
-     * completeness directly: each distinct (source, sourceId) with a non-zero amount is in exactly
-     * the view tables its source routes to (once), and nothing else is -- in particular no
-     * zero-amount transaction; and every transaction, zero-amount or not, has its locator row.
+     * completeness directly: each distinct (source, sourceId) is in exactly the view tables its
+     * source routes to (once), zero-amount ones included (everything is stored; the read policy
+     * hides them), and nothing else is; and every transaction has its locator row.
      */
     private void assertRoutedExactly(List<ProjectionTransaction> transactions) {
         List<String> expectedWeb = new ArrayList<>();
         List<String> expectedCc = new ArrayList<>();
         for (ProjectionTransaction transaction : transactions) {
-            if (transaction.amount().signum() == 0) continue; // locator only (spec 4.1, D8)
             String key = transaction.source().code() + "/" + transaction.sourceId();
             if (expectedWeb.contains(key) || expectedCc.contains(key)) continue; // generated keys are unique
             if (transaction.source().views().contains(wqs.domain.ViewKind.WEB)) expectedWeb.add(key);

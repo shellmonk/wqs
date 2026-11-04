@@ -10,6 +10,9 @@ public interface Level0Query {
 
     ViewKind view();
 
+    /** What this query's endpoint shows (plan D1): every statement binds it. */
+    ReadPolicy policy();
+
     /** Live count of transaction rows in {@code [lo, hi)}. */
     long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi);
 

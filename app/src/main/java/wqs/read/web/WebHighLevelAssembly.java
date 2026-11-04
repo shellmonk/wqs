@@ -13,11 +13,15 @@ import org.springframework.stereotype.Component;
 import wqs.domain.ViewKind;
 import wqs.read.HighLevelTransactionQuery;
 import wqs.read.HighLevelKey;
+import wqs.read.ReadPolicy;
 import wqs.read.TransactionEntry;
 
 /** Level-1/2 assembly reads of the web view's transactions; of the transaction relations, reads only the "wqPrjWebTransaction" view. */
 @Component
 public class WebHighLevelAssembly implements HighLevelTransactionQuery {
+
+    /** What /web shows (plan D1), bound into every statement below. */
+    private static final ReadPolicy POLICY = ReadPolicy.WEB;
 
     private static final String TRANSACTION_COLUMNS = """
             "wqPrjWebTransaction"."userId", "wqPrjWebTransaction"."transactionId", "wqPrjWebTransaction"."source", "wqPrjWebTransaction"."sourceId",
@@ -33,11 +37,12 @@ public class WebHighLevelAssembly implements HighLevelTransactionQuery {
     // the type-code predicate -- fixed fragments, never values.
     private static final String SESSION_TRANSACTIONS = "select " + TRANSACTION_COLUMNS + """
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqPrjSession" on ("wqPrjSession"."userId" = :userId and "wqPrjSession"."batchId" = "wanted"."id")
-            join "wqPrjWebTransaction" on ("wqPrjWebTransaction"."userId" = :userId and "wqPrjWebTransaction"."batchId" = "wqPrjSession"."batchId"
+            join "wqPrjSession" on ("wqPrjSession"."ownerType" = :ownerType and "wqPrjSession"."userId" = :userId
+                   and "wqPrjSession"."batchId" = "wanted"."id")
+            join "wqPrjWebTransaction" on ("wqPrjWebTransaction"."ownerType" = :ownerType and "wqPrjWebTransaction"."userId" = :userId and "wqPrjWebTransaction"."batchId" = "wqPrjSession"."batchId"
                    and "wqPrjWebTransaction"."occurredAt" >= "wqPrjSession"."startedAt"
                    and ("wqPrjWebTransaction"."occurredAt" <= "wqPrjSession"."endedAt"
-                        or ("wqPrjWebTransaction"."cancels" is not null and "wqPrjWebTransaction"."occurredAt" < cast(:to as timestamptz)))%1$s%2$s)
+                        or ("wqPrjWebTransaction"."cancels" is not null and "wqPrjWebTransaction"."occurredAt" < cast(:to as timestamptz)))%1$s%2$s%3$s)
             order by "wqPrjWebTransaction"."occurredAt" desc, "wqPrjWebTransaction"."transactionId" desc
             """;
     private static final String NOT_CANCELLED = " and not (\"wqPrjWebTransaction\".\"cancelled\")";
@@ -47,10 +52,10 @@ public class WebHighLevelAssembly implements HighLevelTransactionQuery {
     // indexes; sourceId and the full key in Java narrow to the page's rows (final review F1).
     private static final String UNSESSIONED = "select " + TRANSACTION_COLUMNS + """
             from "wqPrjWebTransaction"
-            where ("wqPrjWebTransaction"."userId" = :userId
+            where ("wqPrjWebTransaction"."ownerType" = :ownerType and "wqPrjWebTransaction"."userId" = :userId
                    and "wqPrjWebTransaction"."occurredAt" = any (cast(:ats as timestamp with time zone[]))
                    and "wqPrjWebTransaction"."sourceId" = any (cast(:sourceIds as text[]))
-                   and "wqPrjWebTransaction"."batchId" is null)
+                   and "wqPrjWebTransaction"."batchId" is null%s)
             """;
 
     private final WebTransactionMapper mapper;
@@ -65,14 +70,21 @@ public class WebHighLevelAssembly implements HighLevelTransactionQuery {
     }
 
     @Override
+    public ReadPolicy policy() {
+        return POLICY;
+    }
+
+    @Override
     public List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds,
                                         Instant to, Set<String> typeCodes, boolean excludeCancelled) {
         if (batchIds.isEmpty()) {
             return List.of();
         }
         JdbcClient.StatementSpec spec = tx.sql(SESSION_TRANSACTIONS.formatted(
-                        excludeCancelled ? NOT_CANCELLED : "", typeCodes.isEmpty() ? "" : TYPE_CODES))
+                        excludeCancelled ? NOT_CANCELLED : "", typeCodes.isEmpty() ? "" : TYPE_CODES,
+                        POLICY.zeroAmountFilter("\"wqPrjWebTransaction\"")))
                 .param("ids", array(batchIds))
+                .param("ownerType", POLICY.ownerType())
                 .param("userId", userId)
                 .param("to", utc(to));
         if (!typeCodes.isEmpty()) {
@@ -93,7 +105,8 @@ public class WebHighLevelAssembly implements HighLevelTransactionQuery {
         Set<String> sourceIds = new LinkedHashSet<>();
         keys.forEach(k -> sourceIds.add(k.refId()));
         Map<HighLevelKey, TransactionEntry> out = new HashMap<>();
-        tx.sql(UNSESSIONED)
+        tx.sql(UNSESSIONED.formatted(POLICY.zeroAmountFilter("\"wqPrjWebTransaction\"")))
+                .param("ownerType", POLICY.ownerType())
                 .param("userId", userId)
                 .param("ats", ats)
                 .param("sourceIds", array(sourceIds))

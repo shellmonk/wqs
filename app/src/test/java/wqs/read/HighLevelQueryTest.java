@@ -124,9 +124,9 @@ class HighLevelQueryTest extends Level0TestSupport {
         try {
             // 60 users x 2000 rows over May 2034; a quarter are /cc-only payment rows.
             db().execute("""
-                    insert into "wqPrjTimeline" ("userId", "occurredAt", "kind", "refId", "productType",
+                    insert into "wqPrjTimeline" ("ownerType", "userId", "occurredAt", "kind", "refId", "productType",
                             "currency", "onWeb", "visibleExclCancelled")
-                    select ?::bigint + (i % 60),
+                    select 1, ?::bigint + (i % 60),
                            timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '20 minutes' + (i % 60) * interval '1 second',
                            (array[1, 3, 0, 4])[1 + (i % 4)], 'hl' || i, (array['keno','lottery','bingo'])[1 + (i % 3)],
                            'EUR', i % 4 <> 3, true
@@ -143,7 +143,7 @@ class HighLevelQueryTest extends Level0TestSupport {
                     String plan = String.join("\n", recording.rerun("explain", executed.get(0)));
                     String as = q.view() + " excl=" + excl + " plan:\n" + plan;
                     assertThat(plan).as(as)
-                            .containsPattern("Index Only Scan using \"wqPrjTimeline_2034_05_userId_occurredAt_kind_\\w*idx\"")
+                            .containsPattern("Index Only Scan using \"wqPrjTimeline_2034_05_ownerType_userId_occurredAt_kind_\\w*idx\"")
                             .doesNotContain("Seq Scan")
                             .doesNotContainPattern("wqPrjTimeline_2034_0[^5]");
                     if (q == web) {

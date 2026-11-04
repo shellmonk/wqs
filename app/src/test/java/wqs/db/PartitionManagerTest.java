@@ -45,8 +45,8 @@ class PartitionManagerTest extends PostgresTestBase {
 
         db().execute("""
                       insert into "wqPrjTransaction"
-                        ("userId","transactionId","source","sourceId","occurredAt","type","amount","currency")
-                      values (1, 1, 1, 'tx-1', timestamptz '2031-01-15T10:00:00Z', 'TT_BUY', 10.0000, 'EUR')
+                        ("ownerType","userId","transactionId","source","sourceId","occurredAt","type","amount","currency")
+                      values (1, 1, 1, 1, 'tx-1', timestamptz '2031-01-15T10:00:00Z', 'TT_BUY', 10.0000, 'EUR')
                       """);
 
         Integer count = db().value("select count(*)::int from \"wqPrjTransaction_2031_01\"", Integer.class);
@@ -67,8 +67,8 @@ class PartitionManagerTest extends PostgresTestBase {
 
         db().execute("""
                       insert into "wqPrjTransaction"
-                        ("userId","transactionId","source","sourceId","occurredAt","type","amount","currency")
-                      values (1, 2, 1, 'tx-boundary', timestamptz '2031-02-01T00:00:00Z', 'TT_BUY', 10.0000, 'EUR')
+                        ("ownerType","userId","transactionId","source","sourceId","occurredAt","type","amount","currency")
+                      values (1, 1, 2, 1, 'tx-boundary', timestamptz '2031-02-01T00:00:00Z', 'TT_BUY', 10.0000, 'EUR')
                       """);
 
         Integer februaryCount = db().value("select count(*)::int from \"wqPrjTransaction_2031_02\"", Integer.class);
@@ -84,8 +84,8 @@ class PartitionManagerTest extends PostgresTestBase {
         for (String day : List.of("2031-01-01", "2031-01-31", "2031-02-01", "2031-02-28")) {
             db().execute("""
                           insert into "wqPrjCount"
-                            ("userId","viewKind","pageUnit","productType","type","day","cntAll","cntExclCancelled")
-                          values (1, 1, 0, '', '', date '%s', 1, 1)
+                            ("ownerType","userId","viewKind","pageUnit","productType","type","zeroAmount","day","cntAll","cntExclCancelled")
+                          values (1, 1, 1, 0, '', '', false, date '%s', 1, 1)
                           """.formatted(day));
         }
 

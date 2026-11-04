@@ -58,13 +58,27 @@ class MigrationTest extends PostgresTestBase {
         assertThat(columnType("wqPrjTimeline", "webVisibleExclCancelled")).as("no per-endpoint visibility").isNull();
     }
 
+    /** Owner identity is ("ownerType", "userId"): the owner type leads every owner key and index. */
+    @Test
+    void owner_type_leads_every_owner_key() {
+        for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCount")) {
+            assertThat(primaryKey(table)).as(table).startsWith("ownerType", "userId");
+        }
+        for (String table : List.of("wqPrjTransaction", "wqPrjTransactionLocator", "wqPrjPendingCancel",
+                "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCount")) {
+            assertThat(columnType(table, "ownerType")).as(table).isEqualTo("smallint");
+            assertThat(nullable(table, "ownerType")).as(table).isFalse();
+        }
+        assertThat(indexDef("wqPrjTransactionLocator_user_idx")).endsWith("(\"ownerType\", \"userId\")");
+    }
+
     /** Plan D5: sessions and plays are keyed by batch, not partitioned, and need no group locator. */
     @Test
     void sessions_and_plays_are_unpartitioned_and_keyed_by_batch() {
         assertThat(relkind("wqPrjSession")).isEqualTo("r");
         assertThat(relkind("wqPrjPlay")).isEqualTo("r");
-        assertThat(primaryKey("wqPrjSession")).containsExactly("userId", "batchId");
-        assertThat(primaryKey("wqPrjPlay")).containsExactly("userId", "batchId", "subBatchId");
+        assertThat(primaryKey("wqPrjSession")).containsExactly("ownerType", "userId", "batchId");
+        assertThat(primaryKey("wqPrjPlay")).containsExactly("ownerType", "userId", "batchId", "subBatchId");
         assertThat(relkind("wqPrjSession_startedAt")).as("no session time index: paging reads the timeline").isNull();
         assertThat(relkind("wqPrjGroupLocator")).as("no group locator").isNull();
         assertThat(relkind("wqPrjPlay_batch")).as("the play primary key serves the batch lookup").isNull();
@@ -153,7 +167,7 @@ class MigrationTest extends PostgresTestBase {
                     order by k.pos
                     """, String.class, table);
             assertThat(pk).as(table + " primary key").containsExactly(
-                    "userId", "viewKind", "pageUnit", "productType", "type", "day");
+                    "ownerType", "userId", "viewKind", "pageUnit", "productType", "type", "zeroAmount", "day");
             assertThat(columnType(table, "productType")).as(table).isEqualTo("text");
             assertThat(columnType(table, "type")).as(table).isEqualTo("text");
             assertThat(columnType(table, "productId")).as(table + " has no productId").isNull();
@@ -185,16 +199,25 @@ class MigrationTest extends PostgresTestBase {
                 .as("no type table").isNull();
     }
 
-    /** D8: the locator-only columns and the CHECK that "cancels" appears only on locator-only rows. */
+    /**
+     * Store everything: the locator has no locator-only columns any more (every transaction has its
+     * row), and carries the owner type; "zeroAmount" is a stored generated column of the transactions.
+     */
     @Test
-    void locator_carries_zero_amount_and_cancels_with_their_check() {
-        assertThat(columnType("wqPrjTransactionLocator", "zeroAmount")).isEqualTo("boolean");
-        assertThat(nullable("wqPrjTransactionLocator", "zeroAmount")).isFalse();
-        assertThat(columnType("wqPrjTransactionLocator", "cancels")).isEqualTo("text");
+    void zero_amount_is_a_generated_transaction_column_and_the_locator_carries_the_owner_type() {
+        assertThat(columnType("wqPrjTransactionLocator", "zeroAmount")).as("no locator-only rows").isNull();
+        assertThat(columnType("wqPrjTransactionLocator", "cancels")).isNull();
+        assertThat(columnType("wqPrjTransactionLocator", "ownerType")).isEqualTo("smallint");
+        assertThat(nullable("wqPrjTransactionLocator", "ownerType")).isFalse();
+        assertThat(columnType("wqPrjTransaction", "zeroAmount")).isEqualTo("boolean");
         assertThat(db().value("""
-                select pg_get_constraintdef(oid) from pg_constraint
-                where conname = 'wqPrjTransactionLocator_cancels_locator_only'
-                """, String.class)).contains("cancels IS NULL").contains("\"zeroAmount\"");
+                select generation_expression from information_schema.columns
+                where table_name = 'wqPrjTransaction' and column_name = 'zeroAmount'
+                """, String.class)).contains("amount = (0)").contains("source = 1");
+        for (String table : List.of("wqPrjSession", "wqPrjPlay")) {
+            assertThat(columnType(table, "zeroTxCount")).as(table).isEqualTo("integer");
+            assertThat(nullable(table, "zeroTxCount")).as(table).isFalse();
+        }
         for (String table : List.of("wqPrjSession", "wqPrjPlay")) {
             assertThat(columnType(table, "firstSourceId")).as(table).isEqualTo("text");
             assertThat(columnType(table, "firstSource")).as(table).isEqualTo("smallint");
@@ -205,11 +228,11 @@ class MigrationTest extends PostgresTestBase {
     @Test
     void read_path_indexes_have_their_final_shape() {
         assertThat(indexDef("wqPrjTransaction_cover")).endsWith(
-                "(\"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (cancelled, \"productType\", type, source)");
+                "(\"ownerType\", \"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (cancelled, \"productType\", type, source, \"zeroAmount\")");
         assertThat(indexDef("wqPrjTimeline_cover")).endsWith(
-                "(\"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\", \"onWeb\")");
+                "(\"ownerType\", \"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\", \"onWeb\")");
         assertThat(indexDef("wqPrjTransaction_batch")).endsWith(
-                "(\"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
+                "(\"ownerType\", \"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
     }
 
     /** The Quartz JobStore lives in its own schema. */

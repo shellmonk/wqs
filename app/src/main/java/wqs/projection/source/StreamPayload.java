@@ -9,9 +9,9 @@ import java.util.Map;
  * projection uses are kept; the rest of the wire message is dropped, never carried along.
  *
  * <p>{@code userType} and {@code userId} come from {@code userContext.ownerId} =
- * {@code "{userType}-{userId}"}; deciding what to do with a non-player owner is not the decoder's
- * job: {@code StreamConsumer} skips it before mapping (spec 4.1, D8), so it never reaches the
- * mapper or the writer. {@code type} is the wire code ({@code TT_BUY}); the mapper keeps it
+ * {@code "{userType}-{userId}"}; every owner type is mapped and stored, the user type becoming the
+ * transaction's owner type, so owner {@code "2-1717"} never shares a row with player 1717.
+ * {@code type} is the wire code ({@code TT_BUY}); the mapper keeps it
  * as-is (plan D1). {@code transactionReference} is the raw {@code references.transactionReference}
  * -- the producer self-references when there is no link, so it is only a cancel target per the
  * mapper's rule.

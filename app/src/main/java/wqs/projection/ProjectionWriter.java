@@ -3,7 +3,6 @@ package wqs.projection;
 import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -21,12 +20,17 @@ import wqs.projection.source.DeltaRow;
 /**
  * The single write choke point. Nothing else in WQS holds a write connection (spec section 6).
  *
- * Implements the ordering of spec 6.2: for each transaction, the ingest rules of spec 4.1 (a zero-amount
- * transaction is recorded in the locator only; a currency-mismatched or unsessioned eInstant transaction is
- * dead-lettered alone), then gate and insert, then (for a cancellation)
+ * Implements the ordering of spec 6.2: for each transaction, the ingest rules of spec 4.1 (a
+ * currency-mismatched or unsessioned eInstant transaction is dead-lettered alone), then gate and
+ * insert, then (for a cancellation)
  * apply or park it, then rollups, page index and counters; after the projected transactions, drain the cancels
  * parked for projected transactions this batch inserted; then the offset last -- all in one transaction, so
  * projection state and consumer position advance or roll back together.
+ *
+ * <p>Everything is stored: zero-amount transactions and non-player owners take the same path as any
+ * other (the owner type is part of every owner key). What an endpoint shows is decided at read
+ * time by its {@code wqs.read.ReadPolicy}. A zero-amount transaction is counted apart and adds
+ * nothing to a session's txCount or page index (plan D6).
  *
  * <p>{@link #applyDelta} is the polled sources' path (phase 6): versioned upserts and the
  * poller's watermark, likewise in one transaction.
@@ -51,9 +55,6 @@ public class ProjectionWriter {
     private final VersionedApplier versionedApplier;
     private final DeltaWatermarkStore watermarkStore;
     private final DeltaMetrics deltaMetrics;
-
-    /** The only owner type projected (spec 4.1). */
-    private static final int PLAYER = 1;
 
     public ProjectionWriter(
             TransactionInserter transactionInserter,
@@ -104,28 +105,11 @@ public class ProjectionWriter {
 
         int projected = 0;
         int duplicates = 0;
-        int skipped = 0;
         int deadLettered = 0;
         Set<TransactionRef> inserted = new LinkedHashSet<>();
 
         for (int i = 0; i < batch.transactions().size(); i++) {
             ProjectionTransaction transaction = batch.transactions().get(i);
-
-            // Zero-amount (spec 4.1, D8): the locator row only, so it stays idempotent and a
-            // cancel referencing it resolves; no view, rollup, page row or counter. A zero-amount
-            // cancel still cancels its target -- the effect lives on the target's rows.
-            if (transaction.amount().signum() == 0) {
-                if (!transactionInserter.recordLocatorOnly(transaction)) {
-                    duplicates++;
-                    continue;
-                }
-                skipped++;
-                inserted.add(TransactionRef.of(transaction));
-                if (transaction.isCancellation()) {
-                    cancellationApplier.apply(transaction);
-                }
-                continue;
-            }
 
             // Rejected transactions (D6, D7) are dead-lettered alone and nothing of them is written, not
             // even the locator row; the rest of the batch applies. Checked before the gate, so a
@@ -174,7 +158,7 @@ public class ProjectionWriter {
             offsetStore.write(batch.stream(), batch.committedOffset());
         }
 
-        return new WriteResult(projected, duplicates, deadLettered, skipped);
+        return new WriteResult(projected, duplicates, deadLettered);
     }
 
     /**
@@ -182,7 +166,7 @@ public class ProjectionWriter {
      * poller's watermark, in one transaction: a failure leaves both untouched and the page is
      * polled again.
      *
-     * <p>Per row: a non-player owner is skipped before any write (ruling R1). First sight is the
+     * <p>Per row, whatever its owner type (every owner is stored): first sight is the
      * stream's insert path -- the ingest rules, then the gate, rollups, page index and counters --
      * with the row's version recorded; zero-amount hiding does not apply (it is about transactions
      * only). A row already stored is decided by {@link VersionedApplier}: newer replaces "detail",
@@ -192,17 +176,9 @@ public class ProjectionWriter {
      */
     @Transactional
     public DeltaResult applyDelta(DeltaBatch batch) {
-        List<DeltaRow> players = new ArrayList<>(batch.rows().size());
-        int skipped = 0;
-        for (DeltaRow row : batch.rows()) {
-            if (row.ownerType() == PLAYER) {
-                players.add(row);
-            } else {
-                skipped++;
-            }
-        }
+        List<DeltaRow> rows = batch.rows();
         // As in apply(): partitions first, in their own transaction, before any projection write.
-        partitionProvisioner.ensureMonths(players.stream()
+        partitionProvisioner.ensureMonths(rows.stream()
                 .map(row -> YearMonth.from(row.transaction().occurredAt().atZone(ZoneOffset.UTC)))
                 .collect(Collectors.toSet()));
 
@@ -211,7 +187,7 @@ public class ProjectionWriter {
         int duplicates = 0;
         int stale = 0;
         int deadLettered = 0;
-        for (DeltaRow row : players) {
+        for (DeltaRow row : rows) {
             ProjectionTransaction transaction = row.transaction();
             VersionedApplier.Stored stored = versionedApplier.stored(row);
             switch (VersionedApplier.verdict(row, stored)) {
@@ -250,7 +226,7 @@ public class ProjectionWriter {
             watermarkStore.write(batch.newWatermark());
         }
 
-        DeltaResult result = new DeltaResult(inserted, updated, duplicates, stale, skipped, deadLettered);
+        DeltaResult result = new DeltaResult(inserted, updated, duplicates, stale, deadLettered);
         deltaMetrics.recordOnCommit(result);
         return result;
     }
@@ -276,11 +252,11 @@ public class ProjectionWriter {
         String productType = sessioned ? rollup.sessionProductType() : transaction.productType();
 
         for (ViewKind view : highLevel.inserted()) {
-            counterUpdater.countHighLevel(transaction.userId(), view, productType, at);
+            counterUpdater.countHighLevel(transaction.ownerType(), transaction.userId(), view, productType, at);
         }
         for (ViewKind view : highLevel.moved()) {
             counterUpdater.moveHighLevel(
-                    transaction.userId(), view,
+                    transaction.ownerType(), transaction.userId(), view,
                     highLevel.movedFromProductType(), highLevel.movedFrom(),
                     productType, at,
                     highLevel.movedVisible().get(view));
@@ -288,8 +264,8 @@ public class ProjectionWriter {
         // After the move: a revived row is counted in cntAll already, at the current key.
         for (ViewKind view : highLevel.revived()) {
             counterUpdater.recountExclCancelled(
-                    transaction.userId(), view, PageUnit.HIGH_LEVEL, productType,
-                    wqs.domain.CounterSentinels.ALL_TYPES, at);
+                    transaction.ownerType(), transaction.userId(), view, PageUnit.HIGH_LEVEL, productType,
+                    wqs.domain.CounterSentinels.ALL_TYPES, false, at);
         }
     }
 }

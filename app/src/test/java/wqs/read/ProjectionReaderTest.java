@@ -449,6 +449,11 @@ class ProjectionReaderTest extends ReadPropertyBase {
         }
 
         @Override
+        public ReadPolicy policy() {
+            return delegate.policy();
+        }
+
+        @Override
         public long count(JdbcClient tx, Level0Filter f, Instant lo, Instant hi) {
             once();
             return delegate.count(tx, f, lo, hi);
@@ -630,6 +635,11 @@ class ProjectionReaderTest extends ReadPropertyBase {
             }
 
             @Override
+            public ReadPolicy policy() {
+                return ReadPolicy.WEB;
+            }
+
+            @Override
             public long count(JdbcClient tx, HighLevelFilter f, Instant lo, Instant hi) {
                 return webHighLevelQuery.count(tx, f, lo, hi);
             }
@@ -708,10 +718,10 @@ class ProjectionReaderTest extends ReadPropertyBase {
 
         @Override
         public Map<LocalDate, Long> dayCounts(
-                JdbcClient tx, long userId, ViewKind v, wqs.domain.PageUnit unit,
+                JdbcClient tx, ReadPolicy policy, long userId, ViewKind v, wqs.domain.PageUnit unit,
                 java.util.Set<String> productTypes, java.util.Set<String> typeCodes,
                 boolean excludeCancelled, LocalDate firstPeriod, LocalDate lastPeriod) {
-            Map<LocalDate, Long> rows = super.dayCounts(tx, userId, v, unit, productTypes, typeCodes,
+            Map<LocalDate, Long> rows = super.dayCounts(tx, policy, userId, v, unit, productTypes, typeCodes,
                     excludeCancelled, firstPeriod, lastPeriod);
             dayKeys.addAll(rows.keySet());
             dayCalls++;

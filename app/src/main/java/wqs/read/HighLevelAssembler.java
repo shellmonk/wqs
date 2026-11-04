@@ -63,7 +63,9 @@ public class HighLevelAssembler {
             (k.kind() == 0 ? sessionKeys : transactionKeys).add(k);
         }
 
-        Map<HighLevelKey, SessionRow> sessions = sessions(tx, userId, sessionKeys);
+        // The owner is the endpoint's (its read policy, plan D1); rollups hold no zero-amount sum.
+        short ownerType = transactions.policy().ownerType();
+        Map<HighLevelKey, SessionRow> sessions = sessions(tx, ownerType, userId, sessionKeys);
         Map<String, List<PlayRow>> plays = Map.of();
         Map<String, List<TxView>> txsByBatch = Map.of();
         Map<String, Map<String, List<TxView>>> txsByPlay = Map.of();
@@ -73,7 +75,7 @@ public class HighLevelAssembler {
             Map<String, SessionRow> byBatch = new HashMap<>();
             sessions.values().forEach(s -> byBatch.put(s.batchId(), s));
             if (n.level() == AggregationLevel.L2) {
-                plays = plays(tx, userId, byBatch, n.excludeCancelled());
+                plays = plays(tx, ownerType, userId, byBatch, n.excludeCancelled());
             }
             Map<String, Set<String>> listedPlays = new HashMap<>();
             plays.forEach((b, ps) -> ps.forEach(
@@ -148,7 +150,8 @@ public class HighLevelAssembler {
      * array-bound. A row whose "startedAt" is not its key's (cannot happen inside one snapshot) is
      * dropped.
      */
-    private static Map<HighLevelKey, SessionRow> sessions(JdbcClient tx, long userId, List<HighLevelKey> keys) {
+    private static Map<HighLevelKey, SessionRow> sessions(
+            JdbcClient tx, short ownerType, long userId, List<HighLevelKey> keys) {
         if (keys.isEmpty()) {
             return Map.of();
         }
@@ -157,6 +160,7 @@ public class HighLevelAssembler {
         tx.sql(SESSIONS)
                 .param("ids", batchIds(keys.stream().map(HighLevelKey::refId)
                         .collect(LinkedHashSet::new, Set::add, Set::addAll)))
+                .param("ownerType", ownerType)
                 .param("userId", userId)
                 .query(HighLevelAssembler::sessionRow)
                 .list()
@@ -174,11 +178,12 @@ public class HighLevelAssembler {
      * per session, by the primary key prefix ("userId", "batchId").
      * Under excludeCancelled a play with no surviving transaction is omitted.
      */
-    private static Map<String, List<PlayRow>> plays(JdbcClient tx, long userId,
+    private static Map<String, List<PlayRow>> plays(JdbcClient tx, short ownerType, long userId,
             Map<String, SessionRow> sessions, boolean excludeCancelled) {
         Map<String, List<PlayRow>> out = new LinkedHashMap<>();
         JdbcClient.StatementSpec spec = tx.sql(excludeCancelled ? PLAYS_EXCL : PLAYS)
                 .param("ids", batchIds(sessions.keySet()))
+                .param("ownerType", ownerType)
                 .param("userId", userId);
         if (excludeCancelled) {
             spec = spec.param("zero", 0);
@@ -204,7 +209,7 @@ public class HighLevelAssembler {
                    "wqPrjSession"."firstSource"
             from "wqPrjSession"
             join unnest(cast(:ids as text[])) as "wanted" ("id") on "wqPrjSession"."batchId" = "wanted"."id"
-            where "wqPrjSession"."userId" = :userId
+            where "wqPrjSession"."ownerType" = :ownerType and "wqPrjSession"."userId" = :userId
             """;
 
     private static final String PLAYS_FROM = """
@@ -214,7 +219,7 @@ public class HighLevelAssembler {
                    "wqPrjPlay"."totalPlaysExclCancelled", "wqPrjPlay"."totalWinsExclCancelled", "wqPrjPlay"."netExclCancelled",
                    "wqPrjPlay"."productType", "wqPrjPlay"."firstSourceId", "wqPrjPlay"."firstSource"
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqPrjPlay" on ("wqPrjPlay"."userId" = :userId and "wqPrjPlay"."batchId" = "wanted"."id")
+            join "wqPrjPlay" on ("wqPrjPlay"."ownerType" = :ownerType and "wqPrjPlay"."userId" = :userId and "wqPrjPlay"."batchId" = "wanted"."id")
             """;
     private static final String PLAYS_ORDER = """
             order by "wqPrjPlay"."startedAt" desc, "wqPrjPlay"."subBatchId" desc

@@ -40,7 +40,9 @@ import wqs.domain.ViewKind;
  * is dead-lettered before it gets here (plan D6) -- so the currency never changes and rows never
  * need re-syncing. An unsessioned row carries its transaction's own currency.
  *
- * A cancellation never creates a row; its effects are applied by {@link CancellationApplier}.
+ * A cancellation never creates a row; its effects are applied by {@link CancellationApplier}. Nor
+ * does a zero-amount transaction (never shown, plan D6): it is in no page unit. Rows are keyed by
+ * the owner ("ownerType", "userId").
  */
 @Component
 public class HighLevelUpdater {
@@ -65,11 +67,11 @@ public class HighLevelUpdater {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public HighLevelResult applyTransaction(ProjectionTransaction transaction, RollupResult rollup) {
-        if (transaction.isCancellation()) {
+        if (transaction.isCancellation() || transaction.isZeroAmount()) {
             return HighLevelResult.NONE;
         }
         if (!transaction.isSessioned()) {
-            boolean inserted = insert(transaction.userId(), transaction.occurredAt(),
+            boolean inserted = insert(transaction.ownerType(), transaction.userId(), transaction.occurredAt(),
                     (short) transaction.source().code(), transaction.sourceId(), transaction.productId(),
                     transaction.productType(), transaction.currency(), Flags.newFor(transaction.source()));
             return new HighLevelResult(inserted ? transaction.source().views() : Set.of(),
@@ -94,7 +96,7 @@ public class HighLevelUpdater {
         Set<ViewKind> inserted = HighLevelResult.newViewSet();
         Set<ViewKind> revived = HighLevelResult.newViewSet();
         Flags created = Flags.newFor(transaction.source());
-        if (insert(transaction.userId(), rollup.sessionStart(), KIND_SESSION, transaction.batchId(),
+        if (insert(transaction.ownerType(), transaction.userId(), rollup.sessionStart(), KIND_SESSION, transaction.batchId(),
                 rollup.sessionProductId(), rollup.sessionProductType(), rollup.sessionCurrency(), created)) {
             inserted.addAll(created.views());
         } else {
@@ -102,8 +104,8 @@ public class HighLevelUpdater {
             if (!before.visible()) {
                 revived.addAll(before.views());
                 jdbc.sql(SHOW)
-                        .params(transaction.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION,
-                                transaction.batchId())
+                        .params(transaction.ownerType(), transaction.userId(), timestamptz(rollup.sessionStart()),
+                                KIND_SESSION, transaction.batchId())
                         .update();
             }
         }
@@ -116,16 +118,17 @@ public class HighLevelUpdater {
     /** The existing session row's flags, locked for the update that follows. */
     private Flags lock(ProjectionTransaction transaction, RollupResult rollup) {
         return jdbc.sql(LOCK)
-                .params(transaction.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, transaction.batchId())
+                .params(transaction.ownerType(), transaction.userId(), timestamptz(rollup.sessionStart()),
+                        KIND_SESSION, transaction.batchId())
                 .query(FLAGS)
                 .single();
     }
 
     /** True iff the row was inserted (false: a row with this key already exists). */
-    private boolean insert(long userId, Instant at, short kind, String refId,
+    private boolean insert(short ownerType, long userId, Instant at, short kind, String refId,
                            String productId, String productType, String currency, Flags flags) {
         return jdbc.sql(INSERT)
-                .params(userId, timestamptz(at), kind, refId, text(productId), text(productType),
+                .params(ownerType, userId, timestamptz(at), kind, refId, text(productId), text(productType),
                         text(currency), flags.onWeb(), flags.visible())
                 .update() > 0;
     }
@@ -137,15 +140,15 @@ public class HighLevelUpdater {
      */
     private Flags move(ProjectionTransaction transaction, RollupResult rollup) {
         Flags flags = jdbc.sql(DELETE)
-                .params(transaction.userId(), timestamptz(rollup.previousSessionStart()), KIND_SESSION,
-                        transaction.batchId())
+                .params(transaction.ownerType(), transaction.userId(), timestamptz(rollup.previousSessionStart()),
+                        KIND_SESSION, transaction.batchId())
                 .query(FLAGS)
                 .optional()
                 .orElse(null);
         if (flags == null) {
             return null;
         }
-        insert(transaction.userId(), rollup.sessionStart(), KIND_SESSION, transaction.batchId(),
+        insert(transaction.ownerType(), transaction.userId(), rollup.sessionStart(), KIND_SESSION, transaction.batchId(),
                 rollup.sessionProductId(), rollup.sessionProductType(), rollup.sessionCurrency(), flags);
         return flags;
     }
@@ -158,7 +161,8 @@ public class HighLevelUpdater {
     private Flags updateProduct(ProjectionTransaction transaction, RollupResult rollup) {
         return jdbc.sql(UPDATE_PRODUCT)
                 .params(text(rollup.sessionProductId()), text(rollup.sessionProductType()),
-                        transaction.userId(), timestamptz(rollup.sessionStart()), KIND_SESSION, transaction.batchId())
+                        transaction.ownerType(), transaction.userId(), timestamptz(rollup.sessionStart()),
+                        KIND_SESSION, transaction.batchId())
                 .query(FLAGS)
                 .optional()
                 .orElse(null);
@@ -185,14 +189,14 @@ public class HighLevelUpdater {
             rs.getBoolean("onWeb"), rs.getBoolean("visibleExclCancelled"));
 
     private static final String KEY = """
-            "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?""";
+            "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?""";
     private static final String RETURNING_FLAGS = """
             returning "onWeb", "visibleExclCancelled"
             """;
     private static final String INSERT = """
-            insert into "wqPrjTimeline" ("userId", "occurredAt", "kind", "refId", "productId",
+            insert into "wqPrjTimeline" ("ownerType", "userId", "occurredAt", "kind", "refId", "productId",
                     "productType", "currency", "onWeb", "visibleExclCancelled")
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict do nothing
             """;
     private static final String LOCK = """

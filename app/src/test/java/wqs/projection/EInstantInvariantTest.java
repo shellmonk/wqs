@@ -92,9 +92,9 @@ class EInstantInvariantTest extends ReadPropertyBase {
         db().execute("""
                 update "wqPrjTransaction" set "batchId" = null, "subBatchId" = null where "sourceId" = 'e1-a'""");
         db().execute("""
-                insert into "wqPrjTimeline" ("userId", "occurredAt", "kind", "refId", "productType", "currency",
+                insert into "wqPrjTimeline" ("ownerType", "userId", "occurredAt", "kind", "refId", "productType", "currency",
                         "onWeb")
-                values (1, '2034-02-11T10:00:00Z', 1, 'planted', 'instants', 'EUR', true)""");
+                values (1, 1, '2034-02-11T10:00:00Z', 1, 'planted', 'instants', 'EUR', true)""");
         assertThat(new ProjectionInvariants(jdbc()).eInstantDrift(eInstant.productTypes()))
                 .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant transaction").contains("e1-a"))
                 .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant page row").contains("planted"))

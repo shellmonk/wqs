@@ -104,7 +104,7 @@ public final class EventGenerators {
      * transaction at product P03 (must NOT relabel it); odd sessions open with a product-less
      * play tied, at the same instant, with a lower-sourceId claimable prize at P03 (the
      * tie-break relabels the session from no product, or never, depending on order). Every
-     * session also has a zero-amount prize step at its first instant (locator-only, D8). Session
+     * session also has a zero-amount prize step at its first instant (stored, never shown: plan D6). Session
      * 0 and the prize session are in EUR, USD or AUD; everything else in EUR.
      */
     public static Arbitrary<List<ProjectionTransaction>> transactionSequences() {
@@ -174,9 +174,9 @@ public final class EventGenerators {
             }
             int cancels = random.nextInt(8) == 0 ? 2 : 1;
             for (int c = 1; c <= cancels; c++) {
-                // Usually the reversal (a zero-amount transaction's cancel is then zero-amount too, and
-                // locator-only); sometimes not: a non-zero cancel of a zero-amount transaction is
-                // projected and marks nothing, a zero-amount cancel of a live transaction still cancels it.
+                // Usually the reversal (a zero-amount transaction's cancel is then zero-amount too);
+                // sometimes not: a non-zero cancel of a zero-amount transaction marks it cancelled
+                // and changes no visible tally, a zero-amount cancel of a live transaction still cancels it.
                 BigDecimal amount = transaction.amount().negate();
                 if (random.nextInt(4) == 0) {
                     amount = transaction.amount().signum() == 0 ? new BigDecimal("-1.0000") : BigDecimal.ZERO.setScale(4);
@@ -242,7 +242,7 @@ public final class EventGenerators {
                             detail));
                 }
             }
-            // A losing prize step: zero-amount, so locator-only (spec 4.1, D8). It sits AT the
+            // A losing prize step: zero-amount, so stored but in no page unit or sum (plan D6). It sits AT the
             // session's first instant with the session's play, yet must never label or count.
             transactions.add(new ProjectionTransaction(
                     userId, SourceKind.TRANSACTION, batchId + "-z", firstAt, P07[0], P07[1],

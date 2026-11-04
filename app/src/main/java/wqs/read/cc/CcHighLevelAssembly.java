@@ -13,11 +13,15 @@ import org.springframework.stereotype.Component;
 import wqs.domain.ViewKind;
 import wqs.read.HighLevelTransactionQuery;
 import wqs.read.HighLevelKey;
+import wqs.read.ReadPolicy;
 import wqs.read.TransactionEntry;
 
 /** Level-1/2 assembly reads of the operator (cc) view's transactions; of the transaction relations, reads only the "wqPrjCcTransaction" view. */
 @Component
 public class CcHighLevelAssembly implements HighLevelTransactionQuery {
+
+    /** What /cc shows (plan D1), bound into every statement below. */
+    private static final ReadPolicy POLICY = ReadPolicy.CC;
 
     private static final String TRANSACTION_COLUMNS = """
             "wqPrjCcTransaction"."userId", "wqPrjCcTransaction"."transactionId", "wqPrjCcTransaction"."source", "wqPrjCcTransaction"."sourceId",
@@ -33,11 +37,12 @@ public class CcHighLevelAssembly implements HighLevelTransactionQuery {
     // the type-code predicate -- fixed fragments, never values.
     private static final String SESSION_TRANSACTIONS = "select " + TRANSACTION_COLUMNS + """
             from unnest(cast(:ids as text[])) as "wanted" ("id")
-            join "wqPrjSession" on ("wqPrjSession"."userId" = :userId and "wqPrjSession"."batchId" = "wanted"."id")
-            join "wqPrjCcTransaction" on ("wqPrjCcTransaction"."userId" = :userId and "wqPrjCcTransaction"."batchId" = "wqPrjSession"."batchId"
+            join "wqPrjSession" on ("wqPrjSession"."ownerType" = :ownerType and "wqPrjSession"."userId" = :userId
+                   and "wqPrjSession"."batchId" = "wanted"."id")
+            join "wqPrjCcTransaction" on ("wqPrjCcTransaction"."ownerType" = :ownerType and "wqPrjCcTransaction"."userId" = :userId and "wqPrjCcTransaction"."batchId" = "wqPrjSession"."batchId"
                    and "wqPrjCcTransaction"."occurredAt" >= "wqPrjSession"."startedAt"
                    and ("wqPrjCcTransaction"."occurredAt" <= "wqPrjSession"."endedAt"
-                        or ("wqPrjCcTransaction"."cancels" is not null and "wqPrjCcTransaction"."occurredAt" < cast(:to as timestamptz)))%1$s%2$s)
+                        or ("wqPrjCcTransaction"."cancels" is not null and "wqPrjCcTransaction"."occurredAt" < cast(:to as timestamptz)))%1$s%2$s%3$s)
             order by "wqPrjCcTransaction"."occurredAt" desc, "wqPrjCcTransaction"."transactionId" desc
             """;
     private static final String NOT_CANCELLED = " and not (\"wqPrjCcTransaction\".\"cancelled\")";
@@ -47,10 +52,10 @@ public class CcHighLevelAssembly implements HighLevelTransactionQuery {
     // indexes; sourceId and the full key in Java narrow to the page's rows (final review F1).
     private static final String UNSESSIONED = "select " + TRANSACTION_COLUMNS + """
             from "wqPrjCcTransaction"
-            where ("wqPrjCcTransaction"."userId" = :userId
+            where ("wqPrjCcTransaction"."ownerType" = :ownerType and "wqPrjCcTransaction"."userId" = :userId
                    and "wqPrjCcTransaction"."occurredAt" = any (cast(:ats as timestamp with time zone[]))
                    and "wqPrjCcTransaction"."sourceId" = any (cast(:sourceIds as text[]))
-                   and "wqPrjCcTransaction"."batchId" is null)
+                   and "wqPrjCcTransaction"."batchId" is null%s)
             """;
 
     private final CcTransactionMapper mapper;
@@ -65,14 +70,21 @@ public class CcHighLevelAssembly implements HighLevelTransactionQuery {
     }
 
     @Override
+    public ReadPolicy policy() {
+        return POLICY;
+    }
+
+    @Override
     public List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds,
                                         Instant to, Set<String> typeCodes, boolean excludeCancelled) {
         if (batchIds.isEmpty()) {
             return List.of();
         }
         JdbcClient.StatementSpec spec = tx.sql(SESSION_TRANSACTIONS.formatted(
-                        excludeCancelled ? NOT_CANCELLED : "", typeCodes.isEmpty() ? "" : TYPE_CODES))
+                        excludeCancelled ? NOT_CANCELLED : "", typeCodes.isEmpty() ? "" : TYPE_CODES,
+                        POLICY.zeroAmountFilter("\"wqPrjCcTransaction\"")))
                 .param("ids", array(batchIds))
+                .param("ownerType", POLICY.ownerType())
                 .param("userId", userId)
                 .param("to", utc(to));
         if (!typeCodes.isEmpty()) {
@@ -93,7 +105,8 @@ public class CcHighLevelAssembly implements HighLevelTransactionQuery {
         Set<String> sourceIds = new LinkedHashSet<>();
         keys.forEach(k -> sourceIds.add(k.refId()));
         Map<HighLevelKey, TransactionEntry> out = new HashMap<>();
-        tx.sql(UNSESSIONED)
+        tx.sql(UNSESSIONED.formatted(POLICY.zeroAmountFilter("\"wqPrjCcTransaction\"")))
+                .param("ownerType", POLICY.ownerType())
                 .param("userId", userId)
                 .param("ats", ats)
                 .param("sourceIds", array(sourceIds))

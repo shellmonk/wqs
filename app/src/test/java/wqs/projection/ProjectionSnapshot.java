@@ -28,29 +28,29 @@ public record ProjectionSnapshot(
         TestSql sql = new TestSql(jdbc);
         return new ProjectionSnapshot(
                 rows(sql, "wqPrjTransaction"), locatorRows(sql),
-                all(sql, "wqPrjSession", "\"userId\", \"batchId\""),
-                all(sql, "wqPrjPlay", "\"userId\", \"batchId\", \"subBatchId\""),
-                all(sql, "wqPrjTimeline", "\"userId\", \"occurredAt\", \"kind\", \"refId\""),
+                all(sql, "wqPrjSession", "\"ownerType\", \"userId\", \"batchId\""),
+                all(sql, "wqPrjPlay", "\"ownerType\", \"userId\", \"batchId\", \"subBatchId\""),
+                all(sql, "wqPrjTimeline", "\"ownerType\", \"userId\", \"occurredAt\", \"kind\", \"refId\""),
                 all(sql, "wqPrjCount", COUNTER_KEY),
                 pendingCancelRows(sql));
     }
 
     private static final String COUNTER_KEY =
-            "\"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"type\", \"day\"";
+            "\"ownerType\", \"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"type\", \"zeroAmount\", \"day\"";
 
     private static List<String> rows(TestSql sql, String table) {
         return sql.lines("""
-                         select "userId", "source", "sourceId", "occurredAt", "productId",
+                         select "ownerType", "userId", "source", "sourceId", "occurredAt", "productId",
                                 "productType", "batchId", "subBatchId", "type", "amount", "currency",
-                                "balanceAfter", "cancelled", "cancelledBy", "cancels", "detail"
+                                "balanceAfter", "cancelled", "cancelledBy", "cancels", "detail", "zeroAmount"
                          from "%s"
-                         order by "userId", "occurredAt", "source", "sourceId"
+                         order by "ownerType", "userId", "occurredAt", "source", "sourceId"
                          """.formatted(table));
     }
 
     private static List<String> locatorRows(TestSql sql) {
         return sql.lines("""
-                         select "source", "sourceId", "userId", "occurredAt", "zeroAmount", "cancels"
+                         select "source", "sourceId", "ownerType", "userId", "occurredAt"
                          from "wqPrjTransactionLocator"
                          order by "source", "sourceId"
                          """);
@@ -59,7 +59,7 @@ public record ProjectionSnapshot(
     /** Parked cancels, minus "parkedAt" (clock-derived). Converged state should hold none. */
     private static List<String> pendingCancelRows(TestSql sql) {
         return sql.lines("""
-                         select "source", "cancelSourceId", "cancelsSourceId", "userId",
+                         select "source", "cancelSourceId", "cancelsSourceId", "ownerType", "userId",
                                 "occurredAt", "productId", "productType", "batchId", "subBatchId", "type",
                                 "amount", "currency", "balanceAfter", "detail"
                          from "wqPrjPendingCancel"

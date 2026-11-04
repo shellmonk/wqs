@@ -10,8 +10,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 /**
  * The writer-side delta meters (phase 6 plan D10), pre-registered so a dashboard sees 0 rather than
- * no series: {@code wqs.delta.rows{outcome}} for every outcome, {@code wqs.delta.stale}, and the
- * shared {@code wqs.ingest.skipped{reason=non-player}}.
+ * no series: {@code wqs.delta.rows{outcome}} for every outcome and {@code wqs.delta.stale}. Every
+ * row is stored, non-player owners included, so nothing is skipped.
  *
  * <p>Recorded after the batch's transaction commits: a rolled-back batch is retried, and counting
  * it twice would inflate every series.
@@ -24,7 +24,7 @@ public class DeltaMetrics {
 
     enum Outcome {
         INSERTED("inserted"), UPDATED("updated"), DUPLICATE("duplicate"), STALE("stale"),
-        SKIPPED("skipped"), DEAD_LETTERED("dead-lettered");
+        DEAD_LETTERED("dead-lettered");
 
         final String tag;
 
@@ -35,7 +35,6 @@ public class DeltaMetrics {
 
     private final Map<Outcome, Counter> rows = new EnumMap<>(Outcome.class);
     private final Counter stale;
-    private final IngestSkipMetrics skips;
 
     public DeltaMetrics(MeterRegistry registry) {
         for (Outcome outcome : Outcome.values()) {
@@ -47,7 +46,6 @@ public class DeltaMetrics {
         this.stale = Counter.builder(STALE)
                 .description("Polled delta rows older than the stored version, ignored")
                 .register(registry);
-        this.skips = new IngestSkipMetrics(registry);
     }
 
     /** Records {@code result} once its transaction commits; at once if there is none. */
@@ -69,11 +67,7 @@ public class DeltaMetrics {
         rows.get(Outcome.UPDATED).increment(result.updated());
         rows.get(Outcome.DUPLICATE).increment(result.duplicates());
         rows.get(Outcome.STALE).increment(result.stale());
-        rows.get(Outcome.SKIPPED).increment(result.skipped());
         rows.get(Outcome.DEAD_LETTERED).increment(result.deadLettered());
         stale.increment(result.stale());
-        for (int i = 0; i < result.skipped(); i++) {
-            skips.nonPlayer();
-        }
     }
 }

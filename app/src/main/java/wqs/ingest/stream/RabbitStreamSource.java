@@ -136,7 +136,7 @@ public class RabbitStreamSource implements StreamSource {
         if (dash < 0) {
             throw new IllegalArgumentException("userContext.ownerId must be \"{userType}-{userId}\"");
         }
-        int userType = (int) digits(ownerId.substring(0, dash), "userContext.ownerId userType", Integer.MAX_VALUE);
+        int userType = (int) digits(ownerId.substring(0, dash), "userContext.ownerId userType", Short.MAX_VALUE);
         long userId = digits(ownerId.substring(dash + 1), "userContext.ownerId userId", Long.MAX_VALUE);
 
         return new StreamPayload(

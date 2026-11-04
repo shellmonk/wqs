@@ -51,8 +51,8 @@ class CoveringIndexTest extends PostgresTestBase {
      */
     @Test
     void cover_index_key_and_include_columns() {
-        String transactions = "(userId, occurredAt DESC, transactionId DESC) INCLUDE (cancelled, productType, type, source)";
-        String highLevel = "(userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled, onWeb)";
+        String transactions = "(ownerType, userId, occurredAt DESC, transactionId DESC) INCLUDE (cancelled, productType, type, source, zeroAmount)";
+        String highLevel = "(ownerType, userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled, onWeb)";
         for (String parent : PARENTS) {
             String def = db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class,
                     "\"" + parent + "_cover\"").replace("\"", "");
@@ -69,7 +69,7 @@ class CoveringIndexTest extends PostgresTestBase {
             s.execute("set enable_bitmapscan = off");
             try (ResultSet rs = s.executeQuery("""
                     explain select "occurredAt","transactionId" from "wqPrjWebTransaction"
-                    where "userId" = 1
+                    where "ownerType" = 1 and "userId" = 1 and not "zeroAmount"
                       and "occurredAt" >= timestamptz '2036-07-01T00:00:00Z'
                       and "occurredAt" < timestamptz '2036-08-01T00:00:00Z'
                       and "productType" = 'instants' and "type" = 'TT_BUY' and not "cancelled"

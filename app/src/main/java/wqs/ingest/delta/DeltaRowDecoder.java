@@ -36,9 +36,9 @@ import wqs.projection.source.DeltaRow;
  * an unknown {@code source}, a missing required field, a malformed owner or a bad number or
  * timestamp throws {@link IllegalArgumentException}, which the poller dead-letters as poison.
  *
- * <p>The owner is decoded for every row, players or not; the non-player gate is the writer's
- * (ruling R1), so a malformed non-player row is poison rather than silently skipped, as on the
- * stream (spec 4.1).
+ * <p>The owner is decoded for every row, players or not, and every owner is stored with its type
+ * (a claimable prize's {@code playerId} is a player by definition: type 1); which owners an
+ * endpoint shows is the read policy's decision. A malformed owner is poison, as on the stream.
  *
  * <p>One class with golden fixtures on purpose: when a real sample of the endpoint arrives, only
  * this class, its fixtures and {@link DeltaProperties} change.
@@ -213,7 +213,7 @@ public class DeltaRowDecoder {
         String currency = text(row, "currency");
         String detail = detail(row, detailFields);
         ProjectionTransaction transaction = new ProjectionTransaction(
-                userId, source, sourceId, occurredAt, productId, productType, batchId, subBatchId,
+                (short) ownerType, userId, source, sourceId, occurredAt, productId, productType, batchId, subBatchId,
                 typeCode, amount, currency == null ? NO_CURRENCY : currency,
                 null, null, detail);
         return new DeltaRow(source, ownerType, userId, version, transaction);
@@ -251,7 +251,8 @@ public class DeltaRowDecoder {
     }
 
     private static int ownerType(JsonNode row, String field) {
-        return (int) integral(required(row, field), field, Integer.MAX_VALUE);
+        // "ownerType" is a smallint: a larger value is poison, never silently narrowed.
+        return (int) integral(required(row, field), field, Short.MAX_VALUE);
     }
 
     private static long id(JsonNode row, String field) {

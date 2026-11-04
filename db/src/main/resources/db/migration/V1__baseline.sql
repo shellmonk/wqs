@@ -15,11 +15,9 @@
 -- every monthly partition (spec 5.4). Doubles as the idempotency gate for ingestion: an
 -- ON CONFLICT DO NOTHING insert that conflicts means the event is already applied.
 --
--- "zeroAmount": a zero-amount transaction is recorded in the locator ONLY -- so a re-delivery is a
--- duplicate and a cancel referencing it resolves -- and in no transaction table, rollup, page index or
--- counter (plan D8). "cancels" is the target of such a locator-only CANCEL: it has no transaction row to
--- carry it, and the reconciliation oracle must still see that the target is cancelled. Projected
--- rows leave it null; their transaction rows hold it.
+-- Every transaction has a locator row and a transaction row, zero-amount and non-player owners
+-- included: visibility is decided at read time (wqs.read.ReadPolicy). The owner is
+-- ("ownerType", "userId"): "2-1717" and "1-1717" are different owners.
 --
 -- "versionAt": the stored version of a polled row, its source "updated" ("statusDate" for
 -- adjustment requests). A delta row is applied only when strictly newer, a duplicate when equal,
@@ -27,17 +25,15 @@
 create table "wqPrjTransactionLocator" (
     "source"     smallint    not null,
     "sourceId"   text        not null,
+    "ownerType"  smallint    not null,
     "userId"     bigint      not null,
     "occurredAt" timestamptz not null,
     "transactionId"     bigint      not null,
-    "zeroAmount" boolean     not null default false,
-    "cancels"    text,
     "versionAt"  timestamptz,
-    primary key ("source", "sourceId"),
-    constraint "wqPrjTransactionLocator_cancels_locator_only" check ("cancels" is null or "zeroAmount")
+    primary key ("source", "sourceId")
 );
 
-create index "wqPrjTransactionLocator_user_idx" on "wqPrjTransactionLocator" ("userId");
+create index "wqPrjTransactionLocator_user_idx" on "wqPrjTransactionLocator" ("ownerType", "userId");
 
 -- ---------------------------------------------------------------------------------------------
 -- Level-0 transactions
@@ -46,7 +42,13 @@ create index "wqPrjTransactionLocator_user_idx" on "wqPrjTransactionLocator" ("u
 -- Level-0 rows, every source stored once (spec 4). "type" holds the transaction-type code as it
 -- arrived (wqs.domain.TransactionType, plan D1); a code the enum does not list is stored as-is and
 -- rolls up as NEUTRAL. Each endpoint reads its own view below, never this table.
+--
+-- Every row is stored: non-player owners ("ownerType" <> 1) and zero-amount stream transactions too.
+-- "zeroAmount" marks a stream transaction (source 1) of amount 0 (spec 4.1: never shown, counted
+-- apart, outside session txCount -- plan D6). Polled rows are never zero-amount-hidden (spec 4), so
+-- a zero-amount payment, adjustment, prize or limit is not "zeroAmount".
 create table "wqPrjTransaction" (
+    "ownerType"    smallint      not null,
     "userId"       bigint        not null,
     "transactionId"       bigint        not null,
     "source"       smallint      not null,
@@ -65,7 +67,8 @@ create table "wqPrjTransaction" (
     "detail"       jsonb,
     "ingestedAt"   timestamptz   not null default now(),
     "productType"  text,
-    primary key ("userId", "occurredAt", "transactionId")
+    "zeroAmount"   boolean       not null generated always as ("amount" = 0 and "source" = 1) stored,
+    primary key ("ownerType", "userId", "occurredAt", "transactionId")
 ) partition by range ("occurredAt");
 
 -- The user-facing view: transactions (1) and claimable prizes (3) only -- the sources whose
@@ -118,14 +121,18 @@ create index "wqDeadLetter_failedAt_idx" on "wqDeadLetter" ("failedAt" desc);
 -- ---------------------------------------------------------------------------------------------
 
 -- Sessions and plays are keyed by their business key and NOT partitioned: a transaction joining a
--- group finds its row by ("userId", "batchId"[, "subBatchId"]) alone, and a late, earlier
+-- group finds its row by ("ownerType", "userId", "batchId"[, "subBatchId"]) alone, and a late, earlier
 -- transaction only updates "startedAt" in place (plan D5) -- no row move, no locator.
 --
 -- A session's (and a play's) product pair is its FIRST transaction's, first by
 -- ("occurredAt", "sourceId", "source"). "startedAt" already is the first transaction's occurredAt;
 -- "firstSourceId" and "firstSource" hold the rest of that transaction's identity, the tie-break for transactions
 -- at the same instant, so the label does not depend on arrival order (plan D6, P-1).
+-- Owner-keyed by ("ownerType", "userId"). "txCount" (and its ExclCancelled twin) count non-zero
+-- rows only; "zeroTxCount" counts the group's zero-amount rows (plan D6). A zero-amount row never
+-- creates, anchors or labels a group: a group exists once it has a non-zero row.
 create table "wqPrjSession" (
+    "ownerType"                smallint      not null,
     "userId"                   bigint        not null,
     "batchId"                  text          not null,
     "startedAt"                timestamptz   not null,
@@ -134,6 +141,7 @@ create table "wqPrjSession" (
     "currency"                 char(3)       not null,
     "txCount"                  int           not null default 0,
     "txCountExclCancelled"     int           not null default 0,
+    "zeroTxCount"              int           not null default 0,
     "playCount"                int           not null default 0,
     "playCountExclCancelled"   int           not null default 0,
     "totalPlays"               numeric(20,4) not null default 0,
@@ -145,10 +153,11 @@ create table "wqPrjSession" (
     "productType"              text,
     "firstSourceId"            text,
     "firstSource"              smallint,
-    primary key ("userId", "batchId")
+    primary key ("ownerType", "userId", "batchId")
 );
 
 create table "wqPrjPlay" (
+    "ownerType"                smallint      not null,
     "userId"                   bigint        not null,
     "batchId"                  text          not null,
     "subBatchId"               text          not null,
@@ -158,6 +167,7 @@ create table "wqPrjPlay" (
     "currency"                 char(3)       not null,
     "txCount"                  int           not null default 0,
     "txCountExclCancelled"     int           not null default 0,
+    "zeroTxCount"              int           not null default 0,
     "totalPlays"               numeric(20,4) not null default 0,
     "totalWins"                numeric(20,4) not null default 0,
     "net"                      numeric(20,4) not null default 0,
@@ -167,7 +177,7 @@ create table "wqPrjPlay" (
     "productType"              text,
     "firstSourceId"            text,
     "firstSource"              smallint,
-    primary key ("userId", "batchId", "subBatchId")
+    primary key ("ownerType", "userId", "batchId", "subBatchId")
 );
 
 -- ---------------------------------------------------------------------------------------------
@@ -184,6 +194,7 @@ create table "wqPrjPlay" (
 -- TRANSACTION and CLAIMABLE_PRIZE carry a batch id, both feed /web and /cc, and the writer
 -- rejects any other sessioned source -- so a session's surviving transactions are the same on both.
 create table "wqPrjTimeline" (
+    "ownerType"               smallint    not null,
     "userId"                  bigint      not null,
     "occurredAt"              timestamptz not null,  -- session "startedAt", or the transaction's "occurredAt"
     "kind"                    smallint    not null,  -- 0 = SESSION, otherwise the source code
@@ -193,7 +204,7 @@ create table "wqPrjTimeline" (
     "onWeb"                   boolean     not null,
     "visibleExclCancelled"    boolean     not null default true,
     "productType"             text,
-    primary key ("userId", "occurredAt", "kind", "refId")
+    primary key ("ownerType", "userId", "occurredAt", "kind", "refId")
 ) partition by range ("occurredAt");
 
 -- ---------------------------------------------------------------------------------------------
@@ -206,17 +217,22 @@ create table "wqPrjTimeline" (
 -- mutable in place: a cancel arriving today can decrement a counter for a transaction from eight
 -- months ago, which rules out append-only storage (spec 5.7). Monthly RANGE-partitioned on "day";
 -- PartitionManager provisions the partitions.
+--
+-- "zeroAmount": the counted rows are zero-amount stream transactions (counted apart, plan D6), so
+-- a total that hides them reads only the false rows. HIGH_LEVEL rows are always false.
 create table "wqPrjCount" (
+    "ownerType"         smallint not null,
     "userId"            bigint   not null,
     "viewKind"          smallint not null,  -- 1 = WEB, 2 = CC
     "pageUnit"          smallint not null,  -- 0 = TRANSACTION (L0), 1 = HIGH_LEVEL (L1/L2)
     "productType"       text     not null,  -- '' = ALL product types
     "type"              text     not null,  -- '' = ALL transaction types
+    "zeroAmount"        boolean  not null,
     "day"               date     not null,  -- UTC
     "cntAll"            bigint   not null default 0,
     "cntExclCancelled"  bigint   not null default 0,
     check ("cntAll" >= 0 and "cntExclCancelled" >= 0 and "cntExclCancelled" <= "cntAll"),
-    primary key ("userId", "viewKind", "pageUnit", "productType", "type", "day")
+    primary key ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type", "zeroAmount", "day")
 ) partition by range ("day");
 
 -- ---------------------------------------------------------------------------------------------
@@ -238,6 +254,7 @@ create table "wqPrjPendingCancel" (
     "source"          smallint      not null,
     "cancelSourceId"  text          not null,
     "cancelsSourceId" text          not null,
+    "ownerType"       smallint      not null,
     "userId"          bigint        not null,
     "occurredAt"      timestamptz   not null,
     "productId"       text,
@@ -273,15 +290,15 @@ create index "wqPrjPendingCancel_target_idx" on "wqPrjPendingCancel" ("source", 
 -- time) with no ordered scan short of a second index, and PG16 has no skip scan. /web pays a
 -- filter on rows of other sources inside the same user's time range -- payments and adjustments,
 -- a minority -- and keeps index order, so a LIMIT still stops early.
-create index "wqPrjTransaction_cover" on "wqPrjTransaction" ("userId", "occurredAt" desc, "transactionId" desc) include ("cancelled", "productType", "type", "source");
-create index "wqPrjTimeline_cover" on "wqPrjTimeline" ("userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled", "onWeb");
+create index "wqPrjTransaction_cover" on "wqPrjTransaction" ("ownerType", "userId", "occurredAt" desc, "transactionId" desc) include ("cancelled", "productType", "type", "source", "zeroAmount");
+create index "wqPrjTimeline_cover" on "wqPrjTimeline" ("ownerType", "userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled", "onWeb");
 
 -- Level-1/2 assembly (spec 7.3 "each bounded by the page size"): a page's sessions' transactions are
 -- fetched per session by batch id. Without this the only usable index is ("userId", "occurredAt"),
 -- so a long-lived session made the fetch read every row of the user inside its window. Partial on
 -- sessioned transactions: unsessioned rows never probe it. Sessions and plays need no extra index:
--- their primary keys lead with ("userId", "batchId").
-create index "wqPrjTransaction_batch" on "wqPrjTransaction" ("userId", "batchId", "occurredAt") where "batchId" is not null;
+-- their primary keys lead with ("ownerType", "userId", "batchId").
+create index "wqPrjTransaction_batch" on "wqPrjTransaction" ("ownerType", "userId", "batchId", "occurredAt") where "batchId" is not null;
 
 -- ---------------------------------------------------------------------------------------------
 -- Quartz JobStore
