@@ -54,8 +54,9 @@ class DrainedCancelFailureTest extends PostgresTestBase {
         @Bean
         @Primary
         CancellationApplier trappedCancellationApplier(
-                JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore) {
-            return new CancellationApplier(jdbc, counterUpdater, pendingCancelStore) {
+                JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
+                OwnerMonths ownerMonths) {
+            return new CancellationApplier(jdbc, counterUpdater, pendingCancelStore, ownerMonths) {
                 @Override
                 public boolean apply(ProjectionTransaction cancel) {
                     boolean result = super.apply(cancel);

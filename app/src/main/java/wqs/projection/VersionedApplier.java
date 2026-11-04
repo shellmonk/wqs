@@ -16,8 +16,9 @@ import wqs.domain.ProjectionTransaction;
 import wqs.projection.source.DeltaRow;
 
 /**
- * The versioned half of a polled row's upsert (spec 4; phase 6 plan D6). The locator miss -- first
- * sight -- is the writer's ordinary insert path; this decides what a row already stored means:
+ * The versioned half of a polled row's upsert (spec 4; phase 6 plan D6), on "wqPrjTransaction" itself
+ * (plan D2, no locator). A miss -- first sight -- is the writer's ordinary insert path; this decides what
+ * a row already stored means:
  * <ul>
  *   <li>strictly newer version: only "detail" (the allowlisted map, which holds the status) and
  *       "versionAt" are replaced, on the one transaction row -- no counter, rollup or
@@ -28,18 +29,32 @@ import wqs.projection.source.DeltaRow;
  * </ul>
  * Versions are compared at the column's microsecond precision, so a re-read of a stored version is
  * always equal to it.
+ *
+ * <p><b>Lookup.</b> A polled row is found by (source, sourceId) as before the locator went: first at
+ * its own "occurredAt" -- the table's unique key, one index probe in one partition, which is every
+ * re-read of an unchanged row -- and only on a miss by (source, sourceId) alone, which probes the
+ * unique key's index in every partition. The second probe is what keeps an "occurredAt", "userId" or
+ * "ownerType" change detectable (dead-lettered, never stored as a second row) now that no global locator
+ * exists; it runs once per first sight of a polled row, not per re-read.
  */
 @Component
 public class VersionedApplier {
 
     enum Verdict { ABSENT, NEWER, DUPLICATE, STALE }
 
-    /** The stored identity of a polled row: its locator. */
+    /** The stored identity of a polled row. */
     record Stored(short ownerType, long userId, Instant occurredAt, long transactionId, Instant versionAt) {}
 
-    private static final String LOCATOR = """
-            select "ownerType", "userId", "occurredAt", "transactionId", "versionAt" from "wqPrjTransactionLocator"
+    private static final String AT_OCCURRED_AT = """
+            select "ownerType", "userId", "occurredAt", "transactionId", "versionAt" from "wqPrjTransaction"
+            where "source" = ? and "sourceId" = ? and "occurredAt" = ?
+            """;
+    /** Earliest first, so the row found does not depend on storage (the writer never stores two). */
+    private static final String ANYWHERE = """
+            select "ownerType", "userId", "occurredAt", "transactionId", "versionAt" from "wqPrjTransaction"
             where "source" = ? and "sourceId" = ?
+            order by "occurredAt"
+            limit 1
             """;
     private static final String IMMUTABLES = """
             select "amount", "currency", "type", "productId", "productType", "batchId", "subBatchId"
@@ -47,21 +62,21 @@ public class VersionedApplier {
             where "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "transactionId" = ?
             """;
     private static final String UPDATE_DETAIL = """
-            update "wqPrjTransaction" set "detail" = cast(? as jsonb)
+            update "wqPrjTransaction" set "detail" = cast(? as jsonb), "versionAt" = ?
             where "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "transactionId" = ?
             """;
-    private static final String UPDATE_VERSION = """
-            update "wqPrjTransactionLocator" set "versionAt" = ?
-            where "source" = ? and "sourceId" = ?
-            """;
 
-    /** A locator row as read; {@code versionAt} is null for a stream transaction. */
-    private record Locator(short ownerType, long userId, OffsetDateTime occurredAt, long transactionId, OffsetDateTime versionAt) {}
+    /** A stored row's identity as read; {@code versionAt} is null for a stream transaction. */
+    private record Found(short ownerType, long userId, OffsetDateTime occurredAt, long transactionId, OffsetDateTime versionAt) {}
 
     /** The immutable fields (D6) of a stored transaction row. */
     private record Immutables(
             BigDecimal amount, String currency, String type, String productId, String productType,
             String batchId, String subBatchId) {}
+
+    private static final org.springframework.jdbc.core.RowMapper<Found> FOUND_ROW = (rs, n) -> new Found(
+            rs.getShort("ownerType"), rs.getLong("userId"), rs.getObject("occurredAt", OffsetDateTime.class),
+            rs.getLong("transactionId"), rs.getObject("versionAt", OffsetDateTime.class));
 
     private final JdbcClient jdbc;
 
@@ -69,27 +84,31 @@ public class VersionedApplier {
         this.jdbc = jdbc;
     }
 
-    /** The row's locator, or null on first sight. */
+    /** The row as stored, or null on first sight. */
     @Transactional(propagation = Propagation.MANDATORY)
     public Stored stored(DeltaRow row) {
-        Locator locator = jdbc.sql(LOCATOR)
-                .params((short) row.source().code(), row.transaction().sourceId())
-                .query((rs, n) -> new Locator(rs.getShort("ownerType"), rs.getLong("userId"),
-                        rs.getObject("occurredAt", OffsetDateTime.class), rs.getLong("transactionId"),
-                        rs.getObject("versionAt", OffsetDateTime.class)))
+        short source = (short) row.source().code();
+        String sourceId = row.transaction().sourceId();
+        Found found = jdbc.sql(AT_OCCURRED_AT)
+                .params(source, sourceId, timestamptz(row.transaction().occurredAt()))
+                .query(FOUND_ROW)
                 .optional()
-                .orElse(null);
-        if (locator == null) {
+                .orElseGet(() -> jdbc.sql(ANYWHERE)
+                        .params(source, sourceId)
+                        .query(FOUND_ROW)
+                        .optional()
+                        .orElse(null));
+        if (found == null) {
             return null;
         }
-        OffsetDateTime versionAt = locator.versionAt();
+        OffsetDateTime versionAt = found.versionAt();
         if (versionAt == null) {
             // Only stream transactions lack a version, and no polled source shares their source code.
             throw new IllegalStateException("polled row " + row.source() + "/" + row.transaction().sourceId()
-                    + " has a locator without a version");
+                    + " is stored without a version");
         }
-        return new Stored(locator.ownerType(), locator.userId(), locator.occurredAt().toInstant(),
-                locator.transactionId(), versionAt.toInstant());
+        return new Stored(found.ownerType(), found.userId(), found.occurredAt().toInstant(),
+                found.transactionId(), versionAt.toInstant());
     }
 
     static Verdict verdict(DeltaRow row, Stored stored) {
@@ -129,7 +148,7 @@ public class VersionedApplier {
                 .orElse(null);
         if (current == null) {
             throw new IllegalStateException("polled row " + row.source() + "/" + transaction.sourceId()
-                    + " has a locator but no transaction row");
+                    + " vanished from wqPrjTransaction");
         }
         if (current.amount().compareTo(transaction.amount()) != 0) {
             return "amount";
@@ -155,20 +174,17 @@ public class VersionedApplier {
         return null;
     }
 
-    /** Replaces "detail" on the transaction row, then the stored version. */
+    /** Replaces "detail" and the stored version on the transaction row, in one statement. */
     @Transactional(propagation = Propagation.MANDATORY)
     public void applyNewer(DeltaRow row, Stored stored) {
         String detail = row.transaction().detailJson();
         int updated = jdbc.sql(UPDATE_DETAIL)
-                .params(text(detail), stored.ownerType(), stored.userId(), timestamptz(stored.occurredAt()), stored.transactionId())
+                .params(text(detail), timestamptz(stored(row.version())), stored.ownerType(), stored.userId(),
+                        timestamptz(stored.occurredAt()), stored.transactionId())
                 .update();
         if (updated != 1) {
             throw new IllegalStateException("polled row " + row.source() + "/" + row.transaction().sourceId()
                     + " has no transaction row to update");
         }
-        jdbc.sql(UPDATE_VERSION)
-                .params(timestamptz(stored(row.version())), (short) row.source().code(),
-                        row.transaction().sourceId())
-                .update();
     }
 }

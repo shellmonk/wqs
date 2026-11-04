@@ -7,35 +7,6 @@
 -- product type (wqs.einstant.product-types).
 
 -- ---------------------------------------------------------------------------------------------
--- Locators
--- ---------------------------------------------------------------------------------------------
-
--- Global sourceId -> partition locator. Deliberately NOT partitioned: a cancel event references an
--- original by sourceId with no timestamp, so resolving it against a partitioned index would probe
--- every monthly partition (spec 5.4). Doubles as the idempotency gate for ingestion: an
--- ON CONFLICT DO NOTHING insert that conflicts means the event is already applied.
---
--- Every transaction has a locator row and a transaction row, zero-amount and non-player owners
--- included: visibility is decided at read time (wqs.read.ReadPolicy). The owner is
--- ("ownerType", "userId"): "2-1717" and "1-1717" are different owners.
---
--- "versionAt": the stored version of a polled row, its source "updated" ("statusDate" for
--- adjustment requests). A delta row is applied only when strictly newer, a duplicate when equal,
--- stale when older. Null for stream transactions, which are immutable and never versioned.
-create table "wqPrjTransactionLocator" (
-    "source"     smallint    not null,
-    "sourceId"   text        not null,
-    "ownerType"  smallint    not null,
-    "userId"     bigint      not null,
-    "occurredAt" timestamptz not null,
-    "transactionId"     bigint      not null,
-    "versionAt"  timestamptz,
-    primary key ("source", "sourceId")
-);
-
-create index "wqPrjTransactionLocator_user_idx" on "wqPrjTransactionLocator" ("ownerType", "userId");
-
--- ---------------------------------------------------------------------------------------------
 -- Level-0 transactions
 -- ---------------------------------------------------------------------------------------------
 
@@ -47,6 +18,16 @@ create index "wqPrjTransactionLocator_user_idx" on "wqPrjTransactionLocator" ("o
 -- "zeroAmount" marks a stream transaction (source 1) of amount 0 (spec 4.1: never shown, counted
 -- apart, outside session txCount -- plan D6). Polled rows are never zero-amount-hidden (spec 4), so
 -- a zero-amount payment, adjustment, prize or limit is not "zeroAmount".
+--
+-- Duplicates are caught by the unique key ("source", "sourceId", "occurredAt") on this table, no
+-- locator (plan D2): an insert ... on conflict do nothing that conflicts is a duplicate. sourceId alone
+-- is not unique across sources. "occurredAt" is in the key because a unique key on a partitioned table
+-- must contain the partition key; a stream transaction is immutable, so its redelivery always
+-- conflicts.
+--
+-- "versionAt": the stored version of a polled row, its source "updated" ("statusDate" for
+-- adjustment requests). A delta row is applied only when strictly newer, a duplicate when equal,
+-- stale when older. Null for stream transactions, which are immutable and never versioned.
 create table "wqPrjTransaction" (
     "ownerType"    smallint      not null,
     "userId"       bigint        not null,
@@ -68,7 +49,9 @@ create table "wqPrjTransaction" (
     "ingestedAt"   timestamptz   not null default now(),
     "productType"  text,
     "zeroAmount"   boolean       not null generated always as ("amount" = 0 and "source" = 1) stored,
-    primary key ("ownerType", "userId", "occurredAt", "transactionId")
+    "versionAt"    timestamptz,
+    primary key ("ownerType", "userId", "occurredAt", "transactionId"),
+    constraint "wqPrjTransaction_sourceKey" unique ("source", "sourceId", "occurredAt")
 ) partition by range ("occurredAt");
 
 -- The user-facing view: transactions (1) and claimable prizes (3) only -- the sources whose
@@ -122,7 +105,7 @@ create index "wqDeadLetter_failedAt_idx" on "wqDeadLetter" ("failedAt" desc);
 
 -- Sessions and plays are keyed by their business key and NOT partitioned: a transaction joining a
 -- group finds its row by ("ownerType", "userId", "batchId"[, "subBatchId"]) alone, and a late, earlier
--- transaction only updates "startedAt" in place (plan D5) -- no row move, no locator.
+-- transaction only updates "startedAt" in place (plan D5) -- no row move.
 --
 -- A session's (and a play's) product pair is its FIRST transaction's, first by
 -- ("occurredAt", "sourceId", "source"). "startedAt" already is the first transaction's occurredAt;
@@ -244,12 +227,14 @@ create table "wqPrjCount" (
 -- order-independent.
 --
 -- A cancel targets a projected transaction of its OWN source (a TRANSACTION cancel cancels a TRANSACTION, a
--- PAYMENT cancel a PAYMENT), so the target is ("source", "cancelsSourceId") -- the same key as
--- "wqPrjTransactionLocator". sourceId alone is not unique across sources. The same-source assumption is to
+-- PAYMENT cancel a PAYMENT), so the target is ("source", "cancelsSourceId") of the cancel's own owner.
+-- sourceId alone is not unique across sources. The same-source assumption is to
 -- be confirmed with the producer (O-13).
 --
 -- Every ProjectionTransaction field of the cancel is stored, so a drained cancel is rebuilt exactly as it
 -- arrived (its real source included). The primary key makes re-parking the same cancel a no-op.
+-- A cancel whose target never arrives is removed after a threshold (7 days by default) by the
+-- pendingCancelResolution job (plan D3); the cancel's own "wqPrjTransaction" row stays.
 create table "wqPrjPendingCancel" (
     "source"          smallint      not null,
     "cancelSourceId"  text          not null,

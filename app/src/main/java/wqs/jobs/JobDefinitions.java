@@ -20,4 +20,9 @@ public class JobDefinitions {
     public JobDefinition deltaPollJobDefinition() {
         return new JobDefinition("delta-poll", DeltaPollJob.class);
     }
+
+    @Bean
+    public JobDefinition pendingCancelResolutionJobDefinition() {
+        return new JobDefinition("pending-cancel-resolution", PendingCancelResolutionJob.class);
+    }
 }

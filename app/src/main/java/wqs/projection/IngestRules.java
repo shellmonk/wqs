@@ -11,7 +11,7 @@ import wqs.domain.ViewKind;
 
 /**
  * The per-transaction ingest rules that reject a transaction outright (spec 4.1). A rejected transaction is
- * dead-lettered by the writer and nothing of it is written -- not even its locator row -- while
+ * dead-lettered by the writer and nothing of it is written -- not even its transaction row -- while
  * the rest of its batch applies.
  * <ul>
  *   <li>{@code einstant-unsessioned} (plan D7, spec 7.4): a transaction whose product type is eInstant

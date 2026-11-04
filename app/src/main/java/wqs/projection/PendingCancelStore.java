@@ -49,6 +49,11 @@ public class PendingCancelStore {
                       "productId", "productType", "batchId", "subBatchId", "type", "amount",
                       "currency", "balanceAfter", "detail"
             """;
+    private static final String EXPIRE = """
+            delete from "wqPrjPendingCancel"
+            where "parkedAt" < ?
+            returning "source", "cancelSourceId", "cancelsSourceId", "parkedAt"
+            """;
     private static final String DEPTH = """
             select count(*) from "wqPrjPendingCancel"
             """;
@@ -123,6 +128,27 @@ public class PendingCancelStore {
                 .stream()
                 .sorted(Comparator.comparing((ProjectionTransaction c) -> (short) c.source().code())
                         .thenComparing(ProjectionTransaction::sourceId))
+                .toList();
+    }
+
+    /** A parked cancel removed unresolved: its identity and when it was parked, nothing more. */
+    public record Expired(SourceKind source, String cancelSourceId, String cancelsSourceId, Instant parkedAt) {}
+
+    /**
+     * Removes the cancels parked before {@code cutoff}, whose target never arrived (plan D3), and
+     * returns them ordered by (source, cancel sourceId). The cancel's own transaction row is not
+     * touched: it stays an ordinary row. Runs in the caller's transaction.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public List<Expired> expireParkedBefore(Instant cutoff) {
+        return jdbc.sql(EXPIRE)
+                .params(timestamptz(cutoff))
+                .query((rs, n) -> new Expired(SourceKind.ofCode(rs.getShort("source")), rs.getString("cancelSourceId"),
+                        rs.getString("cancelsSourceId"), rs.getObject("parkedAt", OffsetDateTime.class).toInstant()))
+                .list()
+                .stream()
+                .sorted(Comparator.comparing((Expired e) -> (short) e.source().code())
+                        .thenComparing(Expired::cancelSourceId))
                 .toList();
     }
 

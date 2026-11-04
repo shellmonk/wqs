@@ -92,7 +92,6 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(after.plays()).isEqualTo(before.plays());
         assertThat(after.timeline()).isEqualTo(before.timeline());
         assertThat(after.counts()).isEqualTo(before.counts());
-        assertThat(after.locator()).isEqualTo(before.locator());
         // Replaced in every view the source feeds.
         assertThat(detail("wqPrjWebTransaction", "pr1")).isEqualTo(DETAIL_V2);
         assertThat(detail("wqPrjCcTransaction", "pr1")).isEqualTo(DETAIL_V2);
@@ -157,6 +156,27 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(deadLetterErrors()).containsExactly(RejectedTransactionDeadLetters.IMMUTABLE_FIELD_CHANGED);
     }
 
+    /**
+     * Plan D2, no locator: the unique key holds "occurredAt", so a polled row re-read at another instant is
+     * still found by (source, sourceId) -- an older version is stale and an equal one a duplicate, never a
+     * second stored row.
+     */
+    @Test
+    void a_row_re_read_at_another_occurredAt_is_never_stored_twice() {
+        writer.applyDelta(batch(V2, prize("pr1", null, V2, DETAIL_V2)));
+        ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
+
+        DeltaResult older = writer.applyDelta(batch(V2, row(SourceKind.CLAIMABLE_PRIZE, 1, "pr1", T0.plusSeconds(1),
+                null, new BigDecimal("150.0000"), "EUR", V1, DETAIL_V1)));
+        DeltaResult equal = writer.applyDelta(batch(V2, row(SourceKind.CLAIMABLE_PRIZE, 1, "pr1", T0.plusSeconds(2),
+                null, new BigDecimal("150.0000"), "EUR", V2, DETAIL_V2)));
+
+        assertThat(older.stale()).isEqualTo(1);
+        assertThat(equal.duplicates()).isEqualTo(1);
+        assertThat(ProjectionSnapshot.of(jdbc())).isEqualTo(before);
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
+    }
+
     /** D6: every immutable field other than amount/occurredAt (tested above), one at a time. */
     @Test
     void newer_version_changing_any_other_immutable_field_dead_letters() {
@@ -216,7 +236,7 @@ class VersionedApplyTest extends PostgresTestBase {
         DeltaResult result = writer.applyDelta(batch(null, retailer));
 
         assertThat(result.inserted()).isEqualTo(1);
-        for (String table : List.of("wqPrjTransactionLocator", "wqPrjTransaction", "wqPrjTimeline")) {
+        for (String table : List.of("wqPrjTransaction", "wqPrjTimeline")) {
             assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 2 and \"userId\" = 1",
                     Integer.class)).as(table).isEqualTo(1);
             assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 1",
@@ -244,7 +264,6 @@ class VersionedApplyTest extends PostgresTestBase {
         })).isInstanceOf(IllegalStateException.class);
 
         assertThat(watermarks.read()).contains(V1);
-        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
         assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
     }
 
@@ -307,7 +326,7 @@ class VersionedApplyTest extends PostgresTestBase {
 
     private Instant versionAt(SourceKind source, String sourceId) {
         java.time.OffsetDateTime at = db().value(
-                "select \"versionAt\" from \"wqPrjTransactionLocator\" where \"source\" = ? and \"sourceId\" = ?", java.time.OffsetDateTime.class,
+                "select \"versionAt\" from \"wqPrjTransaction\" where \"source\" = ? and \"sourceId\" = ?", java.time.OffsetDateTime.class,
                 (short) source.code(), sourceId);
         return at == null ? null : at.toInstant();
     }

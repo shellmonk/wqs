@@ -3,7 +3,7 @@ package wqs.projection;
 import wqs.domain.SourceKind;
 
 /**
- * A transaction's identity across sources: the "wqPrjTransactionLocator" key (source, sourceId), plus the owner
+ * A transaction's identity across sources: (source, sourceId), the leading columns of "wqPrjTransaction"'s unique key, plus the owner
  * (ownerType, userId). sourceId alone is not unique -- different sources may reuse the same id string -- and a
  * cancel only ever resolves an original of the same owner, so a parked cancel waits for all four.
  */

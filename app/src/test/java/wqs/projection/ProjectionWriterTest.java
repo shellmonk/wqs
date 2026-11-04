@@ -133,7 +133,6 @@ class ProjectionWriterTest extends PostgresTestBase {
         WriteResult first = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 1L));
 
         assertThat(first.projected()).isEqualTo(1);
-        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
         assertThat(count("wqPrjTransaction")).isEqualTo(1);
         assertThat(db().value("select \"zeroAmount\" from \"wqPrjTransaction\"", Boolean.class)).isTrue();
         assertThat(count("wqPrjTimeline")).as("no page unit").isZero();
@@ -221,7 +220,7 @@ class ProjectionWriterTest extends PostgresTestBase {
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(0)), 1L));
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
 
-            assertThat(count("wqPrjTransactionLocator")).isEqualTo(2);
+            assertThat(count("wqPrjTransaction")).isEqualTo(2);
             assertThat(count("wqPrjWebTransaction")).as("both stored").isEqualTo(2);
             assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqPrjWebTransaction\" where \"sourceId\" = 't-1'")
                     .asMap().values().toArray())
@@ -244,8 +243,8 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(result.projected()).isEqualTo(1);
         assertThat(db().lines("select * from \"wqPrjSession\" where \"batchId\" = 'b-shared'"))
                 .isEqualTo(sessionBefore);
-        assertThat(db().count("\"wqPrjTransactionLocator\" where \"sourceId\" = 'u-1'"))
-                .as("not even the locator").isZero();
+        assertThat(db().count("\"wqPrjTransaction\" where \"sourceId\" = 'u-1'"))
+                .as("not even the transaction row").isZero();
         assertThat(deadLetters()).containsExactly("u-1|2|currency-mismatch");
         assertThat(offsetStore.read(STREAM)).contains(3L);
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
@@ -267,8 +266,8 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.deadLettered()).isEqualTo(1);
         assertThat(result.projected()).isEqualTo(2);
-        assertThat(db().count("\"wqPrjTransactionLocator\" where \"sourceId\" = 'pay-s'"))
-                .as("not even the locator").isZero();
+        assertThat(db().count("\"wqPrjTransaction\" where \"sourceId\" = 'pay-s'"))
+                .as("not even the transaction row").isZero();
         assertThat(db().count("\"wqPrjSession\" where \"batchId\" = 'b-pay'")).isZero();
         assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" order by 1", String.class))
                 .containsExactly("after", "before");
@@ -287,7 +286,7 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.deadLettered()).isEqualTo(1);
         assertThat(result.projected()).isEqualTo(1);
-        assertThat(db().count("\"wqPrjTransactionLocator\" where \"sourceId\" = 'ei-1'")).isZero();
+        assertThat(db().count("\"wqPrjTransaction\" where \"sourceId\" = 'ei-1'")).isZero();
         assertThat(deadLetters()).containsExactly("ei-1|7|einstant-unsessioned");
         assertThat(offsetStore.read(STREAM)).contains(8L);
     }

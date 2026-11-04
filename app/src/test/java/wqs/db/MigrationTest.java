@@ -64,12 +64,11 @@ class MigrationTest extends PostgresTestBase {
         for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCount")) {
             assertThat(primaryKey(table)).as(table).startsWith("ownerType", "userId");
         }
-        for (String table : List.of("wqPrjTransaction", "wqPrjTransactionLocator", "wqPrjPendingCancel",
+        for (String table : List.of("wqPrjTransaction", "wqPrjPendingCancel",
                 "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCount")) {
             assertThat(columnType(table, "ownerType")).as(table).isEqualTo("smallint");
             assertThat(nullable(table, "ownerType")).as(table).isFalse();
         }
-        assertThat(indexDef("wqPrjTransactionLocator_user_idx")).endsWith("(\"ownerType\", \"userId\")");
     }
 
     /** Plan D5: sessions and plays are keyed by batch, not partitioned, and need no group locator. */
@@ -105,23 +104,29 @@ class MigrationTest extends PostgresTestBase {
         return db().value("select pg_get_viewdef(to_regclass(?)::oid)", String.class, "\"" + name + "\"").strip();
     }
 
+    /**
+     * Plan D2: no locator; duplicates are caught by the transactions' own unique key
+     * ("source", "sourceId", "occurredAt"), which holds the partition key and so exists on every partition.
+     */
     @Test
-    void locator_is_not_partitioned_and_keyed_by_source_and_sourceId() {
-        String relkind = db().value("select relkind::text from pg_class where relname = 'wqPrjTransactionLocator'", String.class);
-
-        // 'r' = ordinary table. A global one-probe lookup requires it NOT be partitioned (spec 5.4).
-        assertThat(relkind).isEqualTo("r");
-
-        List<String> pkColumns = db().column("""
-                       select a.attname
-                       from pg_index i
-                       join pg_class c on c.oid = i.indrelid
-                       join pg_attribute a on a.attrelid = c.oid and a.attnum = any(i.indkey)
-                       where c.relname = 'wqPrjTransactionLocator' and i.indisprimary
-                       order by a.attname
-                       """, String.class);
-
-        assertThat(pkColumns).containsExactly("source", "sourceId");
+    void duplicates_are_caught_by_a_unique_key_on_the_transactions_and_there_is_no_locator() {
+        assertThat(relkind("wqPrjTransactionLocator")).as("no locator").isNull();
+        assertThat(db().column("""
+                select a.attname
+                from pg_index i
+                join pg_class c on c.oid = i.indrelid
+                cross join lateral unnest(i.indkey) with ordinality as k(attnum, pos)
+                join pg_attribute a on a.attrelid = c.oid and a.attnum = k.attnum
+                where c.relname = 'wqPrjTransaction' and i.indisunique and not i.indisprimary
+                order by k.pos
+                """, String.class)).containsExactly("source", "sourceId", "occurredAt");
+        assertThat(db().value("""
+                select count(*) from pg_inherits h
+                join pg_index i on i.indrelid = h.inhrelid and i.indisunique and not i.indisprimary
+                where h.inhparent = to_regclass('"wqPrjTransaction"')
+                """, Long.class)).as("on every partition").isEqualTo(db().value("""
+                select count(*) from pg_inherits where inhparent = to_regclass('"wqPrjTransaction"')
+                """, Long.class));
     }
 
     @Test
@@ -200,15 +205,10 @@ class MigrationTest extends PostgresTestBase {
     }
 
     /**
-     * Store everything: the locator has no locator-only columns any more (every transaction has its
-     * row), and carries the owner type; "zeroAmount" is a stored generated column of the transactions.
+     * Store everything: "zeroAmount" is a stored generated column of the transactions.
      */
     @Test
-    void zero_amount_is_a_generated_transaction_column_and_the_locator_carries_the_owner_type() {
-        assertThat(columnType("wqPrjTransactionLocator", "zeroAmount")).as("no locator-only rows").isNull();
-        assertThat(columnType("wqPrjTransactionLocator", "cancels")).isNull();
-        assertThat(columnType("wqPrjTransactionLocator", "ownerType")).isEqualTo("smallint");
-        assertThat(nullable("wqPrjTransactionLocator", "ownerType")).isFalse();
+    void zero_amount_is_a_generated_transaction_column() {
         assertThat(columnType("wqPrjTransaction", "zeroAmount")).isEqualTo("boolean");
         assertThat(db().value("""
                 select generation_expression from information_schema.columns
@@ -245,9 +245,9 @@ class MigrationTest extends PostgresTestBase {
 
     /** D5: the versioned-upsert column; one ingest cursor row per feed (stream offset or delta watermark). */
     @Test
-    void locator_has_versionAt_and_the_ingest_cursor_has_its_shape() {
-        assertThat(columnType("wqPrjTransactionLocator", "versionAt")).isEqualTo("timestamp with time zone");
-        assertThat(nullable("wqPrjTransactionLocator", "versionAt")).as("null for stream transactions").isTrue();
+    void transactions_have_versionAt_and_the_ingest_cursor_has_its_shape() {
+        assertThat(columnType("wqPrjTransaction", "versionAt")).isEqualTo("timestamp with time zone");
+        assertThat(nullable("wqPrjTransaction", "versionAt")).as("null for stream transactions").isTrue();
 
         assertThat(columnType("wqIngestCursor", "feed")).isEqualTo("text");
         assertThat(columnType("wqIngestCursor", "streamOffset")).isEqualTo("bigint");

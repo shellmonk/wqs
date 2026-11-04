@@ -215,6 +215,51 @@ class CancellationTest extends PostgresTestBase {
         assertNoDrift();
     }
 
+    // --- plan D3: no locator; the target lookup is bounded to the owner's months -----------------
+
+    /** The original lies months before the cancel, with another month of the owner's in between. */
+    @Test
+    void a_cancel_finds_its_original_in_an_earlier_month_of_the_owner() {
+        apply(txAt("t-old", "b-old", "p-old", Instant.parse("2034-11-05T09:00:00Z")));
+        apply(txProduct("t-mid", null, null, Instant.parse("2035-01-20T09:00:00Z"), 3));
+
+        apply(cancelOf("c1", "t-old"));
+
+        assertThat(pendingCancelStore.depth()).isZero();
+        assertThat(cancelled(WEB, "t-old")).isTrue();
+        assertThat(cancelled(WEB, "t-mid")).isFalse();
+        assertNoDrift();
+    }
+
+    /**
+     * A cancel whose owner has transactions, but not yet the original, parks; the original arriving
+     * later, in a month the owner had no row in, drains it.
+     */
+    @Test
+    void a_cancel_before_an_original_in_a_new_month_of_the_owner_parks_then_resolves() {
+        apply(txProduct("t-mid", null, null, Instant.parse("2035-01-20T09:00:00Z"), 3));
+
+        apply(cancelOf("c1", "t-old"));
+        assertThat(pendingCancelStore.depth()).isEqualTo(1);
+        assertNoDrift();
+
+        apply(txAt("t-old", "b-old", "p-old", Instant.parse("2034-11-05T09:00:00Z")));
+
+        assertThat(pendingCancelStore.depth()).isZero();
+        assertThat(cancelled(WEB, "t-old")).isTrue();
+        assertNoDrift();
+    }
+
+    /** Original and cancel in one batch, the original first: the lookup sees the batch's own rows. */
+    @Test
+    void a_cancel_resolves_an_original_inserted_earlier_in_its_own_batch() {
+        apply(txAt("t-old", "b-old", "p-old", Instant.parse("2034-11-05T09:00:00Z")), cancelOf("c1", "t-old"));
+
+        assertThat(pendingCancelStore.depth()).isZero();
+        assertThat(cancelled(WEB, "t-old")).isTrue();
+        assertNoDrift();
+    }
+
     // --- R96: a cancel only resolves an original of its own user ---------------------------------
 
     @Test

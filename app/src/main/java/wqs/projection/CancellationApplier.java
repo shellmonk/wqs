@@ -5,6 +5,9 @@ import static wqs.projection.Binds.timestamptz;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.util.List;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
@@ -23,10 +26,12 @@ import wqs.domain.ViewKind;
  * arrives.
  *
  * <p><b>Resolution.</b> A cancel targets a projected transaction of its OWN source: a TRANSACTION cancel cancels
- * a TRANSACTION, a PAYMENT cancel a PAYMENT. The original is therefore resolved through
- * "wqPrjTransactionLocator" by (cancel.source, cancel.cancels) -- the locator's own key -- never by sourceId
- * alone, which different sources may share. The same-source assumption is to be confirmed with
- * the producer (O-13).
+ * a TRANSACTION, a PAYMENT cancel a PAYMENT. The original is therefore resolved by (cancel.source,
+ * cancel.cancels) -- the leading columns of "wqPrjTransaction"'s unique key -- never by sourceId alone, which
+ * different sources may share. The same-source assumption is to be confirmed with the producer (O-13).
+ * The cancel carries no timestamp of its original, so the lookup is bounded to the months the owner has
+ * transactions in ({@link OwnerMonths}, plan D3): one statement, one index probe per such month's
+ * partition, never a probe of every partition.
  *
  * <p><b>Effects</b>, each the exact inverse of what the original contributed when it arrived:
  * <ul>
@@ -57,7 +62,7 @@ import wqs.domain.ViewKind;
  * <p><b>Owners.</b> Every lookup and update is by the owner ("ownerType", "userId"): a cancel resolves
  * only an original of its own owner, so owner "2-7" can never cancel player "1-7"'s transaction.
  *
- * <p><b>Idempotence.</b> The writer's locator gate stops a replayed cancel before it gets here.
+ * <p><b>Idempotence.</b> The writer's insert gate stops a replayed cancel before it gets here.
  * A different cancel of an already-cancelled transaction changes no tally; it only lowers
  * "cancelledBy" to the smallest cancel id, so the stored state does not depend on which of two
  * cancels arrived first (P-1).
@@ -70,15 +75,29 @@ public class CancellationApplier {
 
     private static final short KIND_SESSION = 0;
 
-    private static final String LOCATE = """
-            select "userId", "occurredAt" from "wqPrjTransactionLocator"
-            where "source" = ? and "sourceId" = ? and "ownerType" = ? and "userId" = ?
-            """;
-    private static final String FETCH_ORIGINAL = """
-            select "ownerType", "userId", "occurredAt", "source", "sourceId", "productType", "batchId",
-                   "subBatchId", "type", "amount", "cancelled", "cancels", "zeroAmount"
-            from "wqPrjTransaction"
-            where "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?
+    /**
+     * The original within the owner's months. The month bounds arrive as two parallel arrays, so the
+     * statement is one whatever their number; each month is a lateral probe whose "occurredAt" range lets
+     * Postgres prune to that month's partition at run time (the unique key's index there). "offset 0"
+     * keeps the probe a per-month subquery: pulled up into a plain join, the planner may instead walk
+     * every partition in time order for the outer "order by ... limit" (CancelLookupPruningTest). Should
+     * a producer ever repeat a sourceId at another instant, the earliest row is the original, so the
+     * choice does not depend on storage.
+     */
+    static final String LOCATE_ORIGINAL = """
+            select "t"."ownerType", "t"."userId", "t"."occurredAt", "t"."source", "t"."sourceId", "t"."productType",
+                   "t"."batchId", "t"."subBatchId", "t"."type", "t"."amount", "t"."cancelled", "t"."cancels",
+                   "t"."zeroAmount"
+            from unnest(cast(? as timestamptz[]), cast(? as timestamptz[])) as "m" ("fromAt", "toAt")
+            cross join lateral (
+                select "ownerType", "userId", "occurredAt", "source", "sourceId", "productType", "batchId",
+                       "subBatchId", "type", "amount", "cancelled", "cancels", "zeroAmount"
+                from "wqPrjTransaction"
+                where "source" = ? and "sourceId" = ? and "ownerType" = ? and "userId" = ?
+                  and "occurredAt" >= "m"."fromAt" and "occurredAt" < "m"."toAt"
+                offset 0) as "t"
+            order by "t"."occurredAt"
+            limit 1
             """;
     private static final String SUBTRACT_FROM_PLAY = """
             update "wqPrjPlay" set
@@ -101,8 +120,6 @@ public class CancellationApplier {
                       "txCountExclCancelled", "playCountExclCancelled"
             """;
 
-    private static final RowMapper<Located> LOCATED = (rs, n) -> new Located(
-            rs.getLong("userId"), rs.getObject("occurredAt", OffsetDateTime.class));
     private static final RowMapper<Original> ORIGINAL = (rs, n) -> new Original(
             rs.getShort("ownerType"), rs.getLong("userId"), rs.getObject("occurredAt", OffsetDateTime.class),
             rs.getShort("source"), rs.getString("sourceId"), rs.getString("productType"),
@@ -118,12 +135,15 @@ public class CancellationApplier {
     private final JdbcClient jdbc;
     private final CounterUpdater counterUpdater;
     private final PendingCancelStore pendingCancelStore;
+    private final OwnerMonths ownerMonths;
 
     public CancellationApplier(
-            JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore) {
+            JdbcClient jdbc, CounterUpdater counterUpdater, PendingCancelStore pendingCancelStore,
+            OwnerMonths ownerMonths) {
         this.jdbc = jdbc;
         this.counterUpdater = counterUpdater;
         this.pendingCancelStore = pendingCancelStore;
+        this.ownerMonths = ownerMonths;
     }
 
     /**
@@ -137,12 +157,11 @@ public class CancellationApplier {
         if (!cancel.isCancellation()) {
             throw new IllegalArgumentException("not a cancellation: " + cancel.sourceId());
         }
-        Located located = locate(cancel);
-        if (located == null) {
+        Original original = locate(cancel);
+        if (original == null) {
             pendingCancelStore.park(cancel);
             return false;
         }
-        Original original = fetchOriginal(cancel, located);
 
         SourceKind source = SourceKind.ofCode(original.source());
         if (original.cancelled()) {
@@ -182,29 +201,36 @@ public class CancellationApplier {
     }
 
     /**
-     * The original's locator row as (userId, occurredAt), or null if not yet seen.
+     * The original's transaction row, or null if not yet seen.
      *
      * The cancel's owner (ownerType, userId) must match the original's: a transaction of another owner is treated as not
-     * seen, so the cancel parks (and, since {@link PendingCancelStore#drainFor} matches on userId
-     * too, stays parked, surfacing through the oldest-age gauge). A cross-user cancel is an
-     * expected mismatch, not a failure; an unexpected failure on the drain path is contained by
-     * {@link DrainedCancelApplier}'s savepoint and dead-letters the cancel, never the original.
+     * seen, so the cancel parks (and, since {@link PendingCancelStore#drainFor} matches on the owner
+     * too, stays parked, surfacing through the oldest-age gauge until the pendingCancelResolution job
+     * removes it). A cross-user cancel is an expected mismatch, not a failure; an unexpected failure on
+     * the drain path is contained by {@link DrainedCancelApplier}'s savepoint and dead-letters the cancel,
+     * never the original.
      */
-    private Located locate(ProjectionTransaction cancel) {
-        return jdbc.sql(LOCATE)
-                .params((short) cancel.source().code(), cancel.cancels(), cancel.ownerType(), cancel.userId())
-                .query(LOCATED)
+    private Original locate(ProjectionTransaction cancel) {
+        List<YearMonth> months = ownerMonths.of(cancel.ownerType(), cancel.userId());
+        if (months.isEmpty()) {
+            return null;
+        }
+        String[] fromAt = new String[months.size()];
+        String[] toAt = new String[months.size()];
+        for (int i = 0; i < months.size(); i++) {
+            fromAt[i] = monthStart(months.get(i)).toString();
+            toAt[i] = monthStart(months.get(i).plusMonths(1)).toString();
+        }
+        return jdbc.sql(LOCATE_ORIGINAL)
+                .params(fromAt, toAt, (short) cancel.source().code(), cancel.cancels(), cancel.ownerType(),
+                        cancel.userId())
+                .query(ORIGINAL)
                 .optional()
                 .orElse(null);
     }
 
-    /** The located original's transaction row. */
-    private Original fetchOriginal(ProjectionTransaction cancel, Located located) {
-        return jdbc.sql(FETCH_ORIGINAL)
-                .params(cancel.ownerType(), located.userId(), timestamptz(located.occurredAt()),
-                        (short) cancel.source().code(), cancel.cancels())
-                .query(ORIGINAL)
-                .single();
+    private static Instant monthStart(YearMonth month) {
+        return month.atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 
     private void markCancelled(ProjectionTransaction cancel, Original original) {
@@ -319,10 +345,6 @@ public class CancellationApplier {
     private static Object[] identifies(Original original) {
         return new Object[] {original.ownerType(), original.userId(), timestamptz(original.occurredAt()), original.source(),
                 original.sourceId()};
-    }
-
-    /** The original's locator row. */
-    private record Located(long userId, OffsetDateTime occurredAt) {
     }
 
     /** The columns of the original's "wqPrjTransaction" row that a cancel reads. */

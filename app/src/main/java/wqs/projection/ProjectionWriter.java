@@ -112,7 +112,7 @@ public class ProjectionWriter {
             ProjectionTransaction transaction = batch.transactions().get(i);
 
             // Rejected transactions (D6, D7) are dead-lettered alone and nothing of them is written, not
-            // even the locator row; the rest of the batch applies. Checked before the gate, so a
+            // even the transaction row; the rest of the batch applies. Checked before the gate, so a
             // re-delivered rejected transaction is rejected again rather than counted as a duplicate.
             String rejection = ingestRules.rejection(transaction);
             if (rejection != null) {

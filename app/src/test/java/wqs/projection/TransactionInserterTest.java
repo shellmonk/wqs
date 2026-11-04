@@ -22,7 +22,6 @@ class TransactionInserterTest extends PostgresTestBase {
     void setUp() {
         new PartitionManager(jdbc()).ensurePartitionsAhead(java.time.YearMonth.of(2033, 4), 0);
         inserter = new TransactionInserter(jdbc());
-        db().execute("delete from \"wqPrjTransactionLocator\"");
         db().execute("delete from \"wqPrjTransaction\"");
     }
 
@@ -59,17 +58,30 @@ class TransactionInserterTest extends PostgresTestBase {
         assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
     }
 
+    /** Plan D2: the duplicate key is (source, sourceId, occurredAt); sourceId alone is not unique across sources. */
     @Test
-    void the_locator_records_where_the_transaction_landed() {
+    void the_same_sourceId_of_another_source_is_not_a_duplicate() {
+        assertThat(inserter.insertIfAbsent(transaction("id-1"))).isTrue();
+        ProjectionTransaction payment = new ProjectionTransaction(
+                7L, SourceKind.PAYMENT, "id-1", WHEN, null, null, null, null,
+                TxTypes.NEUTRAL, new BigDecimal("100.0000"), "EUR", null, null, null);
+
+        assertThat(inserter.insertIfAbsent(payment)).isTrue();
+        assertThat(inserter.insertIfAbsent(payment)).isFalse();
+        assertThat(count("wqPrjTransaction")).isEqualTo(2);
+    }
+
+    /** A replay conflicts on the unique key, so it never draws a second row id either. */
+    @Test
+    void a_replay_conflicts_on_the_unique_key_and_stores_nothing() {
         inserter.insertIfAbsent(transaction("tx-1"));
+        long id = db().value("select \"transactionId\" from \"wqPrjTransaction\"", Long.class);
 
-        var row = db().row("""
-                select "userId", "occurredAt" from "wqPrjTransactionLocator"
-                where "source" = ? and "sourceId" = ?
-                """, SourceKind.TRANSACTION.code(), "tx-1");
+        assertThat(inserter.insertIfAbsent(transaction("tx-1"))).isFalse();
 
-        assertThat(row.get("userId", Long.class)).isEqualTo(7L);
-        assertThat(row.get("occurredAt", Instant.class)).isEqualTo(WHEN);
+        assertThat(db().value("select \"transactionId\" from \"wqPrjTransaction\"", Long.class)).isEqualTo(id);
+        assertThat(db().value("select \"versionAt\" is null from \"wqPrjTransaction\"", Boolean.class))
+                .as("a stream transaction is unversioned").isTrue();
     }
 
     @Test
@@ -88,7 +100,7 @@ class TransactionInserterTest extends PostgresTestBase {
     }
 
     @Test
-    void every_field_is_written_to_both_views_with_the_locator_transaction_id() {
+    void every_field_is_written_to_both_views_with_one_transaction_id() {
         ProjectionTransaction transaction = new ProjectionTransaction(
                 7L, SourceKind.TRANSACTION, "tx-full", WHEN, "P11", "instants", "batch-A", "sub-B",
                 TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", new BigDecimal("95.0000"),
@@ -96,7 +108,7 @@ class TransactionInserterTest extends PostgresTestBase {
         assertThat(inserter.insertIfAbsent(transaction)).isTrue();
 
         long locatorId = db().value(
-                "select \"transactionId\" from \"wqPrjTransactionLocator\" where \"source\" = ? and \"sourceId\" = ?", Long.class,
+                "select \"transactionId\" from \"wqPrjTransaction\" where \"source\" = ? and \"sourceId\" = ?", Long.class,
                 SourceKind.TRANSACTION.code(), "tx-full");
 
         for (String table : new String[] {"wqPrjWebTransaction", "wqPrjCcTransaction"}) {

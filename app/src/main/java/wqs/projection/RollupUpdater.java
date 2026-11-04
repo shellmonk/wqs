@@ -20,7 +20,7 @@ import wqs.domain.ViewKind;
 
 /**
  * Maintains session and play aggregates incrementally (spec 5.5). Only ever called for transactions the
- * locator gate accepted as new and that are not cancellations, so incrementing is safe -- a
+ * insert gate accepted as new and that are not cancellations, so incrementing is safe -- a
  * replayed event never reaches here.
  *
  * "totalPlays" is a monetary amount (the sum wagered), not a count. The count metric is
@@ -172,7 +172,7 @@ public class RollupUpdater {
     /**
      * Folds one transaction into its play and session rollups.
      *
-     * Only called for transactions the locator gate accepted as new (so incrementing is safe) and that
+     * Only called for transactions the insert gate accepted as new (so incrementing is safe) and that
      * are not cancellations. A cancellation returns {@link RollupResult#NONE} without touching any
      * rollup: cancellation effects (the ExclCancelled columns) are applied elsewhere, and folding it in
      * here would count a reversed win as a win.

@@ -270,7 +270,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.poll();
 
-        for (String table : java.util.List.of("wqPrjTransactionLocator", "wqPrjTransaction",
+        for (String table : java.util.List.of("wqPrjTransaction",
                 "wqPrjSession", "wqPrjPlay", "wqPrjTimeline")) {
             assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 2 and \"userId\" = 7",
                     Integer.class)).as(table).isEqualTo(1);
@@ -292,7 +292,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.poll();
 
-        assertThat(count("wqPrjTransactionLocator")).isEqualTo(1);
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
         assertThat(db().value("select count(*)::int from \"wqPrjTransaction\" where \"zeroAmount\"", Integer.class))
                 .isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(3L);

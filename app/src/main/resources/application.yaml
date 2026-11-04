@@ -99,6 +99,14 @@ wqs:
       misfirePolicy: DO_NOTHING
       params:
         monthsAhead: "3"
+    pending-cancel-resolution:
+      # Plan D3: a cancel whose target has not arrived within thresholdDays is removed from
+      # "wqPrjPendingCancel" (its own transaction row stays) and logged. Daily, after the rollover.
+      enabled: true
+      cron: "0 30 3 * * ?"
+      misfirePolicy: DO_NOTHING
+      params:
+        thresholdDays: "7"
 
 management:
   endpoints:

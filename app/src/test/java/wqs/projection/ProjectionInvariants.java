@@ -118,7 +118,7 @@ public final class ProjectionInvariants {
                 with expected as (
                     select c."source", c."sourceId", c.target as "cancels", c."ownerType", c."userId"
                     from (%2$s) c
-                    where not exists (select 1 from "wqPrjTransactionLocator" l
+                    where not exists (select 1 from "wqPrjTransaction" l
                                       where l."source" = c."source" and l."sourceId" = c.target
                                         and l."ownerType" = c."ownerType" and l."userId" = c."userId")
                 )

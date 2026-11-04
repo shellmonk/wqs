@@ -30,7 +30,7 @@ class ViewSourceIsolationTest {
 
     private static final List<String> WEB = List.of("wqs/read/web", "wqs/api/web");
     private static final List<String> CC = List.of("wqs/read/cc", "wqs/api/cc");
-    /** The base table, quoted: its views and its locator ("wqPrjTransactionLocator") do not match. */
+    /** The base table, quoted: its views and its other tables (e.g. "wqPrjTransaction_x") do not match. */
     private static final String BASE_TABLE = "\"wqprjtransaction\"";
     /** The /web timeline predicate as the SQL writes it, qualified. */
     private static final String ON_WEB = "\"wqprjtimeline\".\"onweb\"";
