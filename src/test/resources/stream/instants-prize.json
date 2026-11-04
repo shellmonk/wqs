@@ -1,0 +1,44 @@
+{
+    "id": "5922",
+    "type": "PRIZE",
+    "amount": {
+        "amount": 0,
+        "currency": "EUR",
+        "reservedAmount": 0,
+        "nonWithdrawableAmount": 0
+    },
+    "account": "AT_MAIN-0",
+    "subtype": "",
+    "monetary": true,
+    "productId": "TIKIKALACABANA",
+    "references": {
+        "claimId": "",
+        "extTrxId": "PS-62pflumf4bcz7jdtfc3wl5yqfm-1-prize",
+        "paymentId": "",
+        "extSystemId": "PDS",
+        "transactionReference": "5922"
+    },
+    "description": "Payout Play Step",
+    "productType": "instants",
+    "userContext": {
+        "ownerId": "1-1945",
+        "issuerId": "1-1945"
+    },
+    "batchContext": {
+        "batchId": "GS-ur5z5sgfr5de5flhjd6ycryf6u",
+        "batchEnded": true,
+        "subBatchId": "PS-62pflumf4bcz7jdtfc3wl5yqfm"
+    },
+    "toDescription": "PS-62pflumf4bcz7jdtfc3wl5yqfm",
+    "accountContext": {
+        "accountType": "AT_MAIN",
+        "accountNumber": "0"
+    },
+    "createdContext": {
+        "issued": "2026-10-26T11:36:17.357Z",
+        "channel": "WEB",
+        "created": "2026-10-26T11:36:23.049062Z"
+    },
+    "fromDescription": "AT_MAIN",
+    "totalPostBalance": 1156
+}

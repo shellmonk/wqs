@@ -2,6 +2,68 @@
 -- changes after go-live start at V2.
 
 -- ---------------------------------------------------------------------------------------------
+-- Transactions
+-- ---------------------------------------------------------------------------------------------
+
+-- Every projected row, from every source, stored once. Partitioned by month on "occurredAt";
+-- partitions are created on demand by the writer (wqs.db.Partitions). The owner is
+-- ("ownerType", "userId"): a player 1717 and a retailer 1717 never share rows.
+-- "source": 1 TRANSACTION (stream), 2 MANUAL_ADJUSTMENT, 3 CLAIMABLE_PRIZE, 4 PAYMENT, 5 LIMIT.
+-- The unique key catches a redelivered row: Postgres requires the partition column in it.
+create table "wqPrjTransaction" (
+    "ownerType"            smallint      not null,
+    "userId"               bigint        not null,
+    "occurredAt"           timestamptz   not null,
+    "transactionId"        bigint        not null,
+    "source"               smallint      not null,
+    "sourceId"             text          not null,
+    "type"                 text          not null,
+    "amount"               numeric(20,4) not null,
+    "currency"             char(3)       not null,
+    "balanceAfter"         numeric(20,4),
+    "productId"            text,
+    "productType"          text,
+    "batchId"              text,
+    "subBatchId"           text,
+    "transactionReference" text,
+    "detail"               jsonb         not null default '{}',
+    "ingestedAt"           timestamptz   not null default now(),
+    primary key ("ownerType", "userId", "occurredAt", "transactionId"),
+    constraint "wqPrjTransaction_sourceKey" unique ("source", "sourceId", "occurredAt")
+) partition by range ("occurredAt");
+
+create sequence "wqTransactionIdSeq" as bigint;
+
+-- ---------------------------------------------------------------------------------------------
+-- Ingest state
+-- ---------------------------------------------------------------------------------------------
+
+-- One row per feed: the stream's last processed offset ("feed" = the stream name). Kept here,
+-- not in the broker, so a row and the offset that produced it commit or roll back together.
+create table "wqIngestCursor" (
+    "feed"         text        not null,
+    "streamOffset" bigint,
+    "updatedAt"    timestamptz not null default now(),
+    primary key ("feed")
+);
+
+-- Input that could not be projected. Never the raw message: wallet messages can carry card data
+-- (e.g. "toDescription"). A message that could not be read is identified by its offset and the
+-- SHA-256 of its body (the message itself stays in the stream); a readable but rejected one keeps
+-- only its decoded, allowlisted fields in "payload".
+create table "wqDeadLetter" (
+    "deadLetterId" bigserial   primary key,
+    "feed"         text        not null,
+    "streamOffset" bigint,
+    "sourceId"     text,
+    "reason"       text        not null,
+    "error"        text        not null,
+    "bodySha256"   text,
+    "payload"      jsonb,
+    "failedAt"     timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------------------------------
 -- Quartz JobStore (Quartz's tables_postgres.sql, for PostgreSQLDelegate)
 -- ---------------------------------------------------------------------------------------------
 -- Quartz uses fixed upper-case QRTZ_* names, which cannot follow the camelCase convention, so

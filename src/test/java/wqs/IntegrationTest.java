@@ -37,9 +37,16 @@ public abstract class IntegrationTest {
                     new PortBinding(Ports.Binding.bindPort(STREAM_PORT), new ExposedPort(5552))))
             .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1));
 
+    /** The stream the consumer reads (application.yaml wqs.stream.name). The wallet creates it in production. */
+    protected static final String STREAM = "wallet-transactions";
+
     static {
         POSTGRES.start();
         RABBIT.start();
+        try (com.rabbitmq.stream.Environment env = com.rabbitmq.stream.Environment.builder()
+                .uri("rabbitmq-stream://localhost:" + STREAM_PORT).build()) {
+            env.streamCreator().stream(STREAM).create();
+        }
     }
 
     @DynamicPropertySource

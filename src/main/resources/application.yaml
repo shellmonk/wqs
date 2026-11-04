@@ -46,3 +46,8 @@ wqs:
     enabled: false
     uri: rabbitmq-stream://localhost:5552
     name: wallet-transactions
+  partition:
+    # A row whose month is before floor or after now + max-months-ahead has a garbage timestamp:
+    # it is dead-lettered and creates no partition.
+    floor: 2010-01
+    max-months-ahead: 12
