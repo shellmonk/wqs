@@ -77,6 +77,9 @@ tasks.register('publishSamples', JavaExec) {
     group = 'application'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'wqs.tools.PublishSamples'
-    args = [project.findProperty('count') ?: '200', project.findProperty('owner') ?: '1-1717',
-            project.findProperty('streamUri') ?: 'rabbitmq-stream://localhost:5552']
+    // gradleProperty reads only -P values: project.findProperty('owner') would return the
+    // project's own owner getter instead.
+    args = [providers.gradleProperty('count').getOrElse('200'),
+            providers.gradleProperty('owner').getOrElse('1-1717'),
+            providers.gradleProperty('streamUri').getOrElse('rabbitmq-stream://localhost:5552')]
 }
