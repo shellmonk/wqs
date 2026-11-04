@@ -13,12 +13,11 @@ final class TransactionSpecifications {
 
     /** An owner's rows in [from, to) that the policy shows: its sources, and never zero amounts. */
     static Specification<TransactionEntity> visibleTo(ReadPolicy policy, String ownerId, Instant from, Instant to) {
-        Set<Short> sources = policy.sources().stream().map(s -> s.code()).collect(java.util.stream.Collectors.toSet());
         return (root, query, cb) -> cb.and(
                 cb.equal(root.get("ownerId"), ownerId),
                 cb.greaterThanOrEqualTo(root.get("occurredAt"), from),
                 cb.lessThan(root.get("occurredAt"), to),
-                root.get("source").in(sources),
+                root.get("source").in(policy.sourceCodes()),
                 cb.isFalse(root.get("zeroAmount")));
     }
 

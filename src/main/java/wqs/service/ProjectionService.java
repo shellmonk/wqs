@@ -93,10 +93,10 @@ public class ProjectionService {
     private ProjectionResponse<HighLevelEntry> sessionPage(ReadPolicy policy, String ownerId, ProjectionRequest request) {
         String[] productTypes = request.productTypes().toArray(NONE);
         String[] types = request.transactionTypes().toArray(NONE);
-        long total = sessions.countPageEntries(ownerId, request.from(), request.to(), policy.sourceCodes(),
+        long total = sessions.countPageEntries(ownerId, request.from(), request.to(), policy.sourceCodeArray(),
                 request.excludeCancelled(), productTypes.length == 0, productTypes, types.length == 0, types);
         List<PageEntry> pageEntries = total <= request.offset() ? List.of()
-                : sessions.findPageEntries(ownerId, request.from(), request.to(), policy.sourceCodes(),
+                : sessions.findPageEntries(ownerId, request.from(), request.to(), policy.sourceCodeArray(),
                         request.excludeCancelled(), productTypes.length == 0, productTypes, types.length == 0, types,
                         request.pageSize(), request.offset());
 
@@ -154,10 +154,9 @@ public class ProjectionService {
      */
     private Map<String, List<TxView>> visibleRowsByBatch(ReadPolicy policy, String ownerId, List<SessionEntity> pageSessions,
                                                          ProjectionRequest request) {
-        List<Short> sources = policy.sources().stream().map(s -> s.code()).toList();
         return transactions.findSessionRows(ownerId, pageSessions.stream().map(SessionEntity::getBatchId).toList(),
                         earliest(pageSessions, SessionEntity::getStartedAt), latest(pageSessions, SessionEntity::getEndedAt),
-                        sources, !request.excludeCancelled())
+                        policy.sourceCodes(), !request.excludeCancelled())
                 .stream()
                 .filter(t -> request.transactionTypes().isEmpty() || request.transactionTypes().contains(t.getType()))
                 .map(mapper::toView)

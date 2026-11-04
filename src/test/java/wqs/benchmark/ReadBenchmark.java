@@ -256,7 +256,7 @@ class ReadBenchmark {
         tx.setReadOnly(true);
         tx.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         String[] none = new String[0];
-        Integer[] sources = ReadPolicy.CC.sourceCodes();
+        Integer[] sources = ReadPolicy.CC.sourceCodeArray();
         report.append("\n## Level-1 page broken down (").append(owner.rows()).append("-row owner, 24 months, page 1 of 50), warm ms\n\n")
                 .append("| step | ms |\n|---|---:|\n");
         for (int warmup = 0; warmup < 3; warmup++) {

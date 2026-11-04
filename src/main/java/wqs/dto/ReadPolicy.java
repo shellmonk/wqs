@@ -1,6 +1,7 @@
 package wqs.dto;
 
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -23,7 +24,13 @@ public record ReadPolicy(Set<Source> sources) {
         sources = Set.copyOf(sources);
     }
 
-    public Integer[] sourceCodes() {
-        return sources.stream().map(s -> (int) s.code()).sorted().toArray(Integer[]::new);
+    /** The sources' stored codes, for JPA queries. */
+    public List<Short> sourceCodes() {
+        return sources.stream().map(Source::code).sorted().toList();
+    }
+
+    /** The sources' stored codes as an array, for native queries ({@code = any(cast(:sources as int[]))}). */
+    public Integer[] sourceCodeArray() {
+        return sourceCodes().stream().map(Short::intValue).toArray(Integer[]::new);
     }
 }
