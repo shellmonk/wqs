@@ -17,7 +17,7 @@ import lombok.NoArgsConstructor;
 @EqualsAndHashCode
 public class TransactionKey implements Serializable {
 
-    private Long userId;
+    private String ownerId;
     private Instant occurredAt;
     private Long transactionId;
 }

@@ -8,7 +8,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * {@code /cc} answers 403 and {@code /web} answers 401. Open them only on a trusted network.
  *
  * @param ccEnabled          serve {@code /cc} (any player, every source) to any caller
- * @param webPlayerHeader    take the {@code /web} player from the {@code X-Player-Id} header, which any caller can set
+ * @param webPlayerHeader    take the {@code /web} owner from the {@code X-Owner-Id} header, which any caller can set
  */
 @ConfigurationProperties("wqs.api")
 public record ApiAccessProperties(

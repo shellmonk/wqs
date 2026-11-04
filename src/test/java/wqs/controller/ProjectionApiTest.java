@@ -23,7 +23,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import wqs.IntegrationTest;
 import wqs.dto.IncomingTransaction;
 import wqs.dto.Source;
-import wqs.security.HeaderPlayerIdResolver;
+import wqs.security.HeaderOwnerIdResolver;
 import wqs.service.TransactionIngestService;
 
 /** The /cc and /web projection endpoints over HTTP, against rows written by the real ingest service. */
@@ -38,7 +38,8 @@ class ProjectionApiTest extends IntegrationTest {
     @Autowired JdbcClient jdbc;
     @Autowired ObjectMapper mapper;
 
-    private final long player = IDS.incrementAndGet();
+    private final long number = IDS.incrementAndGet();
+    private final String owner = "1-" + number;
 
     // --- level 0 ---
 
@@ -97,16 +98,16 @@ class ProjectionApiTest extends IntegrationTest {
         String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         String payment = store(withSource(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null), Source.PAYMENT));
 
-        assertThat(txIds(web(player, RANGE).get("data"))).containsExactly(bet);
+        assertThat(txIds(web(owner, RANGE).get("data"))).containsExactly(bet);
         assertThat(txIds(cc(RANGE).get("data"))).containsExactly(payment, bet);
     }
 
     @Test
-    void another_owner_type_with_the_same_user_id_is_never_shown() throws Exception {
-        store(withOwnerType(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null), (short) 2));
+    void another_owner_with_the_same_number_is_never_shown() throws Exception {
+        store(withOwner(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null), "2-" + number));
 
         assertThat(cc(RANGE).get("totalRowCount").asLong()).isZero();
-        assertThat(web(player, RANGE).get("totalRowCount").asLong()).isZero();
+        assertThat(web(owner, RANGE).get("totalRowCount").asLong()).isZero();
     }
 
     @Test
@@ -151,7 +152,7 @@ class ProjectionApiTest extends IntegrationTest {
         String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         store(withSource(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null), Source.PAYMENT));
 
-        JsonNode page = web(player, RANGE + "&aggregationLevel=1");
+        JsonNode page = web(owner, RANGE + "&aggregationLevel=1");
         assertThat(page.get("totalRowCount").asLong()).isEqualTo(1);
         assertThat(txIds(page.get("data"))).containsExactly(bet);
         assertThat(cc(RANGE + "&aggregationLevel=1").get("totalRowCount").asLong()).isEqualTo(2);
@@ -211,18 +212,26 @@ class ProjectionApiTest extends IntegrationTest {
 
     @Test
     void invalid_parameters_are_400_naming_the_parameter() {
-        assertProblem(get("/cc/wallet-data/rest/v1/projection/" + player + "?to=2026-11-01T00:00:00Z", null), 400, "from");
+        assertProblem(get("/cc/wallet-data/rest/v1/projection/" + owner + "?to=2026-11-01T00:00:00Z", null), 400, "from");
         assertProblem(get(ccPath() + RANGE + "&aggregationLevel=3", null), 400, "aggregationLevel");
         assertProblem(get(ccPath() + RANGE + "&pageSize=1001", null), 400, "pageSize");
         assertProblem(get(ccPath() + RANGE + "&aggregationLevel=1&pageSize=101", null), 400, "pageSize");
         assertProblem(get(ccPath() + RANGE + "&pageNumber=0", null), 400, "pageNumber");
         assertProblem(get(ccPath() + "from=yesterday&to=2026-11-01T00:00:00Z", null), 400, "from");
         assertProblem(get(ccPath() + "from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z", null), 400, "from");
-        assertProblem(get("/cc/wallet-data/rest/v1/projection/-5?" + RANGE, null), 400, "playerId");
+        assertProblem(get("/cc/wallet-data/rest/v1/projection/1717?" + RANGE, null), 400, "ownerId");
+        assertProblem(get("/cc/wallet-data/rest/v1/projection/a-1717?" + RANGE, null), 400, "ownerId");
     }
 
     @Test
-    void web_without_a_player_is_401() {
+    void the_owner_id_in_the_path_is_matched_in_its_canonical_spelling() throws Exception {
+        String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
+        assertThat(txIds(ok(get("/cc/wallet-data/rest/v1/projection/01-" + number + "?" + RANGE, null)).get("data")))
+                .containsExactly(bet);
+    }
+
+    @Test
+    void web_without_an_owner_is_401() {
         ResponseEntity<String> response = get("/web/wallet-data/rest/v1/projection?" + RANGE, null);
         assertThat(response.getStatusCode().value()).isEqualTo(401);
     }
@@ -239,38 +248,38 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     private IncomingTransaction row(String type, String amount, String at, String batch, String subBatch, String productType) {
-        return new IncomingTransaction((short) 1, player, Instant.parse(at), Source.TRANSACTION, Long.toString(IDS.incrementAndGet()),
+        return new IncomingTransaction(owner, Instant.parse(at), Source.TRANSACTION, Long.toString(IDS.incrementAndGet()),
                 type, new BigDecimal(amount), "EUR", null, "GAME", productType, batch, subBatch, null, Map.of("channel", "WEB"));
     }
 
     private static IncomingTransaction withSource(IncomingTransaction t, Source source) {
-        return new IncomingTransaction(t.ownerType(), t.userId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
+        return new IncomingTransaction(t.ownerId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
-    private static IncomingTransaction withOwnerType(IncomingTransaction t, short ownerType) {
-        return new IncomingTransaction(ownerType, t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
+    private static IncomingTransaction withOwner(IncomingTransaction t, String ownerId) {
+        return new IncomingTransaction(ownerId, t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
     private String ccPath() {
-        return "/cc/wallet-data/rest/v1/projection/" + player + "?";
+        return "/cc/wallet-data/rest/v1/projection/" + owner + "?";
     }
 
     private JsonNode cc(String query) throws Exception {
         return ok(get(ccPath() + query, null));
     }
 
-    private JsonNode web(long playerId, String query) throws Exception {
-        return ok(get("/web/wallet-data/rest/v1/projection?" + query, Long.toString(playerId)));
+    private JsonNode web(String ownerId, String query) throws Exception {
+        return ok(get("/web/wallet-data/rest/v1/projection?" + query, ownerId));
     }
 
-    private ResponseEntity<String> get(String path, String playerHeader) {
+    private ResponseEntity<String> get(String path, String ownerHeader) {
         HttpHeaders headers = new HttpHeaders();
-        if (playerHeader != null) {
-            headers.set(HeaderPlayerIdResolver.HEADER, playerHeader);
+        if (ownerHeader != null) {
+            headers.set(HeaderOwnerIdResolver.HEADER, ownerHeader);
         }
         return http.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), String.class);
     }

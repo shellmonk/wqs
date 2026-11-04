@@ -28,8 +28,7 @@ class StreamMessageDecoderTest {
         StreamMessage m = decoder.decode(fixture("transfer-out.json"));
 
         assertThat(m.id()).isEqualTo("5962");
-        assertThat(m.ownerType()).isEqualTo((short) 1);
-        assertThat(m.userId()).isEqualTo(1717L);
+        assertThat(m.ownerId()).isEqualTo("1-1717");
         assertThat(m.created()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
         assertThat(m.type()).isEqualTo("TT_TRANSFER_OUT");
         assertThat(m.amount()).isEqualByComparingTo("-12");
@@ -52,7 +51,7 @@ class StreamMessageDecoderTest {
         StreamMessage m = decoder.decode(fixture("instants-prize.json"));
 
         assertThat(m.id()).isEqualTo("5922");
-        assertThat(m.userId()).isEqualTo(1945L);
+        assertThat(m.ownerId()).isEqualTo("1-1945");
         assertThat(m.type()).isEqualTo("PRIZE");
         assertThat(m.amount()).isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(m.productId()).isEqualTo("TIKIKALACABANA");
@@ -78,10 +77,15 @@ class StreamMessageDecoderTest {
     }
 
     @Test
-    void a_non_player_owner_keeps_its_owner_type() throws IOException {
+    void another_owner_type_is_another_owner() throws IOException {
         StreamMessage m = decode(n -> ((ObjectNode) n.get("userContext")).put("ownerId", "2-1717"));
-        assertThat(m.ownerType()).isEqualTo((short) 2);
-        assertThat(m.userId()).isEqualTo(1717L);
+        assertThat(m.ownerId()).isEqualTo("2-1717");
+    }
+
+    @Test
+    void the_owner_id_gets_one_canonical_spelling() throws IOException {
+        StreamMessage m = decode(n -> ((ObjectNode) n.get("userContext")).put("ownerId", "01-001717"));
+        assertThat(m.ownerId()).isEqualTo("1-1717");
     }
 
     @ParameterizedTest

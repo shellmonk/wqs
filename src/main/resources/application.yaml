@@ -58,7 +58,7 @@ wqs:
   api:
     # No authentication yet: both endpoints are closed until switched on, on a trusted network only.
     cc-enabled: false          # /cc serves any player to any caller
-    web-player-header: false   # /web trusts an X-Player-Id header any caller can set
+    web-player-header: false   # /web trusts an X-Owner-Id header any caller can set
   datasource:
     reader:
       # url/username/password fall back to spring.datasource.* when unset.

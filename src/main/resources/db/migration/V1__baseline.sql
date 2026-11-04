@@ -6,17 +6,16 @@
 -- ---------------------------------------------------------------------------------------------
 
 -- Every projected row, from every source, stored once. Partitioned by month on "occurredAt";
--- partitions are created on demand by the writer (wqs.db.Partitions). The owner is
--- ("ownerType", "userId"): a player 1717 and a retailer 1717 never share rows.
+-- partitions are created on demand (wqs.service.PartitionService). The owner is "ownerId", the
+-- wallet's "{type}-{id}" (e.g. '1-1717') in one canonical spelling; '1-1717' and '2-1717' are
+-- simply different owners.
 -- "source": 1 TRANSACTION (stream), 2 MANUAL_ADJUSTMENT, 3 CLAIMABLE_PRIZE, 4 PAYMENT, 5 LIMIT.
 -- "transactionId" is the row's synthetic id, from "wqTransactionIdSeq". Postgres requires every key
 -- of a partitioned table to include the partition column, so it cannot be the primary key alone;
--- the sequence keeps it unique. The primary key doubles as the index pages read by: an owner
--- query also filters "ownerType", checked on the row (owners sharing a userId are rare).
+-- the sequence keeps it unique. The primary key doubles as the index pages read by.
 -- The unique key catches a redelivered row.
 create table "wqPrjTransaction" (
-    "ownerType"            smallint      not null,
-    "userId"               bigint        not null,
+    "ownerId"              text          not null,
     "occurredAt"           timestamptz   not null,
     "transactionId"        bigint        not null,
     "source"               smallint      not null,
@@ -35,7 +34,7 @@ create table "wqPrjTransaction" (
     "ingestedAt"           timestamptz   not null default now(),
     -- A zero-amount stream transaction: stored, never shown, not counted in session or play totals.
     "zeroAmount"           boolean       not null generated always as ("amount" = 0 and "source" = 1) stored,
-    primary key ("userId", "occurredAt", "transactionId"),
+    primary key ("ownerId", "occurredAt", "transactionId"),
     constraint "wqPrjTransaction_sourceKey" unique ("source", "sourceId", "occurredAt")
 ) partition by range ("occurredAt");
 
@@ -43,9 +42,9 @@ create sequence "wqTransactionIdSeq" as bigint;
 
 -- Levels 1-2 page through sessions merged with the rows that have no session; this index serves
 -- the second half. A session's own rows are found by batch, bounded by the session's time span.
-create index "wqPrjTransaction_unsessioned" on "wqPrjTransaction" ("userId", "occurredAt" desc, "transactionId" desc)
+create index "wqPrjTransaction_unsessioned" on "wqPrjTransaction" ("ownerId", "occurredAt" desc, "transactionId" desc)
     where "batchId" is null;
-create index "wqPrjTransaction_session" on "wqPrjTransaction" ("userId", "batchId", "occurredAt")
+create index "wqPrjTransaction_session" on "wqPrjTransaction" ("ownerId", "batchId", "occurredAt")
     where "batchId" is not null;
 
 -- ---------------------------------------------------------------------------------------------
@@ -60,8 +59,7 @@ create index "wqPrjTransaction_session" on "wqPrjTransaction" ("userId", "batchI
 -- dead-lettered. "productId"/"productType" are those of the earliest row.
 create table "wqPrjSession" (
     "sessionId"                bigint        generated always as identity primary key,
-    "ownerType"                smallint      not null,
-    "userId"                   bigint        not null,
+    "ownerId"                  text          not null,
     "batchId"                  text          not null,
     "startedAt"                timestamptz   not null,
     "endedAt"                  timestamptz   not null,
@@ -78,16 +76,15 @@ create table "wqPrjSession" (
     "totalPlaysExclCancelled"  numeric(20,4) not null default 0,
     "totalWinsExclCancelled"   numeric(20,4) not null default 0,
     "netExclCancelled"         numeric(20,4) not null default 0,
-    constraint "wqPrjSession_batchKey" unique ("ownerType", "userId", "batchId")
+    constraint "wqPrjSession_batchKey" unique ("ownerId", "batchId")
 );
 
-create index "wqPrjSession_byStart" on "wqPrjSession" ("userId", "startedAt" desc, "sessionId" desc);
+create index "wqPrjSession_byStart" on "wqPrjSession" ("ownerId", "startedAt" desc, "sessionId" desc);
 
 create table "wqPrjPlay" (
     "playId"                   bigint        generated always as identity primary key,
     "sessionId"                bigint        not null references "wqPrjSession" ("sessionId"),
-    "ownerType"                smallint      not null,
-    "userId"                   bigint        not null,
+    "ownerId"                  text          not null,
     "batchId"                  text          not null,
     "subBatchId"               text          not null,
     "startedAt"                timestamptz   not null,
@@ -103,7 +100,7 @@ create table "wqPrjPlay" (
     "totalPlaysExclCancelled"  numeric(20,4) not null default 0,
     "totalWinsExclCancelled"   numeric(20,4) not null default 0,
     "netExclCancelled"         numeric(20,4) not null default 0,
-    constraint "wqPrjPlay_subBatchKey" unique ("ownerType", "userId", "batchId", "subBatchId")
+    constraint "wqPrjPlay_subBatchKey" unique ("ownerId", "batchId", "subBatchId")
 );
 
 create index "wqPrjPlay_session" on "wqPrjPlay" ("sessionId");

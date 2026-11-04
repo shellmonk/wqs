@@ -69,7 +69,11 @@ class ReadBenchmark {
     static final Instant LAST_MONTH = Instant.parse("2026-10-01T00:00:00Z");
     static final int WARM_RUNS = 5;
 
-    record Owner(long userId, int rows) {}
+    record Owner(long number, int rows) {
+        String ownerId() {
+            return "1-" + number;
+        }
+    }
 
     static final List<Owner> BUSY = List.of(new Owner(900_001, 10_000), new Owner(900_002, 100_000), new Owner(900_003, 1_000_000));
 
@@ -113,15 +117,15 @@ class ReadBenchmark {
         report.append("\n## Query plans for the ").append(busiest.rows()).append("-row owner, 24 months\n");
         explain("Level 0 total", """
                 select count(*) from "wqPrjTransaction"
-                where "userId" = %d and "ownerType" = 1 and "occurredAt" >= '%s' and "occurredAt" < '%s'
+                where "ownerId" = '%s' and "occurredAt" >= '%s' and "occurredAt" < '%s'
                   and "source" in (1, 2, 3, 4, 5) and not "zeroAmount"
-                """.formatted(busiest.userId(), START, END));
+                """.formatted(busiest.ownerId(), START, END));
         explain("Level 0 page 1", """
                 select * from "wqPrjTransaction"
-                where "userId" = %d and "ownerType" = 1 and "occurredAt" >= '%s' and "occurredAt" < '%s'
+                where "ownerId" = '%s' and "occurredAt" >= '%s' and "occurredAt" < '%s'
                   and "source" in (1, 2, 3, 4, 5) and not "zeroAmount"
                 order by "occurredAt" desc, "transactionId" desc limit 50
-                """.formatted(busiest.userId(), START, END));
+                """.formatted(busiest.ownerId(), START, END));
         explain("Levels 1-2 total", "select count(*) from (" + entries(busiest, List.of()) + ") e");
         explain("Levels 1-2 page 1", "select e.\"kind\", e.\"id\" from (" + entries(busiest, List.of())
                 + ") e order by e.\"at\" desc, e.\"kind\" desc, e.\"id\" desc limit 50");
@@ -139,53 +143,54 @@ class ReadBenchmark {
         for (YearMonth m = YearMonth.from(START.atOffset(ZoneOffset.UTC)); m.isBefore(YearMonth.from(END.atOffset(ZoneOffset.UTC))); m = m.plusMonths(1)) {
             partitions.ensure("wqPrjTransaction", m.atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC));
         }
-        jdbc.sql("create temporary table if not exists \"benchOwner\" (\"userId\" bigint, \"rows\" int)").update();
+        jdbc.sql("create temporary table if not exists \"benchOwner\" (\"ownerId\" text, \"n\" bigint, \"rows\" int)").update();
         jdbc.sql("""
-                insert into "benchOwner" select 1000000 + g, 50 from generate_series(1, 40000) g
+                insert into "benchOwner" select '1-' || (1000000 + g), 1000000 + g, 50 from generate_series(1, 40000) g
                 """).update();
         for (Owner o : BUSY) {
-            jdbc.sql("insert into \"benchOwner\" values (:u, :n)").param("u", o.userId()).param("n", o.rows()).update();
+            jdbc.sql("insert into \"benchOwner\" values (:o, :u, :n)").param("o", o.ownerId()).param("u", o.number())
+                    .param("n", o.rows()).update();
         }
         // i counts an owner's rows oldest first; 10 consecutive rows form a group. 7 groups in 10 are
         // sessions (5 plays of a bet and a prize), the rest are rows without a session.
         jdbc.sql("""
-                insert into "wqPrjTransaction" ("ownerType", "userId", "occurredAt", "transactionId", "source", "sourceId",
+                insert into "wqPrjTransaction" ("ownerId", "occurredAt", "transactionId", "source", "sourceId",
                     "type", "amount", "currency", "productId", "productType", "batchId", "subBatchId", "detail")
-                select 1, o."userId",
+                select o."ownerId",
                        timestamptz '2024-11-01 00:00:00+00' + interval '730 days' * ((i + 0.5) / o."rows"),
                        nextval('"wqTransactionIdSeq"'),
                        case when s then 1 when i % 3 = 0 then 4 else 1 end,
-                       o."userId" || '-' || i,
+                       o."n" || '-' || i,
                        case when s then (case when i % 2 = 0 then 'TT_BUY' else 'PRIZE' end)
                             when i % 3 = 0 then 'PT_BUY' else 'TT_TRANSFER_OUT' end,
                        case when s then (case when i % 2 = 0 then -2 when (i / 2) % 2 = 0 then 0 else 5 end) else -10 end,
                        'EUR', 'GAME', case when (i / 10) % 2 = 0 then 'instants' else 'lotto' end,
-                       case when s then 'S-' || o."userId" || '-' || (i / 10) end,
-                       case when s then 'P-' || o."userId" || '-' || (i / 2) end,
+                       case when s then 'S-' || o."n" || '-' || (i / 10) end,
+                       case when s then 'P-' || o."n" || '-' || (i / 2) end,
                        '{}'
                 from "benchOwner" o
                 cross join lateral generate_series(0, o."rows" - 1) i
                 cross join lateral (select (i / 10) % 10 < 7 as s) k
                 """).update();
         jdbc.sql("""
-                insert into "wqPrjSession" ("ownerType", "userId", "batchId", "startedAt", "endedAt", "productId", "productType",
+                insert into "wqPrjSession" ("ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",
                     "currency", "txCount", "playCount", "totalPlays", "totalWins", "net",
                     "txCountExclCancelled", "playCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
-                select "ownerType", "userId", "batchId", "startedAt", "endedAt", "productId", "productType",
+                select "ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",
                        'EUR', n, plays, p, w, w - p, n, plays, p, w, w - p
-                from (select "ownerType", "userId", "batchId", min("occurredAt") as "startedAt", max("occurredAt") as "endedAt",
+                from (select "ownerId", "batchId", min("occurredAt") as "startedAt", max("occurredAt") as "endedAt",
                              min("productId") as "productId", min("productType") as "productType", count(*) as n,
                              count(distinct "subBatchId") as plays,
                              sum(case when "type" = 'TT_BUY' then abs("amount") else 0 end) as p,
                              sum(case when "type" = 'PRIZE' then abs("amount") else 0 end) as w
                       from "wqPrjTransaction" where "batchId" is not null and not "zeroAmount"
-                      group by "ownerType", "userId", "batchId") g
+                      group by "ownerId", "batchId") g
                 """).update();
         jdbc.sql("""
-                insert into "wqPrjPlay" ("sessionId", "ownerType", "userId", "batchId", "subBatchId", "startedAt", "endedAt",
+                insert into "wqPrjPlay" ("sessionId", "ownerId", "batchId", "subBatchId", "startedAt", "endedAt",
                     "productId", "productType", "currency", "txCount", "totalPlays", "totalWins", "net",
                     "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
-                select s."sessionId", t."ownerType", t."userId", t."batchId", t."subBatchId", min(t."occurredAt"), max(t."occurredAt"),
+                select s."sessionId", t."ownerId", t."batchId", t."subBatchId", min(t."occurredAt"), max(t."occurredAt"),
                        min(t."productId"), min(t."productType"), 'EUR', count(*),
                        sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end),
                        sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end),
@@ -195,9 +200,9 @@ class ReadBenchmark {
                        sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end),
                        sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end) - sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end)
                 from "wqPrjTransaction" t
-                join "wqPrjSession" s on s."ownerType" = t."ownerType" and s."userId" = t."userId" and s."batchId" = t."batchId"
+                join "wqPrjSession" s on s."ownerId" = t."ownerId" and s."batchId" = t."batchId"
                 where t."batchId" is not null and not t."zeroAmount"
-                group by s."sessionId", t."ownerType", t."userId", t."batchId", t."subBatchId"
+                group by s."sessionId", t."ownerId", t."batchId", t."subBatchId"
                 """).update();
         jdbc.sql("analyze").update();
     }
@@ -205,7 +210,7 @@ class ReadBenchmark {
     // --- measuring ---
 
     private void run(Owner owner, String name, ProjectionRequest request) {
-        Supplier<ProjectionResponse<?>> call = () -> projections.page(ReadPolicy.CC, owner.userId(), request);
+        Supplier<ProjectionResponse<?>> call = () -> projections.page(ReadPolicy.CC, owner.ownerId(), request);
         long cold = time(call);
         long[] warm = new long[WARM_RUNS];
         ProjectionResponse<?> last = null;
@@ -234,8 +239,7 @@ class ReadBenchmark {
     private static String entries(Owner owner, List<String> types) {
         String typeArray = "'{" + String.join(",", types) + "}'";
         return SessionRepository.ENTRIES
-                .replace(":userId", Long.toString(owner.userId()))
-                .replace(":ownerType", "1")
+                .replace(":ownerId", "'" + owner.ownerId() + "'")
                 .replace(":from", "'" + START + "'")
                 .replace(":to", "'" + END + "'")
                 .replace(":sources", "'{1,2,3,4,5}'")
@@ -256,25 +260,25 @@ class ReadBenchmark {
         report.append("\n## Level-1 page broken down (").append(owner.rows()).append("-row owner, 24 months, page 1 of 50), warm ms\n\n")
                 .append("| step | ms |\n|---|---:|\n");
         for (int warmup = 0; warmup < 3; warmup++) {
-            tx.executeWithoutResult(status -> sessions.countPageEntries(owner.userId(), (short) 1, START, END, sources, false, true, none, true, none));
+            tx.executeWithoutResult(status -> sessions.countPageEntries(owner.ownerId(), START, END, sources, false, true, none, true, none));
         }
         tx.executeWithoutResult(status -> {
             long t0 = System.nanoTime();
-            sessions.countPageEntries(owner.userId(), (short) 1, START, END, sources, false, true, none, true, none);
+            sessions.countPageEntries(owner.ownerId(), START, END, sources, false, true, none, true, none);
             long t1 = System.nanoTime();
-            var entries = sessions.findPageEntries(owner.userId(), (short) 1, START, END, sources, false, true, none, true, none, 50, 0);
+            var entries = sessions.findPageEntries(owner.ownerId(), START, END, sources, false, true, none, true, none, 50, 0);
             long t2 = System.nanoTime();
             List<Long> ids = entries.stream().filter(e -> e.getKind() == 0).map(SessionRepository.PageEntry::getId).toList();
             List<SessionEntity> found = sessions.findAllById(ids);
             long t3 = System.nanoTime();
             Instant from = found.stream().map(SessionEntity::getStartedAt).min(Instant::compareTo).orElse(START);
             Instant to = found.stream().map(SessionEntity::getEndedAt).max(Instant::compareTo).orElse(END);
-            int rows = transactions.findSessionRows(owner.userId(), (short) 1, found.stream().map(SessionEntity::getBatchId).toList(),
+            int rows = transactions.findSessionRows(owner.ownerId(), found.stream().map(SessionEntity::getBatchId).toList(),
                     from, to, List.of((short) 1, (short) 2, (short) 3, (short) 4, (short) 5), true).size();
             long t4 = System.nanoTime();
             var txEntries = entries.stream().filter(e -> e.getKind() == 1).toList();
             List<Long> txIds = txEntries.stream().map(SessionRepository.PageEntry::getId).toList();
-            transactions.findByIds(owner.userId(), txIds,
+            transactions.findByIds(owner.ownerId(), txIds,
                     txEntries.stream().map(SessionRepository.PageEntry::getAt).min(Instant::compareTo).orElse(START),
                     txEntries.stream().map(SessionRepository.PageEntry::getAt).max(Instant::compareTo).orElse(END));
             long t5 = System.nanoTime();

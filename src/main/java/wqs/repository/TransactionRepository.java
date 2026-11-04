@@ -27,16 +27,16 @@ public interface TransactionRepository
     @Modifying
     @Query(nativeQuery = true, value = """
             insert into "wqPrjTransaction" (
-                "ownerType", "userId", "occurredAt", "transactionId", "source", "sourceId", "type",
+                "ownerId", "occurredAt", "transactionId", "source", "sourceId", "type",
                 "amount", "currency", "balanceAfter", "productId", "productType", "batchId", "subBatchId",
                 "transactionReference", "detail")
             values (
-                :ownerType, :userId, :occurredAt, nextval('"wqTransactionIdSeq"'), :source, :sourceId, :type,
+                :ownerId, :occurredAt, nextval('"wqTransactionIdSeq"'), :source, :sourceId, :type,
                 :amount, :currency, :balanceAfter, :productId, :productType, :batchId, :subBatchId,
                 :transactionReference, cast(:detail as jsonb))
             on conflict ("source", "sourceId", "occurredAt") do nothing
             """)
-    int insertIfAbsent(@Param("ownerType") short ownerType, @Param("userId") long userId,
+    int insertIfAbsent(@Param("ownerId") String ownerId,
                        @Param("occurredAt") Instant occurredAt, @Param("source") short source,
                        @Param("sourceId") String sourceId, @Param("type") String type,
                        @Param("amount") BigDecimal amount, @Param("currency") String currency,
@@ -52,13 +52,13 @@ public interface TransactionRepository
      */
     @Query("""
             select t from TransactionEntity t
-            where t.userId = :userId and t.ownerType = :ownerType and t.batchId in :batchIds
+            where t.ownerId = :ownerId and t.batchId in :batchIds
               and t.occurredAt >= :from and t.occurredAt <= :to
               and t.source in :sources and t.zeroAmount = false
               and (:includeCancelled = true or t.cancelled = false)
             order by t.occurredAt desc, t.transactionId desc
             """)
-    List<TransactionEntity> findSessionRows(@Param("userId") long userId, @Param("ownerType") short ownerType,
+    List<TransactionEntity> findSessionRows(@Param("ownerId") String ownerId,
                                             @Param("batchIds") Collection<String> batchIds,
                                             @Param("from") Instant from, @Param("to") Instant to,
                                             @Param("sources") Collection<Short> sources,
@@ -66,12 +66,12 @@ public interface TransactionRepository
 
     /**
      * Rows by id. {@code from}/{@code to} (inclusive) must span the rows' own times: the primary key
-     * leads with ("userId", "occurredAt"), so a tight span reads only those rows, not the owner's history.
+     * leads with ("ownerId", "occurredAt"), so a tight span reads only those rows, not the owner's history.
      */
     @Query("""
             select t from TransactionEntity t
-            where t.userId = :userId and t.transactionId in :ids and t.occurredAt >= :from and t.occurredAt <= :to
+            where t.ownerId = :ownerId and t.transactionId in :ids and t.occurredAt >= :from and t.occurredAt <= :to
             """)
-    List<TransactionEntity> findByIds(@Param("userId") long userId, @Param("ids") Collection<Long> ids,
+    List<TransactionEntity> findByIds(@Param("ownerId") String ownerId, @Param("ids") Collection<Long> ids,
                                       @Param("from") Instant from, @Param("to") Instant to);
 }

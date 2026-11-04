@@ -25,11 +25,10 @@ import org.hibernate.type.SqlTypes;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class TransactionEntity {
 
-    @Id private Long userId;
+    @Id private String ownerId;
     @Id private Instant occurredAt;
     @Id private Long transactionId;
 
-    private short ownerType;
     private short source;
     private String sourceId;
     private String type;

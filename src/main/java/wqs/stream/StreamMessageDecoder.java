@@ -17,6 +17,7 @@ import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 import wqs.dto.StreamMessage;
 import wqs.exception.DecodeException;
+import wqs.util.OwnerIds;
 
 /**
  * Reads a {@code walAccountTransactions} message strictly (format: docs/reference/stream-message-samples.md).
@@ -33,7 +34,6 @@ public class StreamMessageDecoder {
             "createdContext.issued", "createdContext.channel", "batchContext.batchEnded",
             "amount.reservedAmount", "amount.nonWithdrawableAmount");
 
-    private static final Pattern OWNER_ID = Pattern.compile("(\\d{1,4})-(\\d{1,18})");
     private static final Pattern CURRENCY = Pattern.compile("[A-Z]{3}");
     /** Matches the column type numeric(20,4). */
     private static final int MONEY_SCALE = 4;
@@ -65,14 +65,8 @@ public class StreamMessageDecoder {
         JsonNode batchContext = object(root, "batchContext", false);
         JsonNode references = object(root, "references", false);
 
-        var owner = OWNER_ID.matcher(requiredText(userContext, "userContext.ownerId"));
-        if (!owner.matches()) {
-            throw new DecodeException("userContext.ownerId must be \"{ownerType}-{userId}\"");
-        }
-        int ownerType = Integer.parseInt(owner.group(1));
-        if (ownerType > Short.MAX_VALUE) {
-            throw new DecodeException("userContext.ownerId owner type out of range");
-        }
+        String ownerId = OwnerIds.canonical(requiredText(userContext, "userContext.ownerId"))
+                .orElseThrow(() -> new DecodeException("userContext.ownerId must be \"{type}-{id}\""));
 
         String currency = requiredText(amount, "amount.currency");
         if (!CURRENCY.matcher(currency).matches()) {
@@ -81,8 +75,7 @@ public class StreamMessageDecoder {
 
         return new StreamMessage(
                 requiredText(root, "id"),
-                (short) ownerType,
-                Long.parseLong(owner.group(2)),
+                ownerId,
                 instant(createdContext, "createdContext.created"),
                 requiredText(root, "type"),
                 money(amount.get("amount"), "amount.amount", true),

@@ -8,14 +8,13 @@ import java.util.Map;
  * A decoded {@code walAccountTransactions} message. Only the fields WQS uses are kept; the rest of
  * the wire message is dropped. Empty strings on the wire are {@code null} here.
  *
- * <p>The owner comes from {@code userContext.ownerId} = {@code "{ownerType}-{userId}"}.
+ * <p>{@code ownerId} is {@code userContext.ownerId} ({@code "{type}-{id}"}) in its canonical spelling.
  * {@code detail} holds only allowlisted fields, under dotted keys such as
  * {@code accountContext.accountType}.
  */
 public record StreamMessage(
         String id,
-        short ownerType,
-        long userId,
+        String ownerId,
         Instant created,
         String type,
         BigDecimal amount,

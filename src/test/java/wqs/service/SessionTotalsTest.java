@@ -28,7 +28,8 @@ class SessionTotalsTest extends IntegrationTest {
     @Autowired TransactionTemplate tx;
     @Autowired JdbcClient jdbc;
 
-    private final long user = IDS.incrementAndGet();
+    private final long number = IDS.incrementAndGet();
+    private final String owner = "1-" + number;
     private final String batch = "GS-" + UUID.randomUUID();
 
     @Test
@@ -58,8 +59,8 @@ class SessionTotalsTest extends IntegrationTest {
     @Test
     void a_zero_amount_row_is_stored_but_adds_nothing() {
         ingest(row("PRIZE", "0", "2026-10-26T11:00:00Z", "P1"));
-        assertThat(count("select count(*) from \"wqPrjSession\" where \"userId\" = :user")).isZero();
-        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"userId\" = :user and \"zeroAmount\"")).isEqualTo(1);
+        assertThat(count("select count(*) from \"wqPrjSession\" where \"ownerId\" = :owner")).isZero();
+        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"ownerId\" = :owner and \"zeroAmount\"")).isEqualTo(1);
 
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"));
         ingest(row("PRIZE", "0", "2026-10-26T10:00:00Z", "P1")); // earlier, but does not move the start
@@ -105,15 +106,16 @@ class SessionTotalsTest extends IntegrationTest {
         ingest(row("TT_BUY", "-3", "2026-10-26T11:00:00Z", null));
 
         assertThat(session()).containsEntry("txCount", 1).containsEntry("playCount", 0);
-        assertThat(count("select count(*) from \"wqPrjPlay\" where \"userId\" = :user")).isZero();
+        assertThat(count("select count(*) from \"wqPrjPlay\" where \"ownerId\" = :owner")).isZero();
     }
 
     @Test
-    void the_same_batch_id_under_two_owner_types_is_two_sessions() {
+    void the_same_batch_id_under_two_owners_is_two_sessions() {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
-        ingest(withOwnerType(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"), (short) 2));
+        ingest(withOwner(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"), "2-" + number));
 
-        assertThat(count("select count(*) from \"wqPrjSession\" where \"userId\" = :user")).isEqualTo(2);
+        assertThat(jdbc.sql("select count(*) from \"wqPrjSession\" where \"ownerId\" in (:a, :b) and \"batchId\" = :batch")
+                .param("a", owner).param("b", "2-" + number).param("batch", batch).query(Long.class).single()).isEqualTo(2);
     }
 
     @Test
@@ -124,7 +126,7 @@ class SessionTotalsTest extends IntegrationTest {
         assertThatThrownBy(() -> ingest(usd))
                 .isInstanceOf(RejectedException.class)
                 .satisfies(e -> assertThat(((RejectedException) e).reason()).isEqualTo("currency-mismatch"));
-        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"userId\" = :user")).isEqualTo(1);
+        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"ownerId\" = :owner")).isEqualTo(1);
         assertThat(session()).containsEntry("txCount", 1);
     }
 
@@ -135,7 +137,7 @@ class SessionTotalsTest extends IntegrationTest {
         assertThatThrownBy(() -> ingest(payment))
                 .isInstanceOf(RejectedException.class)
                 .satisfies(e -> assertThat(((RejectedException) e).reason()).isEqualTo("batch-on-unbatched-source"));
-        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"userId\" = :user")).isZero();
+        assertThat(count("select count(*) from \"wqPrjTransaction\" where \"ownerId\" = :owner")).isZero();
     }
 
     // --- helpers ---
@@ -149,40 +151,40 @@ class SessionTotalsTest extends IntegrationTest {
     }
 
     private IncomingTransaction row(String type, String amount, String at, String subBatch, String productId) {
-        return new IncomingTransaction((short) 1, user, Instant.parse(at), Source.TRANSACTION, UUID.randomUUID().toString(),
+        return new IncomingTransaction(owner, Instant.parse(at), Source.TRANSACTION, UUID.randomUUID().toString(),
                 type, new BigDecimal(amount), "EUR", null, productId, "instants", batch, subBatch, null, Map.of());
     }
 
-    private static IncomingTransaction withOwnerType(IncomingTransaction t, short ownerType) {
-        return new IncomingTransaction(ownerType, t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
+    private static IncomingTransaction withOwner(IncomingTransaction t, String ownerId) {
+        return new IncomingTransaction(ownerId, t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
     private static IncomingTransaction withCurrency(IncomingTransaction t, String currency) {
-        return new IncomingTransaction(t.ownerType(), t.userId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
+        return new IncomingTransaction(t.ownerId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
                 currency, t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
     private static IncomingTransaction withSource(IncomingTransaction t, Source source) {
-        return new IncomingTransaction(t.ownerType(), t.userId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
+        return new IncomingTransaction(t.ownerId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
                 t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
                 t.transactionReference(), t.detail());
     }
 
     private Map<String, Object> session() {
-        return jdbc.sql("select * from \"wqPrjSession\" where \"ownerType\" = 1 and \"userId\" = :user and \"batchId\" = :batch")
-                .param("user", user).param("batch", batch).query().singleRow();
+        return jdbc.sql("select * from \"wqPrjSession\" where \"ownerId\" = :owner and \"batchId\" = :batch")
+                .param("owner", owner).param("batch", batch).query().singleRow();
     }
 
     private Map<String, Object> play(String subBatch) {
-        return jdbc.sql("select * from \"wqPrjPlay\" where \"ownerType\" = 1 and \"userId\" = :user and \"batchId\" = :batch and \"subBatchId\" = :sub")
-                .param("user", user).param("batch", batch).param("sub", subBatch).query().singleRow();
+        return jdbc.sql("select * from \"wqPrjPlay\" where \"ownerId\" = :owner and \"batchId\" = :batch and \"subBatchId\" = :sub")
+                .param("owner", owner).param("batch", batch).param("sub", subBatch).query().singleRow();
     }
 
     private long count(String sql) {
-        return jdbc.sql(sql).param("user", user).query(Long.class).single();
+        return jdbc.sql(sql).param("owner", owner).query(Long.class).single();
     }
 
     /** JDBC returns timestamptz as a java.sql.Timestamp in the JVM's zone; compare instants. */

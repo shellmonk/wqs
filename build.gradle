@@ -71,12 +71,12 @@ tasks.register('benchmark', Test) {
 }
 
 // Publishes generated wallet messages to the local stream (docker compose):
-//   ./gradlew publishSamples [-Pcount=200] [-Pplayer=1717]
+//   ./gradlew publishSamples [-Pcount=200] [-Powner=1-1717]
 tasks.register('publishSamples', JavaExec) {
     description = 'Publishes sample walAccountTransactions messages to the local RabbitMQ stream.'
     group = 'application'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'wqs.tools.PublishSamples'
-    args = [project.findProperty('count') ?: '200', project.findProperty('player') ?: '1717',
+    args = [project.findProperty('count') ?: '200', project.findProperty('owner') ?: '1-1717',
             project.findProperty('streamUri') ?: 'rabbitmq-stream://localhost:5552']
 }

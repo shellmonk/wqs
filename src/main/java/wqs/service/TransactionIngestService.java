@@ -47,7 +47,7 @@ public class TransactionIngestService {
             throw new RejectedException("sub-batch-without-batch", "a sub-batch id needs a batch id");
         }
         partitions.ensure(TransactionRepository.TABLE, t.occurredAt());
-        int inserted = transactions.insertIfAbsent(t.ownerType(), t.userId(), t.occurredAt(), t.source().code(),
+        int inserted = transactions.insertIfAbsent(t.ownerId(), t.occurredAt(), t.source().code(),
                 t.sourceId(), t.type(), t.amount(), t.currency(), t.balanceAfter(), t.productId(), t.productType(),
                 t.batchId(), t.subBatchId(), t.transactionReference(), json(t));
         if (inserted == 0) {
@@ -60,13 +60,13 @@ public class TransactionIngestService {
     }
 
     private void addToSessionAndPlay(TotalsIncrement c) {
-        long sessionId = sessions.addRow(c.ownerType(), c.userId(), c.batchId(), c.occurredAt(), c.productId(),
+        long sessionId = sessions.addRow(c.ownerId(), c.batchId(), c.occurredAt(), c.productId(),
                         c.productType(), c.currency(), c.plays(), c.wins(), c.net())
                 .orElseThrow(() -> currencyMismatch("session"));
         if (c.subBatchId() == null) {
             return;
         }
-        PlayRepository.Added play = plays.addRow(sessionId, c.ownerType(), c.userId(), c.batchId(), c.subBatchId(),
+        PlayRepository.Added play = plays.addRow(sessionId, c.ownerId(), c.batchId(), c.subBatchId(),
                         c.occurredAt(), c.productId(), c.productType(), c.currency(), c.plays(), c.wins(), c.net())
                 .orElseThrow(() -> currencyMismatch("play"));
         if (play.getCreated()) {

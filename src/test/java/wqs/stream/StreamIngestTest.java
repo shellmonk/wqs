@@ -59,13 +59,12 @@ class StreamIngestTest extends IntegrationTest {
 
         awaitRow(id2);
         Map<String, Object> row = jdbc.sql("""
-                select "ownerType", "userId", "occurredAt", "source", "type", "amount", "currency", "balanceAfter",
+                select "ownerId", "occurredAt", "source", "type", "amount", "currency", "balanceAfter",
                        "productId", "productType", "batchId", "subBatchId", "transactionReference", "detail"::text as "detail"
                 from "wqPrjTransaction" where "sourceId" = :id
                 """).param("id", id2).query().singleRow();
         // JDBC returns smallint as Integer.
-        assertThat(row).containsEntry("ownerType", 1)
-                .containsEntry("userId", Long.parseLong(id2))
+        assertThat(row).containsEntry("ownerId", "1-" + id2)
                 .containsEntry("source", 1)
                 .containsEntry("type", "PRIZE")
                 .containsEntry("currency", "EUR")
@@ -96,15 +95,15 @@ class StreamIngestTest extends IntegrationTest {
     }
 
     @Test
-    void the_same_user_id_under_two_owner_types_is_two_owners() throws Exception {
+    void the_same_number_under_two_owner_types_is_two_owners() throws Exception {
         String player = nextId(), retailer = nextId();
         publish(message("transfer-out.json", player, "1-777", "2026-09-02T00:00:00Z"));
         publish(message("transfer-out.json", retailer, "2-777", "2026-09-02T00:00:00Z"));
 
         awaitRow(retailer);
-        assertThat(jdbc.sql("select \"ownerType\" from \"wqPrjTransaction\" where \"sourceId\" in (:a, :b) order by \"ownerType\"")
-                .param("a", player).param("b", retailer).query(Integer.class).list())
-                .containsExactly(1, 2);
+        assertThat(jdbc.sql("select \"ownerId\" from \"wqPrjTransaction\" where \"sourceId\" in (:a, :b) order by \"ownerId\"")
+                .param("a", player).param("b", retailer).query(String.class).list())
+                .containsExactly("1-777", "2-777");
     }
 
     @Test
@@ -166,8 +165,8 @@ class StreamIngestTest extends IntegrationTest {
         assertThat(rows(usd)).isZero();
         assertThat(jdbc.sql("select \"reason\" from \"wqDeadLetter\" where \"sourceId\" = :id")
                 .param("id", usd).query(String.class).single()).isEqualTo("currency-mismatch");
-        assertThat(jdbc.sql("select \"txCount\" from \"wqPrjSession\" where \"userId\" = :user")
-                .param("user", Long.parseLong(first)).query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc.sql("select \"txCount\" from \"wqPrjSession\" where \"ownerId\" = :owner")
+                .param("owner", "1-" + first).query(Integer.class).single()).isEqualTo(1);
     }
 
     @Test

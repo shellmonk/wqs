@@ -18,8 +18,8 @@ class ClosedByDefaultTest {
     @Test
     void web_ignores_the_player_header_by_default() {
         MockHttpServletRequest request = new MockHttpServletRequest();
-        request.addHeader(HeaderPlayerIdResolver.HEADER, "1717");
-        assertThatThrownBy(() -> new HeaderPlayerIdResolver(defaults).playerId(request))
+        request.addHeader(HeaderOwnerIdResolver.HEADER, "1-1717");
+        assertThatThrownBy(() -> new HeaderOwnerIdResolver(defaults).ownerId(request))
                 .isInstanceOf(UnauthenticatedException.class);
     }
 

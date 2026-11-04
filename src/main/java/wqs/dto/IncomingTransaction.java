@@ -6,8 +6,7 @@ import java.util.Map;
 
 /** A transaction arriving from a feed, before it is stored in {@code "wqPrjTransaction"}; either feed maps to it. */
 public record IncomingTransaction(
-        short ownerType,
-        long userId,
+        String ownerId,
         Instant occurredAt,
         Source source,
         String sourceId,

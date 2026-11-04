@@ -8,8 +8,7 @@ import java.time.Instant;
  * amount to the played or won total according to its type's {@link MoneyDirection}.
  */
 public record TotalsIncrement(
-        short ownerType,
-        long userId,
+        String ownerId,
         String batchId,
         String subBatchId,
         Instant occurredAt,
@@ -26,7 +25,7 @@ public record TotalsIncrement(
     public static TotalsIncrement of(IncomingTransaction t) {
         MoneyDirection direction = TransactionType.directionOf(t.type());
         BigDecimal amount = t.amount().abs();
-        return new TotalsIncrement(t.ownerType(), t.userId(), t.batchId(), t.subBatchId(), t.occurredAt(),
+        return new TotalsIncrement(t.ownerId(), t.batchId(), t.subBatchId(), t.occurredAt(),
                 t.productId(), t.productType(), t.currency(),
                 direction == MoneyDirection.PLAY ? amount : BigDecimal.ZERO,
                 direction == MoneyDirection.WIN ? amount : BigDecimal.ZERO);

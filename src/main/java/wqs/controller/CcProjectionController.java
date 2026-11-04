@@ -12,11 +12,12 @@ import wqs.config.ApiAccessProperties;
 import wqs.dto.ProjectionResponse;
 import wqs.dto.ReadPolicy;
 import wqs.exception.AccessDeniedException;
-import wqs.security.PlayerIds;
+import wqs.exception.InvalidParameterException;
+import wqs.util.OwnerIds;
 import wqs.service.ProjectionService;
 
 /**
- * Customer care: any player's projection, every source. Authentication is not in place yet, so it
+ * Customer care: any owner's projection, every source. Authentication is not in place yet, so it
  * is off unless {@code wqs.api.cc-enabled=true}: then every request is 403.
  */
 @Tag(name = "Customer care")
@@ -32,15 +33,17 @@ public class CcProjectionController {
         this.access = access;
     }
 
-    @Operation(summary = "A player's projection, every source",
+    @Operation(summary = "An owner's projection, every source",
             description = "Transactions, claimable prizes, payments, manual adjustments and limits. 403 while wqs.api.cc-enabled is off.")
-    @GetMapping("/{playerId}")
+    @GetMapping("/{ownerId}")
     public ProjectionResponse<?> projection(
-            @Parameter(description = "The player's id.", example = "1717") @PathVariable String playerId,
+            @Parameter(description = "The owner's id, \"{type}-{id}\".", example = "1-1717") @PathVariable String ownerId,
             @ParameterObject ProjectionParameters parameters) {
         if (!access.ccEnabled()) {
             throw new AccessDeniedException("/cc is switched off");
         }
-        return projections.page(ReadPolicy.CC, PlayerIds.parse(playerId), parameters.toRequest());
+        String owner = OwnerIds.canonical(ownerId)
+                .orElseThrow(() -> new InvalidParameterException("ownerId", "must be \"{type}-{id}\""));
+        return projections.page(ReadPolicy.CC, owner, parameters.toRequest());
     }
 }

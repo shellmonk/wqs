@@ -22,7 +22,7 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
 
     List<PlayEntity> findBySessionIdInOrderByStartedAtDescPlayIdDesc(Collection<Long> sessionIds);
 
-    Optional<PlayEntity> findByOwnerTypeAndUserIdAndBatchIdAndSubBatchId(short ownerType, long userId,
+    Optional<PlayEntity> findByOwnerIdAndBatchIdAndSubBatchId(String ownerId,
                                                                          String batchId, String subBatchId);
 
     /**
@@ -32,16 +32,16 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
      */
     @Query(nativeQuery = true, value = """
             insert into "wqPrjPlay" as p (
-                "sessionId", "ownerType", "userId", "batchId", "subBatchId", "startedAt", "endedAt",
+                "sessionId", "ownerId", "batchId", "subBatchId", "startedAt", "endedAt",
                 "productId", "productType", "currency",
                 "txCount", "totalPlays", "totalWins", "net",
                 "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
             values (
-                :sessionId, :ownerType, :userId, :batchId, :subBatchId, :at, :at,
+                :sessionId, :ownerId, :batchId, :subBatchId, :at, :at,
                 :productId, :productType, :currency,
                 1, :plays, :wins, :net,
                 1, :plays, :wins, :net)
-            on conflict ("ownerType", "userId", "batchId", "subBatchId") do update set
+            on conflict ("ownerId", "batchId", "subBatchId") do update set
                 "startedAt"   = least(p."startedAt", excluded."startedAt"),
                 "endedAt"     = greatest(p."endedAt", excluded."endedAt"),
                 "productId"   = case when excluded."startedAt" < p."startedAt" then excluded."productId" else p."productId" end,
@@ -57,8 +57,7 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
             where p."currency" = excluded."currency"
             returning "playId" as "playId", (xmax = 0) as "created"
             """)
-    Optional<Added> addRow(@Param("sessionId") long sessionId, @Param("ownerType") short ownerType,
-                           @Param("userId") long userId, @Param("batchId") String batchId,
+    Optional<Added> addRow(@Param("sessionId") long sessionId, @Param("ownerId") String ownerId, @Param("batchId") String batchId,
                            @Param("subBatchId") String subBatchId, @Param("at") Instant at,
                            @Param("productId") String productId, @Param("productType") String productType,
                            @Param("currency") String currency, @Param("plays") BigDecimal plays,

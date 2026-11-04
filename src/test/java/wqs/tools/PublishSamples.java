@@ -12,17 +12,17 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Publishes generated walAccountTransactions messages for one player to the local stream, shaped
+ * Publishes generated walAccountTransactions messages for one owner to the local stream, shaped
  * like docs/reference/stream-message-samples.md: instants sessions of a bet and a prize per play,
  * plus transfers without a session, spread over the last 30 days.
  *
- * <p>{@code ./gradlew publishSamples [-Pcount=200] [-Pplayer=1717]}
+ * <p>{@code ./gradlew publishSamples [-Pcount=200] [-Powner=1-1717]}
  */
 public final class PublishSamples {
 
     public static void main(String[] args) throws Exception {
         int count = Integer.parseInt(args[0]);
-        long player = Long.parseLong(args[1]);
+        String owner = args[1];
         String uri = args[2];
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode transfer = (ObjectNode) mapper.readTree(fixture("transfer-out.json"));
@@ -43,7 +43,7 @@ public final class PublishSamples {
                     boolean sessioned = (i / 10) % 10 < 7;
                     ObjectNode m = (sessioned ? prize : transfer).deepCopy();
                     m.put("id", run + "-" + i);
-                    ((ObjectNode) m.get("userContext")).put("ownerId", "1-" + player).put("issuerId", "1-" + player);
+                    ((ObjectNode) m.get("userContext")).put("ownerId", owner).put("issuerId", owner);
                     ((ObjectNode) m.get("createdContext")).put("created", start.plusSeconds(i * step).toString());
                     if (sessioned) {
                         boolean bet = i % 2 == 0;
@@ -61,7 +61,7 @@ public final class PublishSamples {
                 }
             }
         }
-        System.out.printf("Published %d messages for player %d (run %s).%n", count, player, run);
+        System.out.printf("Published %d messages for owner %s (run %s).%n", count, owner, run);
     }
 
     private static byte[] fixture(String name) throws Exception {

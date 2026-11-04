@@ -22,15 +22,15 @@ Testcontainers. One Gradle build file (Groovy DSL).
 colima start                                           # or any Docker engine
 ./gradlew bootJar
 docker compose --profile app up -d --build             # Postgres, RabbitMQ (streams) and the app on :8080
-./gradlew publishSamples -Pcount=200 -Pplayer=1717     # push sample wallet messages onto the stream
+./gradlew publishSamples -Pcount=200 -Powner=1-1717    # push sample wallet messages onto the stream
 ```
 
 Then:
 
 ```bash
 FROM=$(date -u -v-31d +%Y-%m-%dT%H:%M:%SZ); TO=$(date -u -v+1d +%Y-%m-%dT%H:%M:%SZ)
-curl "localhost:8080/cc/wallet-data/rest/v1/projection/1717?from=$FROM&to=$TO&aggregationLevel=1"
-curl -H 'X-Player-Id: 1717' "localhost:8080/web/wallet-data/rest/v1/projection?from=$FROM&to=$TO"
+curl "localhost:8080/cc/wallet-data/rest/v1/projection/1-1717?from=$FROM&to=$TO&aggregationLevel=1"
+curl -H 'X-Owner-Id: 1-1717' "localhost:8080/web/wallet-data/rest/v1/projection?from=$FROM&to=$TO"
 ```
 
 - API docs: http://localhost:8080/swagger-ui.html (OpenAPI at `/v3/api-docs`).
@@ -40,7 +40,7 @@ curl -H 'X-Player-Id: 1717' "localhost:8080/web/wallet-data/rest/v1/projection?f
 
 **No authentication yet.** Both endpoints are closed by default: `/cc` answers 403 unless
 `wqs.api.cc-enabled=true`, `/web` answers 401 unless `wqs.api.web-player-header=true` (it then
-trusts an `X-Player-Id` header that any caller can set). The compose app turns both on: local use only.
+trusts an `X-Owner-Id` header that any caller can set). The compose app turns both on: local use only.
 
 The stream consumer is off by default. `WQS_STREAM_ENABLED=true` may be set on every replica: a
 Postgres advisory lock lets one consume and the rest stand by (see `docs/operations.md`). When the broker advertises an address the app cannot reach (a load
@@ -64,7 +64,10 @@ The test broker binds a free host port picked per run, so it never clashes with 
 
 ## Conventions
 
-- Database identifiers are camelCase and always double-quoted in SQL (`"userId"`).
+- Database identifiers are camelCase and always double-quoted in SQL (`"ownerId"`).
+- An owner is identified by the wallet's `ownerId`, `"{type}-{id}"` (e.g. `1-1717`), everywhere: in
+  storage, in `/cc/.../projection/{ownerId}` and in the `/web` identity. The type has no meaning of
+  its own; `wqs.util.OwnerIds` gives each owner one canonical spelling.
 - Every value is bound as a parameter; nothing is concatenated into SQL.
 - Spring layering: `config`, `dto`, `entity`, `exception`, `mapper`, `repository` (one Spring Data
   JPA repository per table), `service`, `stream`, `util`.

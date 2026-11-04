@@ -11,13 +11,13 @@ import java.util.Set;
  * shows can carry a batch ({@link Source#carriesBatch()}, enforced at ingest). A policy that hides
  * TRANSACTION or CLAIMABLE_PRIZE would need session totals computed from its visible rows.
  */
-public record ReadPolicy(Set<Source> sources, short ownerType) {
+public record ReadPolicy(Set<Source> sources) {
 
     /** Players' own view: transactions and claimable prizes. */
-    public static final ReadPolicy WEB = new ReadPolicy(EnumSet.of(Source.TRANSACTION, Source.CLAIMABLE_PRIZE), (short) 1);
+    public static final ReadPolicy WEB = new ReadPolicy(EnumSet.of(Source.TRANSACTION, Source.CLAIMABLE_PRIZE));
 
     /** Customer care: every source. */
-    public static final ReadPolicy CC = new ReadPolicy(EnumSet.allOf(Source.class), (short) 1);
+    public static final ReadPolicy CC = new ReadPolicy(EnumSet.allOf(Source.class));
 
     public ReadPolicy {
         sources = Set.copyOf(sources);

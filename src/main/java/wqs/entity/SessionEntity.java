@@ -28,8 +28,7 @@ public class SessionEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long sessionId;
 
-    private short ownerType;
-    private long userId;
+    private String ownerId;
     private String batchId;
     private Instant startedAt;
     private Instant endedAt;

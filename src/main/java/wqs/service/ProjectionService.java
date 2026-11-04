@@ -56,16 +56,16 @@ public class ProjectionService {
     }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
-    public ProjectionResponse<?> page(ReadPolicy policy, long userId, ProjectionRequest request) {
+    public ProjectionResponse<?> page(ReadPolicy policy, String ownerId, ProjectionRequest request) {
         return request.level() == AggregationLevel.TRANSACTIONS
-                ? transactions(policy, userId, request)
-                : entries(policy, userId, request);
+                ? transactions(policy, ownerId, request)
+                : entries(policy, ownerId, request);
     }
 
     // --- level 0 ---
 
-    private ProjectionResponse<TxView> transactions(ReadPolicy policy, long userId, ProjectionRequest r) {
-        Specification<TransactionEntity> spec = TransactionSpecifications.visibleTo(policy, userId, r.from(), r.to());
+    private ProjectionResponse<TxView> transactions(ReadPolicy policy, String ownerId, ProjectionRequest r) {
+        Specification<TransactionEntity> spec = TransactionSpecifications.visibleTo(policy, ownerId, r.from(), r.to());
         if (r.excludeCancelled()) {
             spec = spec.and(TransactionSpecifications.notCancelled());
         }
@@ -81,19 +81,19 @@ public class ProjectionService {
 
     // --- levels 1 and 2 ---
 
-    private ProjectionResponse<HighLevelEntry> entries(ReadPolicy policy, long userId, ProjectionRequest r) {
+    private ProjectionResponse<HighLevelEntry> entries(ReadPolicy policy, String ownerId, ProjectionRequest r) {
         String[] productTypes = r.productTypes().toArray(NONE);
         String[] types = r.transactionTypes().toArray(NONE);
-        long total = sessions.countPageEntries(userId, policy.ownerType(), r.from(), r.to(), policy.sourceCodes(),
+        long total = sessions.countPageEntries(ownerId, r.from(), r.to(), policy.sourceCodes(),
                 r.excludeCancelled(), productTypes.length == 0, productTypes, types.length == 0, types);
         List<PageEntry> entries = total <= r.offset() ? List.of()
-                : sessions.findPageEntries(userId, policy.ownerType(), r.from(), r.to(), policy.sourceCodes(),
+                : sessions.findPageEntries(ownerId, r.from(), r.to(), policy.sourceCodes(),
                         r.excludeCancelled(), productTypes.length == 0, productTypes, types.length == 0, types,
                         r.pageSize(), r.offset());
 
         List<Long> sessionIds = ids(entries, 0);
-        Map<Long, SessionView> sessionViews = sessionViews(policy, userId, sessionIds, r);
-        Map<Long, TxView> transactionViews = transactionViews(userId, entries);
+        Map<Long, SessionView> sessionViews = sessionViews(policy, ownerId, sessionIds, r);
+        Map<Long, TxView> transactionViews = transactionViews(ownerId, entries);
 
         List<HighLevelEntry> data = entries.stream()
                 .map(e -> e.getKind() == 0 ? (HighLevelEntry) sessionViews.get(e.getId()) : transactionViews.get(e.getId()))
@@ -103,19 +103,19 @@ public class ProjectionService {
     }
 
     /** The page's transactions without a session, looked up within the page's own time span. */
-    private Map<Long, TxView> transactionViews(long userId, List<PageEntry> entries) {
+    private Map<Long, TxView> transactionViews(String ownerId, List<PageEntry> entries) {
         List<PageEntry> rows = entries.stream().filter(e -> e.getKind() == 1).toList();
         if (rows.isEmpty()) {
             return Map.of();
         }
         Instant from = rows.stream().map(PageEntry::getAt).min(Comparator.naturalOrder()).orElseThrow();
         Instant to = rows.stream().map(PageEntry::getAt).max(Comparator.naturalOrder()).orElseThrow();
-        return transactions.findByIds(userId, rows.stream().map(PageEntry::getId).toList(), from, to).stream()
+        return transactions.findByIds(ownerId, rows.stream().map(PageEntry::getId).toList(), from, to).stream()
                 .collect(Collectors.toMap(TransactionEntity::getTransactionId, mapper::toView));
     }
 
     /** The page's sessions with their transactions (level 1), or their plays and transactions (level 2). */
-    private Map<Long, SessionView> sessionViews(ReadPolicy policy, long userId, List<Long> ids, ProjectionRequest r) {
+    private Map<Long, SessionView> sessionViews(ReadPolicy policy, String ownerId, List<Long> ids, ProjectionRequest r) {
         if (ids.isEmpty()) {
             return Map.of();
         }
@@ -123,7 +123,7 @@ public class ProjectionService {
         Instant from = found.stream().map(SessionEntity::getStartedAt).min(Comparator.naturalOrder()).orElseThrow();
         Instant to = found.stream().map(SessionEntity::getEndedAt).max(Comparator.naturalOrder()).orElseThrow();
         List<Short> sources = policy.sources().stream().map(s -> s.code()).toList();
-        Map<String, List<TxView>> rowsByBatch = transactions.findSessionRows(userId, policy.ownerType(),
+        Map<String, List<TxView>> rowsByBatch = transactions.findSessionRows(ownerId,
                         found.stream().map(SessionEntity::getBatchId).toList(), from, to, sources, !r.excludeCancelled())
                 .stream()
                 .filter(t -> r.transactionTypes().isEmpty() || r.transactionTypes().contains(t.getType()))

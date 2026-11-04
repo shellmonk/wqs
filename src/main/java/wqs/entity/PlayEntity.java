@@ -29,8 +29,7 @@ public class PlayEntity {
     private Long playId;
 
     private long sessionId;
-    private short ownerType;
-    private long userId;
+    private String ownerId;
     private String batchId;
     private String subBatchId;
     private Instant startedAt;
