@@ -214,6 +214,7 @@ class ProjectionApiTest extends IntegrationTest {
         assertProblem(get("/cc/wallet-data/rest/v1/projection/" + player + "?to=2026-11-01T00:00:00Z", null), 400, "from");
         assertProblem(get(ccPath() + RANGE + "&aggregationLevel=3", null), 400, "aggregationLevel");
         assertProblem(get(ccPath() + RANGE + "&pageSize=1001", null), 400, "pageSize");
+        assertProblem(get(ccPath() + RANGE + "&aggregationLevel=1&pageSize=101", null), 400, "pageSize");
         assertProblem(get(ccPath() + RANGE + "&pageNumber=0", null), 400, "pageNumber");
         assertProblem(get(ccPath() + "from=yesterday&to=2026-11-01T00:00:00Z", null), 400, "from");
         assertProblem(get(ccPath() + "from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z", null), 400, "from");

@@ -5,6 +5,7 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.validation.BindException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import wqs.exception.AccessDeniedException;
 import wqs.exception.InvalidParameterException;
 import wqs.exception.UnauthenticatedException;
 
@@ -26,6 +27,11 @@ public class ApiExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, parameter + " has an invalid format");
         problem.setProperty("parameter", parameter);
         return problem;
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ProblemDetail denied(AccessDeniedException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN, e.getMessage());
     }
 
     @ExceptionHandler(UnauthenticatedException.class)

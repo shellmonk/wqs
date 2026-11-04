@@ -23,6 +23,8 @@ public record ProjectionRequest(
         int pageSize) {
 
     public static final int MAX_PAGE_SIZE = 1000;
+    /** Levels 1-2 load every row of every session on the page, so their pages are smaller. */
+    public static final int MAX_SESSION_PAGE_SIZE = 100;
     /** Bounds the size of the filter lists bound into one query. */
     public static final int MAX_LIST_VALUES = 50;
 
@@ -49,8 +51,9 @@ public record ProjectionRequest(
             throw new InvalidParameterException("pageNumber", "must be at least 1");
         }
         int size = Objects.requireNonNullElse(pageSize, 50);
-        if (size < 1 || size > MAX_PAGE_SIZE) {
-            throw new InvalidParameterException("pageSize", "must be between 1 and " + MAX_PAGE_SIZE);
+        int max = level == AggregationLevel.TRANSACTIONS ? MAX_PAGE_SIZE : MAX_SESSION_PAGE_SIZE;
+        if (size < 1 || size > max) {
+            throw new InvalidParameterException("pageSize", "must be between 1 and " + max + " at this aggregation level");
         }
         return new ProjectionRequest(from.truncatedTo(ChronoUnit.MICROS), to.truncatedTo(ChronoUnit.MICROS), level,
                 Boolean.TRUE.equals(excludeCancelled), clean("productTypes", productTypes),

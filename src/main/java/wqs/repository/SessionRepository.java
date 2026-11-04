@@ -33,7 +33,8 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
                     select 1 from "wqPrjTransaction" m
                     where m."userId" = s."userId" and m."ownerType" = s."ownerType" and m."batchId" = s."batchId"
                       and m."occurredAt" between s."startedAt" and s."endedAt"
-                      and not m."zeroAmount" and (not :excludeCancelled or not m."cancelled")
+                      and m."source" = any(cast(:sources as int[])) and not m."zeroAmount"
+                      and (not :excludeCancelled or not m."cancelled")
                       and m."type" = any(cast(:transactionTypes as text[]))))
             union all
             select 1, t."transactionId", t."occurredAt"

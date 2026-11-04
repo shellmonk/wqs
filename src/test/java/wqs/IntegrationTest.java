@@ -64,6 +64,8 @@ public abstract class IntegrationTest {
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("wqs.stream.enabled", () -> "true");
+        registry.add("wqs.api.cc-enabled", () -> "true");
+        registry.add("wqs.api.web-player-header", () -> "true");
         registry.add("wqs.stream.uri", () -> "rabbitmq-stream://localhost:" + STREAM_PORT);
     }
 }
