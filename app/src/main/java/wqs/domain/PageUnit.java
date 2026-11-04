@@ -1,9 +1,9 @@
 package wqs.domain;
 
 /**
- * What a page counts. Only two values exist: levels 1 and 2 page over the same unit -- a
- * high-level row -- and differ only in payload nesting, so they share counters entirely and
- * always report identical page counts (spec 5.7).
+ * What a page counts, stored as "wqOwnerMonth"."unit" (plan D5): TRANSACTION (TX, level 0) or
+ * HIGH_LEVEL (ENTRY, levels 1 and 2 -- a session or a standalone transaction). Levels 1 and 2 page over
+ * the same entries and differ only in payload nesting, so they always report identical page counts.
  */
 public enum PageUnit {
 

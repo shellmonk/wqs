@@ -1,64 +1,66 @@
 package wqs.read;
 
-import static wqs.domain.CounterSentinels.ALL_PRODUCT_TYPES;
-import static wqs.domain.CounterSentinels.ALL_TYPES;
-
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import wqs.domain.PageUnit;
-import wqs.domain.ViewKind;
 
 /**
- * Reads the per-day page-unit counters ("wqPrjCount"). Sparse: an absent day means zero.
+ * Reads the owner-month counts ("wqOwnerMonth", plan D5). Sparse: an absent month means zero.
  *
- * A total for lists P and T is the sum of count(p, t) over P' x T' (plan D5), where P' is P, or
- * the ALL-product-types sentinel when P is empty, and T' is T, or the ALL-types sentinel when T is
- * empty. That is exact because every transaction has one product type and one type. HIGH_LEVEL callers
- * always pass an empty {@code typeCodes}: HIGH_LEVEL counters carry no type.
+ * Counts are stored per EXACT combination (source, product type, type, zero-amount flag), so a total
+ * for product types P and type codes T is the sum of the rows whose product type is in P (any, when P
+ * is empty) and whose type is in T (any, when T is empty) -- exact because every row has one of each.
+ * HIGH_LEVEL (ENTRY) callers always pass an empty {@code typeCodes}: entries carry no type.
  *
- * The read policy (plan D1) picks the owner type and, unless it shows zero amounts, only the
- * "zeroAmount" = false rows: zero-amount transactions are counted apart.
+ * The read policy (plan D1) picks the owner type, the sources and whether zero-amount rows count.
  */
 @Component
 public class CounterReader {
 
-    // The count column and the zero-amount predicate come from fixed constants only; every value is bound.
+    // The count column and the filter fragments come from fixed constants only; every value is bound.
     private static final String SUM = """
-            select "day", cast(sum("%s") as bigint) as "cnt" from "wqPrjCount"
-            where ("ownerType" = :ownerType and "userId" = :userId and "viewKind" = :viewKind
-                   and "pageUnit" = :pageUnit and "productType" in (:productTypes) and "type" in (:typeCodes)%s
-                   and "day" between cast(:first as date) and cast(:last as date))
-            group by "day"
+            select "month", cast(sum("%s") as bigint) as "cnt" from "wqOwnerMonth"
+            where ("ownerType" = :ownerType and "userId" = :userId and "unit" = :unit
+                   and "month" between cast(:first as date) and cast(:last as date)
+                   and "source" = any (cast(:sources as smallint[]))
+                   and (cast(:includeZeroAmounts as boolean) or not "zeroAmount")%s%s)
+            group by "month"
             """;
+    private static final String PRODUCT_TYPES = " and \"productType\" in (:productTypes)";
+    private static final String TYPE_CODES = " and \"type\" in (:typeCodes)";
 
     /**
-     * The count of every day in [firstDay, lastDay] that has a row (absent day = 0), summed over
-     * the product-type and type keys (plan D3).
+     * The count of every month in [first, last] that has a row (absent month = 0), summed over the
+     * combinations the filters select. One index range on the primary key's
+     * ("ownerType", "userId", "month") prefix, whatever the number of months.
      */
-    public Map<LocalDate, Long> dayCounts(
-            JdbcClient tx, ReadPolicy policy, long userId, ViewKind view, PageUnit unit,
+    public Map<YearMonth, Long> monthCounts(
+            JdbcClient tx, ReadPolicy policy, long userId, PageUnit unit,
             Set<String> productTypes, Set<String> typeCodes, boolean excludeCancelled,
-            LocalDate firstDay, LocalDate lastDay) {
-        Set<String> products = productTypes.isEmpty() ? Set.of(ALL_PRODUCT_TYPES) : productTypes;
-        Set<String> types = typeCodes.isEmpty() ? Set.of(ALL_TYPES) : typeCodes;
-        Map<LocalDate, Long> out = new LinkedHashMap<>();
-        tx.sql(SUM.formatted(excludeCancelled ? "cntExclCancelled" : "cntAll",
-                        policy.includeZeroAmounts() ? "" : " and \"zeroAmount\" = false"))
-                .param("ownerType", policy.ownerType())
+            YearMonth first, YearMonth last) {
+        Map<YearMonth, Long> out = new LinkedHashMap<>();
+        JdbcClient.StatementSpec spec = policy.bind(tx.sql(SUM.formatted(
+                        excludeCancelled ? "cntExclCancelled" : "cnt",
+                        productTypes.isEmpty() ? "" : PRODUCT_TYPES,
+                        typeCodes.isEmpty() ? "" : TYPE_CODES)))
                 .param("userId", userId)
-                .param("viewKind", (short) view.code())
-                .param("pageUnit", unit.code())
-                .param("productTypes", products)
-                .param("typeCodes", types)
-                .param("first", firstDay)
-                .param("last", lastDay)
-                .query(rs -> {
-                    out.put(rs.getObject("day", LocalDate.class), rs.getLong("cnt"));
-                });
+                .param("unit", unit.code())
+                .param("first", first.atDay(1))
+                .param("last", last.atDay(1));
+        if (!productTypes.isEmpty()) {
+            spec = spec.param("productTypes", productTypes);
+        }
+        if (!typeCodes.isEmpty()) {
+            spec = spec.param("typeCodes", typeCodes);
+        }
+        spec.query(rs -> {
+            out.put(YearMonth.from(rs.getObject("month", LocalDate.class)), rs.getLong("cnt"));
+        });
         return out;
     }
 }

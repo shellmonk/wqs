@@ -3,7 +3,7 @@ package wqs.read;
 import java.util.Set;
 
 /**
- * Level-1/2 read filter over the page index (spec 5.6). An empty {@code productTypes} means "no
+ * Level-1/2 read filter over the entries (plan D4). An empty {@code productTypes} means "no
  * filter"; a non-empty one matches any of its members. {@code excludeCancelled} keeps only rows
  * with "visibleExclCancelled". There is no transaction-type filter: transaction types never change
  * level-1/2 page counts (spec 4.1 (b), plan D4); they filter the nested transactions only.

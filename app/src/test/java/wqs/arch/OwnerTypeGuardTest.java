@@ -2,10 +2,6 @@ package wqs.arch;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.tngtech.archunit.core.domain.JavaClass;
-import com.tngtech.archunit.core.domain.JavaClasses;
-import com.tngtech.archunit.core.importer.ClassFileImporter;
-import com.tngtech.archunit.core.importer.ImportOption;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -16,17 +12,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
-import wqs.read.HighLevelQuery;
-import wqs.read.HighLevelTransactionQuery;
-import wqs.read.Level0Query;
-import wqs.read.ReadPolicy;
 
 /**
  * Owner identity is ("ownerType", "userId") (plan D1): every owner type is stored, so a statement
  * that filters by "userId" alone would merge owner "2-1717" into player 1717. SQL is Java text, so
  * this is checked on the source: every text block under the projection and read packages that
- * compares "userId" also compares "ownerType". And every read query implementation states its
- * endpoint's {@link ReadPolicy}.
+ * compares "userId" also compares "ownerType". (That every read query implementation holds its
+ * endpoint's read policy is ReadPolicyGuardTest's.)
  */
 class OwnerTypeGuardTest {
 
@@ -49,25 +41,6 @@ class OwnerTypeGuardTest {
         Files.writeString(good, "class Good { String sql = \"\"\"\n select 1 from \"wqPrjSession\"\n"
                 + " where \"ownerType\" = ? and \"userId\" = ?\n \"\"\"; }");
         assertThat(unownedStatements(List.of(bad, good))).singleElement().asString().startsWith("Bad.java");
-    }
-
-    @Test
-    void every_read_query_implementation_takes_a_read_policy() {
-        JavaClasses classes = new ClassFileImporter()
-                .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-                .importPackages("wqs.read");
-        List<String> implementations = new ArrayList<>();
-        for (JavaClass c : classes) {
-            boolean query = c.isAssignableTo(Level0Query.class) || c.isAssignableTo(HighLevelQuery.class)
-                    || c.isAssignableTo(HighLevelTransactionQuery.class);
-            if (!query || c.isInterface()) {
-                continue;
-            }
-            implementations.add(c.getSimpleName());
-            assertThat(c.getAllFields()).as(c.getName() + " holds its ReadPolicy")
-                    .anyMatch(f -> f.getRawType().isEquivalentTo(ReadPolicy.class));
-        }
-        assertThat(implementations).as("both endpoints, three query kinds").hasSize(6);
     }
 
     private static List<String> unownedStatements(List<Path> files) {

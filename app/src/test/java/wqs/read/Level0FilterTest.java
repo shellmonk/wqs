@@ -28,8 +28,8 @@ class Level0FilterTest {
 
     @Test
     void sentinels_are_the_documented_values() {
-        assertThat(CounterSentinels.ALL_PRODUCT_TYPES).isEmpty();
-        assertThat(CounterSentinels.ALL_TYPES).isEmpty();
+        assertThat(CounterSentinels.NO_PRODUCT_TYPE).isEmpty();
+        assertThat(CounterSentinels.NO_TYPE).isEmpty();
     }
 
     @Test

@@ -6,7 +6,7 @@ import wqs.db.TestSql;
 
 /**
  * An order-independent, comparable view of the whole projection: transactions (with a polled row's
- * "versionAt"), rollups, the page index, the per-day counters and parked cancels. Every table is
+ * "versionAt"), rollups, the owner-month counts and parked cancels. Every table is
  * ordered by its full primary key, so two snapshots are equal exactly when the stored state is.
  *
  * CRITICAL: "transactionId" and "ingestedAt" (transaction table only) and "parkedAt" (parked cancels) are
@@ -19,7 +19,6 @@ public record ProjectionSnapshot(
         List<String> transactions,
         List<String> sessions,
         List<String> plays,
-        List<String> timeline,
         List<String> counts,
         List<String> pendingCancels) {
 
@@ -29,13 +28,12 @@ public record ProjectionSnapshot(
                 rows(sql, "wqPrjTransaction"),
                 all(sql, "wqPrjSession", "\"ownerType\", \"userId\", \"batchId\""),
                 all(sql, "wqPrjPlay", "\"ownerType\", \"userId\", \"batchId\", \"subBatchId\""),
-                all(sql, "wqPrjTimeline", "\"ownerType\", \"userId\", \"occurredAt\", \"kind\", \"refId\""),
-                all(sql, "wqPrjCount", COUNTER_KEY),
+                all(sql, "wqOwnerMonth", COUNTER_KEY),
                 pendingCancelRows(sql));
     }
 
     private static final String COUNTER_KEY =
-            "\"ownerType\", \"userId\", \"viewKind\", \"pageUnit\", \"productType\", \"type\", \"zeroAmount\", \"day\"";
+            "\"ownerType\", \"userId\", \"month\", \"source\", \"unit\", \"productType\", \"type\", \"zeroAmount\"";
 
     private static List<String> rows(TestSql sql, String table) {
         return sql.lines("""
@@ -51,7 +49,7 @@ public record ProjectionSnapshot(
     /** Parked cancels, minus "parkedAt" (clock-derived). Converged state should hold none. */
     private static List<String> pendingCancelRows(TestSql sql) {
         return sql.lines("""
-                         select "source", "cancelSourceId", "cancelsSourceId", "ownerType", "userId",
+                         select "source", "cancelSourceId", "targetSourceId", "ownerType", "userId",
                                 "occurredAt", "productId", "productType", "batchId", "subBatchId", "type",
                                 "amount", "currency", "balanceAfter", "detail"
                          from "wqPrjPendingCancel"

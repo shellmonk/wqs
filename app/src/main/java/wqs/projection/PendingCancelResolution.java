@@ -42,7 +42,7 @@ public class PendingCancelResolution {
         for (PendingCancelStore.Expired cancel : expired) {
             log.warn("Resolved parked cancel {} (source {}, cancels {}) unapplied: its target did not arrive in {}"
                             + " (parked {} ago)",
-                    cancel.cancelSourceId(), cancel.source(), cancel.cancelsSourceId(), threshold,
+                    cancel.cancelSourceId(), cancel.source(), cancel.targetSourceId(), threshold,
                     Duration.between(cancel.parkedAt(), now));
         }
         if (!expired.isEmpty()) {

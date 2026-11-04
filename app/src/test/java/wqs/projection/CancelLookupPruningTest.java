@@ -75,6 +75,48 @@ class CancelLookupPruningTest extends PostgresTestBase {
         assertThat(executedPartitions(plan)).as(plan).containsExactly("2036_02", "2036_09");
     }
 
+    /**
+     * The T1 concern, bounded: a new group counts its earlier zero-amount rows only in the owner's
+     * months that hold zero-amount rows ({@link OwnerMonths#withZeroAmounts}), one "_batch" probe each,
+     * never every partition -- and the count is still exact across months.
+     */
+    @Test
+    void a_new_groups_zero_row_count_opens_only_the_owners_zero_amount_months() {
+        writer.apply(new ProjectionBatch("s", List.of(
+                zero("z-feb", "2036-02-10T09:00:00Z"),
+                zero("z-sep", "2036-09-10T09:00:00Z"),
+                transaction(1L, "t-mar", "2036-03-10T09:00:00Z"),
+                transaction(1L, "t-nov", "2036-11-10T09:00:00Z")), 1L));
+
+        List<YearMonth> months = transactionTemplate.execute(status -> ownerMonths.withZeroAmounts((short) 1, 1L));
+        assertThat(months).containsExactly(YearMonth.of(2036, 2), YearMonth.of(2036, 9));
+        List<YearMonth> all = transactionTemplate.execute(status -> ownerMonths.of((short) 1, 1L));
+        assertThat(all)
+                .containsExactly(YearMonth.of(2036, 2), YearMonth.of(2036, 3), YearMonth.of(2036, 9),
+                        YearMonth.of(2036, 11));
+
+        String[] fromAt = months.stream().map(CancelLookupPruningTest::start).toArray(String[]::new);
+        String[] toAt = months.stream().map(m -> start(m.plusMonths(1))).toArray(String[]::new);
+        String plan = String.join("\n", db().column(
+                "explain (analyze, costs off, timing off, summary off) " + RollupUpdater.ZERO_ROWS.formatted(""),
+                String.class, fromAt, toAt, (short) 1, 1L, "b-z"));
+        assertThat(executedPartitions(plan)).as(plan).containsExactly("2036_02", "2036_09");
+
+        // The session's first non-zero row, in a third month, counts both.
+        writer.apply(new ProjectionBatch("s", List.of(new ProjectionTransaction(
+                1L, SourceKind.TRANSACTION, "s-may", Instant.parse("2036-05-10T09:00:00Z"), Products.id(3),
+                Products.type(3), "b-z", null, TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null)), 2L));
+        assertThat(db().value("select \"zeroTxCount\" from \"wqPrjSession\" where \"batchId\" = 'b-z'", Integer.class))
+                .isEqualTo(2);
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+    }
+
+    private static ProjectionTransaction zero(String id, String at) {
+        return new ProjectionTransaction(
+                1L, SourceKind.TRANSACTION, id, Instant.parse(at), Products.id(3), Products.type(3),
+                "b-z", null, TxTypes.PLAY, new BigDecimal("0.0000"), "EUR", null, null, null);
+    }
+
     private static Set<String> executedPartitions(String plan) {
         Set<String> months = new TreeSet<>();
         Matcher m = EXECUTED_PARTITION.matcher(plan);

@@ -18,7 +18,7 @@ import wqs.gen.TxTypes;
 import wqs.read.cc.CcHighLevelQuery;
 import wqs.read.web.WebHighLevelQuery;
 
-/** The per-view page-index queries (spec 5.6, 7.3): filters, half-open bounds, total order. */
+/** The per-endpoint entry queries (plan D4): sessions merged with standalone rows; filters, half-open bounds, total order. */
 class HighLevelQueryTest extends Level0TestSupport {
 
     @Autowired WebHighLevelQuery web;
@@ -113,26 +113,41 @@ class HighLevelQueryTest extends Level0TestSupport {
     }
 
     /**
-     * Both endpoints page the one "wqPrjTimeline". After ANALYZE on realistic data the default plan
-     * of each key query -- /web's with its "onWeb" and /web-visibility predicates -- is an
-     * index-only scan of "wqPrjTimeline_cover", pruned to the requested month: the per-endpoint
-     * columns ride in INCLUDE.
+     * Plan D4: levels 1-2 merge the owner's sessions with their standalone transactions. After ANALYZE
+     * on realistic data the default plan of each endpoint's key query reads both indexes in entry
+     * order -- the session reading index and the standalone-row partial index, the latter pruned to
+     * the requested month -- and never scans a table.
      */
     @Test
-    void both_endpoints_page_the_timeline_by_an_index_only_scan_of_its_cover() throws Exception {
+    void the_merge_reads_the_session_index_and_the_standalone_index() throws Exception {
         partitionManager.ensurePartitionsAhead(java.time.YearMonth.of(2034, 5), 0);
         try {
-            // 60 users x 2000 rows over May 2034; a quarter are /cc-only payment rows.
+            // 60 users x 2000 standalone rows over May 2034, a quarter of them /cc-only payments...
             db().execute("""
-                    insert into "wqPrjTimeline" ("ownerType", "userId", "occurredAt", "kind", "refId", "productType",
-                            "currency", "onWeb", "visibleExclCancelled")
-                    select 1, ?::bigint + (i % 60),
+                    insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId",
+                            "occurredAt", "type", "amount", "currency", "productType")
+                    select 1, ?::bigint + (i % 60), 9000000 + i, (array[1, 3, 1, 4])[1 + (i % 4)], 'hl' || i,
                            timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '20 minutes' + (i % 60) * interval '1 second',
-                           (array[1, 3, 0, 4])[1 + (i % 4)], 'hl' || i, (array['keno','lottery','bingo'])[1 + (i % 3)],
-                           'EUR', i % 4 <> 3, true
+                           'TT_BUY', 1, 'EUR', (array['keno','lottery','bingo'])[1 + (i % 3)]
                     from generate_series(0, 119999) as i
                     """, USER);
-            db().execute("vacuum (analyze) \"wqPrjTimeline\"");
+            // ... and 60 x 500 sessions.
+            db().execute("""
+                    insert into "wqPrjSession" ("ownerType", "userId", "batchId", "startedAt", "endedAt", "currency",
+                            "productType", "firstSource", "firstSourceId", "txCount", "txCountExclCancelled")
+                    select 1, ?::bigint + (i % 60), 'sb' || i,
+                           timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '80 minutes' + (i % 60) * interval '1 second',
+                           timestamptz '2034-05-01T00:00:00Z' + (i / 60) * interval '80 minutes' + (i % 60) * interval '1 second',
+                           'EUR', (array['keno','lottery','bingo'])[1 + (i % 3)], 1, 'f' || i, 1, 1
+                    from generate_series(0, 29999) as i
+                    """, USER);
+            db().execute("vacuum (analyze) \"wqPrjTransaction\"");
+            db().execute("vacuum (analyze) \"wqPrjSession\"");
+            String standalone = db().value("""
+                    select c.relname from pg_inherits i join pg_class c on c.oid = i.inhrelid
+                    where i.inhparent = to_regclass('"wqPrjTransaction_standalone"')
+                      and c.relname like 'wqPrjTransaction_2034_05%'
+                    """, String.class);
             for (HighLevelQuery q : List.of(web, cc)) {
                 for (boolean excl : new boolean[] {false, true}) {
                     HighLevelFilter f = new HighLevelFilter(USER, Set.of("keno", "bingo"), excl);
@@ -143,12 +158,10 @@ class HighLevelQueryTest extends Level0TestSupport {
                     String plan = String.join("\n", recording.rerun("explain", executed.get(0)));
                     String as = q.view() + " excl=" + excl + " plan:\n" + plan;
                     assertThat(plan).as(as)
-                            .containsPattern("Index Only Scan using \"wqPrjTimeline_2034_05_ownerType_userId_occurredAt_kind_\\w*idx\"")
+                            .contains("using \"wqPrjSession_reading\" on \"wqPrjSession\"")
+                            .containsPattern("Index (Only )?Scan using \"" + standalone + "\"")
                             .doesNotContain("Seq Scan")
-                            .doesNotContainPattern("wqPrjTimeline_2034_0[^5]");
-                    if (q == web) {
-                        assertThat(plan).as(as).contains("\"onWeb\"");
-                    }
+                            .doesNotContainPattern("wqPrjTransaction_2034_0[^5]");
                 }
             }
         } finally {

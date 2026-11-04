@@ -107,17 +107,17 @@ class IdempotencyPropertyTest extends ProjectionPropertyBase {
         for (ProjectionTransaction transaction : transactions) {
             String key = transaction.source().code() + "/" + transaction.sourceId();
             if (expectedWeb.contains(key) || expectedCc.contains(key)) continue; // generated keys are unique
-            if (transaction.source().views().contains(wqs.domain.ViewKind.WEB)) expectedWeb.add(key);
-            if (transaction.source().views().contains(wqs.domain.ViewKind.CC)) expectedCc.add(key);
+            if (wqs.read.ReadPolicy.WEB.sources().contains(transaction.source())) expectedWeb.add(key);
+            if (wqs.read.ReadPolicy.CC.sources().contains(transaction.source())) expectedCc.add(key);
         }
-        assertThat(keys("wqPrjWebTransaction")).as("wqPrjWebTransaction").containsExactlyInAnyOrderElementsOf(expectedWeb);
-        assertThat(keys("wqPrjCcTransaction")).as("wqPrjCcTransaction").containsExactlyInAnyOrderElementsOf(expectedCc);
+        assertThat(keys(ProjectionInvariants.WEB_TRANSACTIONS)).as("web").containsExactlyInAnyOrderElementsOf(expectedWeb);
+        assertThat(keys("wqPrjTransaction")).as("cc").containsExactlyInAnyOrderElementsOf(expectedCc);
         assertThat(keys("wqPrjTransaction")).as("wqPrjTransaction").containsExactlyInAnyOrderElementsOf(
                 transactions.stream().map(i -> i.source().code() + "/" + i.sourceId()).distinct().toList());
     }
 
     private List<String> keys(String table) {
-        return db().column("select \"source\" || '/' || \"sourceId\" from \"" + table + "\"", String.class);
+        return db().column("select \"source\" || '/' || \"sourceId\" from " + ProjectionInvariants.relation(table), String.class);
     }
 
     /** Shuffles and duplicates roughly a third of the events. */

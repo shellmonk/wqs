@@ -3,19 +3,21 @@ package wqs.read;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
 
 /**
  * What one endpoint shows of the stored data (plan D1). Ingestion stores everything -- every
- * source, every owner type, zero-amount stream transactions -- and every read query binds its
- * endpoint's policy: {@code "ownerType" = ?} and, unless {@code includeZeroAmounts}, {@code not
- * "zeroAmount"} (and {@code "zeroAmount" = false} on the counters).
- *
- * <p>{@code sources} is the endpoint's source set. While the per-endpoint SQL views and the counters'
- * view kind still exist they select the sources; the policy carries the set so that it is the one
- * place stating what an endpoint shows, and so that the views can later give way to a bound
- * {@code "source" = any(?)}.
+ * source, every owner type, zero-amount stream transactions -- and nothing stored knows an endpoint:
+ * every read query binds its endpoint's policy instead, through {@link #bind}:
+ * <ul>
+ *   <li>{@code "source" = any (cast(:sources as smallint[]))} -- a session by its "firstSource";</li>
+ *   <li>{@code "ownerType" = :ownerType};</li>
+ *   <li>{@code (cast(:includeZeroAmounts as boolean) or not "zeroAmount")}.</li>
+ * </ul>
+ * The predicates are written literally in each statement (ReadPolicyGuardTest checks it); only the
+ * values come from here.
  *
  * <p>Both endpoints show players only and never zero-amount rows (spec 4.1).
  */
@@ -37,11 +39,20 @@ public record ReadPolicy(Set<SourceKind> sources, short ownerType, boolean inclu
         sources = Set.copyOf(sources);
     }
 
-    /**
-     * The zero-amount predicate for a transaction relation qualified as {@code relation}: a fixed
-     * fragment chosen here, never a value -- empty when zero-amount rows are shown.
-     */
-    public String zeroAmountFilter(String relation) {
-        return includeZeroAmounts ? "" : " and not (" + relation + ".\"zeroAmount\")";
+    /** The source codes shown, ascending: the {@code :sources} array bind. */
+    public short[] sourceCodes() {
+        int[] codes = sources.stream().mapToInt(SourceKind::code).sorted().toArray();
+        short[] out = new short[codes.length];
+        for (int i = 0; i < codes.length; i++) {
+            out[i] = (short) codes[i];
+        }
+        return out;
+    }
+
+    /** Binds {@code :sources}, {@code :ownerType} and {@code :includeZeroAmounts}. */
+    public JdbcClient.StatementSpec bind(JdbcClient.StatementSpec spec) {
+        return spec.param("sources", sourceCodes())
+                .param("ownerType", ownerType)
+                .param("includeZeroAmounts", includeZeroAmounts);
     }
 }

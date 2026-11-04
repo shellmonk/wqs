@@ -1,63 +1,48 @@
 package wqs.projection;
 
-import static wqs.domain.CounterSentinels.ALL_PRODUCT_TYPES;
-import static wqs.domain.CounterSentinels.ALL_TYPES;
+import static wqs.domain.CounterSentinels.NO_PRODUCT_TYPE;
+import static wqs.domain.CounterSentinels.NO_TYPE;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.ZoneOffset;
-import java.util.LinkedHashSet;
-import java.util.Set;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import wqs.domain.CounterSentinels;
 import wqs.domain.PageUnit;
 import wqs.domain.ProjectionTransaction;
-import wqs.domain.ViewKind;
 
 /**
- * Maintains the pagination counters (spec 5.7, plan D3): one "wqPrjCount" row per UTC day and
- * key. A multi-year total sums the day rows of its range in one index range.
+ * Maintains the owner-month counts, "wqOwnerMonth" (plan D5): one row per owner, UTC month and EXACT
+ * combination (source, unit, productType, type, zeroAmount). There is no "all" row: every counted
+ * thing increments exactly one row, so a filtered total is the sum of the rows its filter selects.
  *
- * Keys are (productType, type) per day. productType = '' is the ALL-product-types
- * sentinel and type = '' the ALL-transaction-types sentinel ({@link CounterSentinels}), so the
- * common unfiltered query reads one row rather than summing across values.
+ * <ul>
+ *   <li>TX: one per transaction, at its own month, source, product type ('' = none), type code and
+ *       zero-amount flag -- cancellations included (counters equal live COUNTs, P-2).</li>
+ *   <li>ENTRY: one per level-1/2 page entry (plan D4): a session, under its first transaction's source
+ *       ("firstSource": a session belongs to a read policy iff that source does) at its current (month
+ *       of "startedAt", "productType"); or a standalone transaction (no batch id, not a cancellation),
+ *       under its own source, month and product type -- a zero-amount one under "zeroAmount" = true
+ *       (plan D6). "type" is always ''.</li>
+ * </ul>
  *
- * TRANSACTION counters fan out to four keys per day (plan D4): (pt,t), (pt,ALL), (ALL,t), (ALL,ALL),
- * where t is the transaction's type. A transaction with no product type writes only the two ALL-product keys.
- * HIGH_LEVEL counters never carry a type: (pt,ALL) and (ALL,ALL), or (ALL,ALL) alone without a
- * product type.
+ * "cntExclCancelled" counts the visible ones: a transaction not cancelled, a session with a surviving
+ * transaction. An excl-only change never creates or deletes a row; a decrement that empties a row
+ * ("cnt" = 0) deletes it, so rows stay sparse and stored state does not depend on the path a moved
+ * session took (spec P-1).
  *
- * TRANSACTION counters are per transaction, in each view the transaction's source feeds. HIGH_LEVEL counters mirror
- * the page index per view, so they are driven per view from {@link HighLevelResult}:
- * {@link #countHighLevel} for each view in {@code inserted()} at the current key, and
- * {@link #moveHighLevel} for each view in {@code moved()} from
- * (movedFrom, movedFromProductType) to the current key, with that row's visibility.
- *
- * An excl-only change ({@link #uncountExclCancelled}, {@link #recountExclCancelled}) never
- * creates or deletes a row. A decrement that empties a row (cntAll reaches 0) deletes it, keeping rows sparse and stored
- * state independent of the path a moved page unit took.
- *
- * Decrements are strict: every key a decrement targets was counted first (the gate and the
- * per-view page-index mirror guarantee it), so a decrement that does not affect exactly one row
- * is a bug and throws {@link IllegalStateException} naming the full key. The table CHECK
- * constraints (non-negative, excl <= all) reject a decrement that would go below zero. Either
- * failure aborts the projection transaction, which the consumer turns into per-transaction fallback
- * and dead-letter: loud and replayable instead of silent counter drift (spec P-2).
- *
- * Every row is an owner's ("ownerType", "userId"), and carries "zeroAmount": a zero-amount stream
- * transaction (plan D6) is counted at TRANSACTION under "zeroAmount" = true, apart from every other
- * row, so a total that hides zero amounts reads only the false rows. HIGH_LEVEL rows are always
- * false: a zero-amount transaction is in no page unit.
+ * Strict: every key a decrement targets was counted first (the insert gate guarantees it), so a
+ * decrement that does not hit exactly one row is a bug and throws {@link IllegalStateException}
+ * naming the full key; the table CHECKs reject a negative or excl &gt; cnt. Either aborts the
+ * projection transaction -- loud and replayable instead of silent drift (spec P-2).
  *
  * All mutators require a surrounding transaction (callers supply it).
  */
 @Component
 public class CounterUpdater {
-
-    private static final String TABLE = "wqPrjCount";
 
     private final JdbcClient jdbc;
 
@@ -65,210 +50,152 @@ public class CounterUpdater {
         this.jdbc = jdbc;
     }
 
-    /** Counts one level-0 row in each view this transaction's source feeds. */
+    /** Counts one transaction at TX: +1, visible (a new transaction is never cancelled yet). */
     @Transactional(propagation = Propagation.MANDATORY)
     public void countTransaction(ProjectionTransaction transaction) {
-        for (ViewKind view : transaction.source().views()) {
-            apply(keys(PageUnit.TRANSACTION, transaction.productType(), transaction.type(), transaction.occurredAt()),
-                    new Owner(transaction.ownerType(), transaction.userId(), view, PageUnit.TRANSACTION,
-                            transaction.isZeroAmount()),
-                    +1, true);
+        increment(Key.tx(transaction.ownerType(), transaction.userId(), transaction.occurredAt(),
+                (short) transaction.source().code(), transaction.productType(), transaction.type(),
+                transaction.isZeroAmount()), true);
+    }
+
+    /** A transaction was cancelled: -1 from its TX excl-cancelled tally only. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void uncountTransactionExcl(short ownerType, long userId, Instant occurredAt, short source,
+                                       String productType, String type, boolean zeroAmount) {
+        updateExcl(Key.tx(ownerType, userId, occurredAt, source, productType, type, zeroAmount), -1);
+    }
+
+    /**
+     * Counts one new, visible ENTRY: a standalone transaction under its source, or a session under its
+     * first source.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void countEntry(short ownerType, long userId, Instant at, short source, String productType,
+                           boolean zeroAmount) {
+        increment(Key.entry(ownerType, userId, at, source, productType, zeroAmount), true);
+    }
+
+    /** An entry became hidden (its transaction, or a session's last survivor, was cancelled). */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void uncountEntryExcl(short ownerType, long userId, Instant at, short source, String productType,
+                                 boolean zeroAmount) {
+        updateExcl(Key.entry(ownerType, userId, at, source, productType, zeroAmount), -1);
+    }
+
+    /**
+     * Moves one session ENTRY from its previous (start, first source, product type, visibility) to its
+     * current one: a re-anchor or relabel moves it between rows (only when the month, source or product
+     * type differs -- the key holds no finer time), a revive changes only its excl tally.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void moveSession(short ownerType, long userId,
+                            Instant fromAt, short fromSource, String fromProductType, boolean fromVisible,
+                            Instant toAt, short toSource, String toProductType, boolean toVisible) {
+        Key from = Key.entry(ownerType, userId, fromAt, fromSource, fromProductType, false);
+        Key to = Key.entry(ownerType, userId, toAt, toSource, toProductType, false);
+        if (from.equals(to)) {
+            if (fromVisible != toVisible) {
+                updateExcl(to, toVisible ? +1 : -1);
+            }
+            return;
         }
-    }
-
-    /**
-     * Counts one high-level page unit in ONE view: +1 cntAll and +1 cntExclCancelled (a newly
-     * inserted page-index row is visible), at the day of {@code at}, for the row's own
-     * product type and the sentinel.
-     */
-    @Transactional(propagation = Propagation.MANDATORY)
-    public void countHighLevel(short ownerType, long userId, ViewKind view, String productType, Instant at) {
-        apply(keys(PageUnit.HIGH_LEVEL, productType, ALL_TYPES, at),
-                new Owner(ownerType, userId, view, PageUnit.HIGH_LEVEL, false), +1, true);
-    }
-
-    /**
-     * Moves one high-level page unit between counter keys in ONE view: -1 cntAll (and -1
-     * cntExclCancelled iff {@code visibleExclCancelled}) at keys only the old position has, +1
-     * at keys only the new position has. Keys shared by both (same day / product type, and
-     * the sentinel on a product-only change) are left untouched, so a move that maps to the same
-     * key set is a no-op.
-     */
-    @Transactional(propagation = Propagation.MANDATORY)
-    public void moveHighLevel(
-            short ownerType, long userId, ViewKind view,
-            String fromProductType, Instant from,
-            String toProductType, Instant to,
-            boolean visibleExclCancelled) {
-        Set<Key> oldKeys = keys(PageUnit.HIGH_LEVEL, fromProductType, ALL_TYPES, from);
-        Set<Key> newKeys = keys(PageUnit.HIGH_LEVEL, toProductType, ALL_TYPES, to);
-        Set<Key> removed = new LinkedHashSet<>(oldKeys);
-        removed.removeAll(newKeys);
-        Set<Key> added = new LinkedHashSet<>(newKeys);
-        added.removeAll(oldKeys);
-        Owner owner = new Owner(ownerType, userId, view, PageUnit.HIGH_LEVEL, false);
-        apply(removed, owner, -1, visibleExclCancelled);
-        apply(added, owner, +1, visibleExclCancelled);
-    }
-
-    /**
-     * Removes one row from the excl-cancelled tally, leaving cntAll untouched: a cancelled transaction
-     * still exists and is still returned when the filter is off.
-     */
-    @Transactional(propagation = Propagation.MANDATORY)
-    public void uncountExclCancelled(
-            short ownerType, long userId, ViewKind view, PageUnit unit, String productType, String type,
-            boolean zeroAmount, Instant at) {
-        Owner owner = new Owner(ownerType, userId, view, unit, zeroAmount);
-        for (Key key : keys(unit, productType, type, at)) {
-            updateExcl(owner, key, -1);
-        }
-    }
-
-    /**
-     * Returns one row to the excl-cancelled tally, leaving cntAll untouched: the inverse of
-     * {@link #uncountExclCancelled}, for a page-index row revived by a live transaction joining a
-     * session whose row in that view had been hidden by cancels. Strict like every other
-     * decrement-side operation: the row must exist (it was counted when the page unit was
-     * inserted), and the CHECK rejects excl &gt; all.
-     */
-    @Transactional(propagation = Propagation.MANDATORY)
-    public void recountExclCancelled(
-            short ownerType, long userId, ViewKind view, PageUnit unit, String productType, String type,
-            boolean zeroAmount, Instant at) {
-        Owner owner = new Owner(ownerType, userId, view, unit, zeroAmount);
-        for (Key key : keys(unit, productType, type, at)) {
-            updateExcl(owner, key, +1);
-        }
+        decrement(from, fromVisible);
+        increment(to, toVisible);
     }
 
     // --- internals -----------------------------------------------------------------------
 
-    /** Everything of a counter row's address but its (productType, type, day) key. */
-    private record Owner(short ownerType, long userId, ViewKind view, PageUnit unit, boolean zeroAmount) {}
+    /** One "wqOwnerMonth" row address. */
+    private record Key(short ownerType, long userId, LocalDate month, short source, PageUnit unit,
+                       String productType, String type, boolean zeroAmount) {
 
-    /** One counter row address within an {@link Owner}. */
-    private record Key(String productType, String type, LocalDate day) {}
+        static Key tx(short ownerType, long userId, Instant at, short source, String productType, String type,
+                      boolean zeroAmount) {
+            return new Key(ownerType, userId, monthOf(at), source, PageUnit.TRANSACTION,
+                    productType == null ? NO_PRODUCT_TYPE : productType, type, zeroAmount);
+        }
 
-    /**
-     * The key set of one page unit: {own product type, ALL} x {own type, ALL} for TRANSACTION,
-     * {own product type, ALL} x {ALL} for HIGH_LEVEL (its {@code type} is ignored), at the UTC day of {@code at}.
-     */
-    private static Set<Key> keys(PageUnit unit, String productType, String type, Instant at) {
-        LocalDate day = LocalDate.ofInstant(at, ZoneOffset.UTC);
-        Set<String> products = new LinkedHashSet<>();
-        if (productType != null) {
-            products.add(productType);
+        static Key entry(short ownerType, long userId, Instant at, short kind, String productType,
+                         boolean zeroAmount) {
+            return new Key(ownerType, userId, monthOf(at), kind, PageUnit.HIGH_LEVEL,
+                    productType == null ? NO_PRODUCT_TYPE : productType, NO_TYPE, zeroAmount);
         }
-        products.add(ALL_PRODUCT_TYPES);
-        Set<String> types = new LinkedHashSet<>();
-        if (unit == PageUnit.TRANSACTION) {
-            types.add(type);
+
+        Object[] binds() {
+            return new Object[] {ownerType, userId, month, source, unit.code(), productType, type, zeroAmount};
         }
-        types.add(ALL_TYPES);
-        Set<Key> keys = new LinkedHashSet<>();
-        for (String p : products) {
-            for (String t : types) {
-                keys.add(new Key(p, t, day));
-            }
-        }
-        return keys;
     }
 
-    private void apply(Set<Key> keys, Owner owner, int delta, boolean excl) {
-        for (Key key : keys) {
-            if (delta > 0) {
-                increment(owner, key, excl);
-            } else {
-                decrement(owner, key, excl);
-            }
-        }
+    private static LocalDate monthOf(Instant at) {
+        return YearMonth.from(at.atZone(ZoneOffset.UTC)).atDay(1);
     }
 
     /** The row key every statement below addresses, appended after its SET values. */
     private static final String ROW_IS = """
-            where "ownerType" = ? and "userId" = ? and "viewKind" = ? and "pageUnit" = ?
-              and "productType" = ? and "type" = ? and "zeroAmount" = ? and "day" = ?
+            where "ownerType" = ? and "userId" = ? and "month" = ? and "source" = ? and "unit" = ?
+              and "productType" = ? and "type" = ? and "zeroAmount" = ?
             """;
 
-    // The table name comes from a fixed constant only; every value is bound.
+    // Every value is bound.
     private static final String INCREMENT = """
-            insert into "wqPrjCount" ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type",
-                    "zeroAmount", "day", "cntAll", "cntExclCancelled")
+            insert into "wqOwnerMonth" ("ownerType", "userId", "month", "source", "unit", "productType", "type",
+                    "zeroAmount", "cnt", "cntExclCancelled")
             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            on conflict ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type", "zeroAmount", "day")
-            do update set "cntAll" = "wqPrjCount"."cntAll" + ?,
-                          "cntExclCancelled" = "wqPrjCount"."cntExclCancelled" + ?
+            on conflict ("ownerType", "userId", "month", "source", "unit", "productType", "type", "zeroAmount")
+            do update set "cnt" = "wqOwnerMonth"."cnt" + excluded."cnt",
+                          "cntExclCancelled" = "wqOwnerMonth"."cntExclCancelled" + excluded."cntExclCancelled"
             """;
     private static final String DECREMENT =
-            "update \"wqPrjCount\" set \"cntAll\" = \"wqPrjCount\".\"cntAll\" - ?\n" + ROW_IS
-                    + "returning \"cntAll\"";
-    private static final String DECREMENT_WITH_EXCL =
-            "update \"wqPrjCount\" set \"cntAll\" = \"wqPrjCount\".\"cntAll\" - ?,"
-                    + " \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" - ?\n" + ROW_IS
-                    + "returning \"cntAll\"";
-    private static final String DELETE = "delete from \"wqPrjCount\"\n" + ROW_IS;
+            "update \"wqOwnerMonth\" set \"cnt\" = \"wqOwnerMonth\".\"cnt\" - ?,"
+                    + " \"cntExclCancelled\" = \"wqOwnerMonth\".\"cntExclCancelled\" - ?\n" + ROW_IS
+                    + "returning \"cnt\"";
+    private static final String DELETE = "delete from \"wqOwnerMonth\"\n" + ROW_IS;
     private static final String UPDATE_EXCL =
-            "update \"wqPrjCount\" set \"cntExclCancelled\" = \"wqPrjCount\".\"cntExclCancelled\" + ?\n"
+            "update \"wqOwnerMonth\" set \"cntExclCancelled\" = \"wqOwnerMonth\".\"cntExclCancelled\" + ?\n"
                     + ROW_IS;
 
-    private void increment(Owner owner, Key key, boolean excl) {
-        long exclDelta = excl ? 1L : 0L;
+    private void increment(Key key, boolean visible) {
         jdbc.sql(INCREMENT)
-                .params(rowIs(owner, key))
-                .params(1L, exclDelta, 1L, exclDelta)
+                .params(key.binds())
+                .params(1L, visible ? 1L : 0L)
                 .update();
     }
 
     /**
-     * Decrements cntAll (and cntExclCancelled iff {@code excl}); a row left at cntAll = 0 is
-     * deleted. Rows are sparse (spec 5.7) and must stay so: a move would otherwise leave an empty
-     * row at every key a page unit passed through, making stored state depend on arrival order
-     * (spec P-1). cntExclCancelled &lt;= cntAll (CHECK), so a deleted row holds nothing.
+     * -1 cnt (and -1 excl iff {@code visible}); a row left at cnt = 0 is deleted. excl &lt;= cnt
+     * (CHECK), so a deleted row holds nothing.
      */
-    private void decrement(Owner owner, Key key, boolean excl) {
-        var statement = excl
-                ? jdbc.sql(DECREMENT_WITH_EXCL).params(1L, 1L)
-                : jdbc.sql(DECREMENT).param(1L);
-        Long remaining = statement
-                .params(rowIs(owner, key))
+    private void decrement(Key key, boolean visible) {
+        Long remaining = jdbc.sql(DECREMENT)
+                .params(1L, visible ? 1L : 0L)
+                .params(key.binds())
                 .query(Long.class)
                 .optional()
                 .orElse(null);
-        requireOneRow(remaining == null ? 0 : 1, owner, key);
+        requireOneRow(remaining == null ? 0 : 1, key);
         if (remaining == 0L) {
-            jdbc.sql(DELETE)
-                    .params(rowIs(owner, key))
-                    .update();
+            jdbc.sql(DELETE).params(key.binds()).update();
         }
     }
 
     /** Adds {@code delta} to cntExclCancelled only; the row must exist. */
-    private void updateExcl(Owner owner, Key key, long delta) {
+    private void updateExcl(Key key, long delta) {
         int rows = jdbc.sql(UPDATE_EXCL)
                 .param(delta)
-                .params(rowIs(owner, key))
+                .params(key.binds())
                 .update();
-        requireOneRow(rows, owner, key);
+        requireOneRow(rows, key);
     }
 
-    private static void requireOneRow(int rows, Owner owner, Key key) {
+    private static void requireOneRow(int rows, Key key) {
         if (rows != 1) {
             throw new IllegalStateException(
-                    "counter update hit " + rows + " rows, expected 1: table="
-                            + TABLE + " ownerType=" + owner.ownerType() + " userId=" + owner.userId()
-                            + " view=" + owner.view() + " unit=" + owner.unit()
+                    "owner-month count update hit " + rows + " rows, expected 1: table=wqOwnerMonth"
+                            + " ownerType=" + key.ownerType() + " userId=" + key.userId()
+                            + " month=" + key.month() + " source=" + key.source() + " unit=" + key.unit()
                             + " productType='" + key.productType() + "'"
                             + " type='" + key.type() + "'"
-                            + " zeroAmount=" + owner.zeroAmount()
-                            + " day=" + key.day());
+                            + " zeroAmount=" + key.zeroAmount());
         }
-    }
-
-    /** The bind values of {@link #ROW_IS}, in order. */
-    private static Object[] rowIs(Owner owner, Key key) {
-        return new Object[] {
-                owner.ownerType(), owner.userId(), (short) owner.view().code(), owner.unit().code(),
-                key.productType(), key.type(), owner.zeroAmount(), key.day()};
     }
 }

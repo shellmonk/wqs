@@ -14,7 +14,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
 import wqs.read.cc.CcHighLevelAssembly;
 import wqs.read.cc.CcProjectionService;
@@ -302,8 +301,7 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
                     : transaction("n" + i, at, null, null, TxTypes.PLAY, "1", "keno"));
         }
         applyBatches(data);
-        db().execute("vacuum analyze \"wqPrjWebTransaction\"");
-        db().execute("vacuum analyze \"wqPrjCcTransaction\"");
+        db().execute("vacuum analyze \"wqPrjTransaction\"");
         db().execute("vacuum analyze \"wqPrjSession\"");
         db().execute("vacuum analyze \"wqPrjPlay\"");
         com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper();
@@ -344,7 +342,7 @@ class HighLevelAssemblyTest extends ReadPropertyBase {
             return examinedTransactionRows(node.get("Plan"));
         }
         String rel = node.path("Relation Name").asText("");
-        if (rel.startsWith("wqPrjWebTransaction") || rel.startsWith("wqPrjCcTransaction") || rel.startsWith("wqPrjPlay")) {
+        if (rel.startsWith("wqPrjTransaction") || rel.startsWith("wqPrjPlay")) {
             long perLoop = node.path("Actual Rows").asLong() + node.path("Rows Removed by Filter").asLong()
                     + node.path("Rows Removed by Index Recheck").asLong();
             sum += perLoop * Math.max(1, node.path("Actual Loops").asLong());

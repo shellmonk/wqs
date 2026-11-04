@@ -5,7 +5,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import wqs.domain.ViewKind;
 
 /**
  * The transaction-table reads of level-1/2 assembly for one view (spec 7.3; one class per view, spec 2.2
@@ -32,6 +31,6 @@ public interface HighLevelTransactionQuery {
     List<TransactionEntry> sessionTransactions(JdbcClient tx, long userId, Set<String> batchIds,
                                  Instant to, Set<String> typeCodes, boolean excludeCancelled);
 
-    /** The view's transactions for unsessioned page-index keys ("kind" = source code, "refId" = sourceId). */
+    /** The view's transactions for standalone entry keys ("kind" = source code, "refId" = sourceId). */
     Map<HighLevelKey, TransactionEntry> unsessioned(JdbcClient tx, long userId, List<HighLevelKey> keys);
 }

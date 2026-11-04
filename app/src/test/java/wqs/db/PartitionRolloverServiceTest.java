@@ -42,8 +42,8 @@ class PartitionRolloverServiceTest extends PostgresTestBase {
 
         int created = service.rollOver(2);
 
-        // June, July, August x 3 partitioned tables
-        assertThat(created).isEqualTo(9);
+        // June, July, August x the one partitioned table
+        assertThat(created).isEqualTo(3);
     }
 
     @Test

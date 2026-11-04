@@ -17,13 +17,12 @@ import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
 import wqs.read.Segment.Tier;
 
 /**
- * Levels 1-2 paging over the high-level page index (spec 5.6, 7.3-7.6), on one fixed dataset,
- * against the naive-OFFSET and live-COUNT oracles: P-3 (pages concatenate to the full ordered
+ * Levels 1-2 paging over the owner's entries -- sessions merged with standalone transactions (plan
+ * D4) -- on one fixed dataset, against the naive-OFFSET (naive merge) and live-COUNT oracles: P-3 (pages concatenate to the full ordered
  * set), P-5 (counter totals equal a live COUNT) and P-6 (each page equals naive OFFSET, and the
  * walk -- not a naive OFFSET -- produced it), for page sizes 1-3, both views, ranges with whole
  * months, partial days and bounds exactly on a tie instant, and the filters none / one product
@@ -50,7 +49,7 @@ class HighLevelPagingTest extends ReadPropertyBase {
     }
 
     private static final List<Range> RANGES = List.of(
-            // whole days only
+            // whole months only
             range("2033-12-01T00:00:00Z", "2034-04-01T00:00:00Z"),
             // partial days at both ends; the upper one keeps the Mar 1 tie group in a LIVE segment
             range("2033-12-20T06:00:00Z", "2034-03-01T00:00:01Z"),
@@ -152,18 +151,18 @@ class HighLevelPagingTest extends ReadPropertyBase {
         assertThat(none.entries()).isEmpty();
     }
 
-    /** Whole days at HIGH_LEVEL come from HIGH_LEVEL counters alone, which count a session once. */
+    /** Whole months at HIGH_LEVEL come from ENTRY counts alone, which count a session once. */
     @Test
-    void whole_days_are_counted_from_high_level_counters_only() {
+    void whole_months_are_counted_from_entry_counts_only() {
         Range all = RANGES.get(0);
         for (ViewKind v : ViewKind.values()) {
             RecordingHighLevelQuery recording = new RecordingHighLevelQuery(highLevelQueryFor(v));
             SegmentCounts sc = readerTx.execute(status ->
                     reader.segmentCounts(readerJdbc, recording, FILTERS.get(0), all.from(), all.to()));
-            assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.DAY);
+            assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.MONTH);
             assertThat(recording.countCalls).as(v + " live counts").isZero();
-            // Days holding a page row: Dec 5, Dec 20, Jan 1, Jan 15, Feb 14, Feb 28, Mar 1 (+ Mar 10 on /cc).
-            assertThat(sc.counterRows()).as(v.name()).isEqualTo(v == ViewKind.CC ? 8 : 7);
+            // Months holding an entry: Dec, Jan, Feb, Mar (Mar 10's payment adds no month on /cc).
+            assertThat(sc.counterRows()).as(v.name()).isEqualTo(4);
             assertThat(sc.total()).as(v.name()).isEqualTo(oracle.highLevelCount(v, FILTERS.get(0), all.from(), all.to()));
             // Fewer page rows than transactions: sessions are one row each, cancels none.
             assertThat(sc.total()).as(v.name()).isLessThan(oracle.count(v, new Level0Filter(USER, false), all.from(), all.to()));

@@ -1,15 +1,18 @@
 package wqs.projection;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.db.TestSql;
 import wqs.domain.MoneyDirection;
+import wqs.read.ReadPolicy;
 
 /**
  * The one oracle for the projection's derived state (spec 8.1 P-2, P-4, P-8). Each method
- * recomputes what the incremental write path maintains -- counters, rollups,
- * the page index -- from the transaction rows alone, compares it with what is stored, and returns one
+ * recomputes what the incremental write path maintains -- owner-month counts, rollups and the
+ * sessions' entry keys -- from the transaction rows alone, compares it with what is stored, and returns one
  * human-readable line per discrepancy: empty when the invariant holds.
  *
  * Deliberately slow-but-obvious SQL over the whole projection: these are the reference
@@ -20,8 +23,8 @@ import wqs.domain.MoneyDirection;
  *
  * The spec semantics checked here, which the write path must also follow:
  * <ul>
- *   <li>A cancellation is a transaction row ("cancels" non-blank). It is counted at the TRANSACTION page unit
- *       like any row, but never rolls up and never gets a page-index row.</li>
+ *   <li>A cancellation is a transaction row ("cancels" non-blank). It is counted at TX like any row,
+ *       but never rolls up and is never a level-1/2 entry.</li>
  *   <li>A session's key is (MIN occurredAt, the FIRST transaction's productType) over its
  *       non-cancellation transactions, cancelled or not -- a cancel never moves a row. First is by
  *       ("occurredAt", "sourceId", "source") (plan D6); its productId is the same transaction's, so the
@@ -29,10 +32,12 @@ import wqs.domain.MoneyDirection;
  *       dead-lettered), so its currency is any transaction's -- MIN here.</li>
  *   <li>Every owner is ("ownerType", "userId"): every grouping and join below carries both.</li>
  *   <li>A zero-amount transaction ("zeroAmount") is a transaction row like any other, counted at
- *       TRANSACTION under its own "zeroAmount" = true counter rows, but in no rollup sum, no group key and
- *       no page unit; a session's and play's "zeroTxCount" counts them (plan D6), and a group exists
- *       only once it has a non-zero row. A zero-amount cancel cancels like any other.</li>
- *   <li>Counters are sparse: a stored row with cntAll = 0 is itself drift.</li>
+ *       TX under its own "zeroAmount" = true rows, but in no rollup sum and no group key; a standalone one
+ *       is a zero-amount ENTRY; a session's and play's "zeroTxCount" counts them (plan D6), and a group
+ *       exists only once it has a non-zero row. A zero-amount cancel cancels like any other.</li>
+ *   <li>Counts are sparse: a stored row with "cnt" = 0 is itself drift.</li>
+ *   <li>A cancel parked longer than the resolution threshold may be removed by pendingCancelResolution
+ *       (plan D3): its target, absent or arriving later, is then legitimately uncancelled.</li>
  * </ul>
  */
 public final class ProjectionInvariants {
@@ -40,28 +45,59 @@ public final class ProjectionInvariants {
     private static final String NOT_A_CANCELLATION = "(i.\"cancels\" is null or btrim(i.\"cancels\") = '')";
 
     /**
-     * Each view's page index, as a relation of the old per-view shape: /web is the "onWeb" rows of
-     * "wqPrjTimeline", /cc every row; both share "visibleExclCancelled" (a session never mixes
-     * sources).
+     * An endpoint's level-1/2 entries (plan D4) as one relation in the shape the page index had:
+     * ("ownerType", "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
+     * "visibleExclCancelled") -- its sessions (kind 0, by "startedAt", in the policy iff their
+     * "firstSource" is) merged with its standalone transactions (no batch id, not a cancellation, not
+     * zero-amount; kind = source). Every owner type, like the stored rows: callers filter the owner.
      */
-    public static final String WEB_TIMELINE = """
-            (select "ownerType", "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
-                    "visibleExclCancelled"
-             from "wqPrjTimeline" where "onWeb")""";
+    public static String entries(ReadPolicy policy) {
+        String sources = policy.sources().stream().map(k -> Integer.toString(k.code()))
+                .collect(Collectors.joining(", "));
+        return """
+                (select "ownerType", "userId", "startedAt" as "occurredAt", cast(0 as smallint) as "kind",
+                        "batchId" as "refId", "productId", "currency", "productType", "visibleExclCancelled"
+                 from "wqPrjSession" where "firstSource" in (%1$s)
+                 union all
+                 select "ownerType", "userId", "occurredAt", "source", "sourceId", "productId", "currency",
+                        "productType", not "cancelled"
+                 from "wqPrjTransaction"
+                 where "batchId" is null and "cancels" is null and not "zeroAmount" and "source" in (%1$s))""".formatted(sources);
+    }
+
+    /** /web's entries; see {@link #entries}. */
+    public static final String WEB_TIMELINE = entries(ReadPolicy.WEB);
+
+    /** /cc's entries; see {@link #entries}. */
+    public static final String CC_TIMELINE = entries(ReadPolicy.CC);
+
+    /**
+     * The transaction rows of /web's sources (what the dropped "wqPrjWebTransaction" view held), as a
+     * relation; /cc's are every row of "wqPrjTransaction".
+     */
+    public static final String WEB_TRANSACTIONS =
+            "(select * from \"wqPrjTransaction\" where \"source\" in (1, 3))";
+
     /** A table name double-quoted, or a parenthesised relation such as {@link #WEB_TIMELINE} as is. */
     public static String relation(String tableOrQuery) {
         return tableOrQuery.startsWith("(") ? tableOrQuery + " r" : "\"" + tableOrQuery + "\"";
     }
 
-    public static final String CC_TIMELINE = """
-            (select "ownerType", "userId", "occurredAt", "kind", "refId", "productId", "currency", "productType",
-                    "visibleExclCancelled"
-             from "wqPrjTimeline")""";
+    /** The pendingCancelResolution default (application.yaml: thresholdDays 7). */
+    public static final Duration RESOLUTION_THRESHOLD = Duration.ofDays(7);
 
     private final TestSql sql;
 
+    private final Duration resolutionThreshold;
+
     public ProjectionInvariants(JdbcClient jdbc) {
+        this(jdbc, RESOLUTION_THRESHOLD);
+    }
+
+    /** @param resolutionThreshold the pendingCancelResolution threshold the data was resolved with */
+    public ProjectionInvariants(JdbcClient jdbc, Duration resolutionThreshold) {
         this.sql = new TestSql(jdbc);
+        this.resolutionThreshold = resolutionThreshold;
     }
 
     /** Every invariant at once. */
@@ -75,12 +111,18 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * Cancellation itself (spec 6.3), on "wqPrjTransaction" (each transaction is stored once, so
-     * both views see the same flag): a transaction is "cancelled" exactly when a
-     * cancel row for it exists -- same source, same owner, "cancels" = its sourceId -- and then
+     * Cancellation itself (spec 6.3), on "wqPrjTransaction": a transaction is "cancelled" exactly when
+     * a live cancel row for it exists -- same source, same owner, "cancels" = its sourceId -- and then
      * "cancelledBy" is the least such cancel's sourceId (null otherwise). And "wqPrjPendingCancel"
-     * holds exactly the cancels whose target is absent (no locator row with that source,
-     * sourceId and user).
+     * holds exactly the cancels whose target is absent.
+     *
+     * <p>Resolution (plan D3): a cancel that waited for its target longer than the threshold may have
+     * been removed by pendingCancelResolution, and then never applies. A cancel is parked in its own
+     * insert's transaction, so its "parkedAt" is its row's "ingestedAt" (both now()). Such an EXPIRED
+     * cancel has no parked row, was ingested at least the threshold ago, and its target is absent or
+     * arrived at least the threshold after it (after the resolution). An expired cancel is in no
+     * expected cancel; one ingested the threshold ago whose target is still absent may be parked or
+     * resolved (the job may not have run yet).
      *
      * A drained cancel that failed and was dead-lettered (spec 6.3/6.4) legitimately reports here
      * as "cancel not applied": it is an incident awaiting replay, not a false positive.
@@ -88,15 +130,25 @@ public final class ProjectionInvariants {
     public List<String> cancellationDrift() {
         List<String> drift = new ArrayList<>();
         String cancels = "c.\"cancels\" is not null and btrim(c.\"cancels\") <> ''";
-        // Every cancel is a transaction row, zero-amount ones included.
+        String threshold = "make_interval(secs => " + resolutionThreshold.toSeconds() + ")";
+        // Every cancel is a transaction row, zero-amount ones included; "expired" per the class comment.
         String allCancels = """
-                select c."source", c."ownerType", c."userId", c."sourceId", c."cancels" as target
-                from "wqPrjTransaction" c where %s
-                """.formatted(cancels);
+                select c."source", c."ownerType", c."userId", c."sourceId", c."cancels" as target,
+                       (c."ingestedAt" <= now() - %2$s
+                        and not exists (select 1 from "wqPrjPendingCancel" p
+                                        where p."source" = c."source" and p."cancelSourceId" = c."sourceId")
+                        and not exists (select 1 from "wqPrjTransaction" t
+                                        where t."source" = c."source" and t."sourceId" = c."cancels"
+                                          and t."ownerType" = c."ownerType" and t."userId" = c."userId"
+                                          and t."ingestedAt" < c."ingestedAt" + %2$s)) as expired,
+                       c."ingestedAt" <= now() - %2$s as old
+                from "wqPrjTransaction" c where %1$s
+                """.formatted(cancels, threshold);
         drift.addAll(sql.rows("""
                 with cancel as (
                     select "source", "ownerType", "userId", target, min("sourceId") as "by"
                     from (%1$s) all_cancels
+                    where not expired
                     group by 1, 2, 3, 4
                 )
                 select case when i."cancelled" and k.target is null then 'cancelled without a cancel'
@@ -116,8 +168,8 @@ public final class ProjectionInvariants {
                 .stream().map(ProjectionInvariants::describe).toList());
         drift.addAll(sql.rows("""
                 with expected as (
-                    select c."source", c."sourceId", c.target as "cancels", c."ownerType", c."userId"
-                    from (%2$s) c
+                    select c."source", c."sourceId", c.target as "targetSourceId", c."ownerType", c."userId", c.old
+                    from (%1$s) c
                     where not exists (select 1 from "wqPrjTransaction" l
                                       where l."source" = c."source" and l."sourceId" = c.target
                                         and l."ownerType" = c."ownerType" and l."userId" = c."userId")
@@ -128,86 +180,95 @@ public final class ProjectionInvariants {
                        coalesce(e."userId", p."userId") as "userId",
                        coalesce(e."source", p."source") as "source",
                        coalesce(e."sourceId", p."cancelSourceId") as "cancelSourceId",
-                       coalesce(e."cancels", p."cancelsSourceId") as "cancelsSourceId"
+                       coalesce(e."targetSourceId", p."targetSourceId") as "targetSourceId"
                 from expected e
                 full outer join "wqPrjPendingCancel" p
                   on p."source" = e."source" and p."cancelSourceId" = e."sourceId"
-                 and p."cancelsSourceId" = e."cancels" and p."ownerType" = e."ownerType" and p."userId" = e."userId"
-                where e."sourceId" is null or p."cancelSourceId" is null
+                 and p."targetSourceId" = e."targetSourceId" and p."ownerType" = e."ownerType" and p."userId" = e."userId"
+                where (e."sourceId" is null or p."cancelSourceId" is null) and not coalesce(e.old, false)
                 order by 2, 3, 4, 5
-                """.formatted(cancels, allCancels))
+                """.formatted(allCancels))
                 .stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }
 
     /**
-     * P-2: every "wqPrjCount" row equals a live COUNT, and no other counter row exists.
+     * The first transaction of each session -- by ("occurredAt", "sourceId", "source") over its non-zero
+     * non-cancellation rows, cancelled or not (plan D6) -- with the session's entry key and visibility:
+     * ("ownerType", "userId", "batchId", "startedAt", "productId", "productType", "firstSourceId",
+     * "firstSource", currency, visible). A session's entry is visible while any such row is not cancelled.
+     */
+    private static final String SESSION_KEY = """
+            select i."ownerType", i."userId", i."batchId", min(i."occurredAt") as "startedAt",
+                   (array_agg(i."productId" order by i."occurredAt", i."sourceId", i."source"))[1] as "productId",
+                   (array_agg(i."productType" order by i."occurredAt", i."sourceId", i."source"))[1] as "productType",
+                   (array_agg(i."sourceId" order by i."occurredAt", i."sourceId", i."source"))[1] as "firstSourceId",
+                   (array_agg(i."source" order by i."occurredAt", i."sourceId", i."source"))[1] as "firstSource",
+                   min(i."currency"::text) as currency,
+                   bool_or(not i."cancelled") as visible
+            from "wqPrjTransaction" i
+            where i."batchId" is not null and (i."cancels" is null or btrim(i."cancels") = '') and not i."zeroAmount"
+            group by 1, 2, 3
+            """;
+
+    /**
+     * P-2: every "wqOwnerMonth" row equals a live COUNT, and no other row exists (plan D5).
      *
-     * Expected rows, per view, page unit, product-type key, type key and UTC day: TRANSACTION from the view's transaction rows (cancellation rows included; excl =
-     * not cancelled); HIGH_LEVEL from the view's page-index rows at each row's own (occurredAt,
-     * productType) -- a session row already sits at the session key -- with excl =
-     * "visibleExclCancelled". Each row counts under its own product type (when it has one) and the
-     * ALL sentinel ''. A productType of '' counts once, as the write path's key set does.
-     *
-     * The type key (D4): a TRANSACTION row counts under its own "type" and the ALL sentinel '', crossed
-     * with its product keys -- four keys, or two without a product type. HIGH_LEVEL rows never
-     * carry a type: only the type sentinel ''.
+     * Expected rows, per owner, UTC month and exact combination: TX from every transaction row
+     * (cancellations included; excl = not cancelled) at its (source, productType or '', type,
+     * zeroAmount); ENTRY from every standalone transaction (no batch id, not a cancellation; zero-amount
+     * ones under "zeroAmount") at its own (month, source, productType or '') and from every session at
+     * its key derived from its transactions -- (month of the first transaction, its source, its
+     * productType or '') -- with "type" '' and excl = visible.
      */
     public List<String> counterDrift() {
         return sql.rows("""
                 with src as (
-                    select 1 as v, 0 as u, "ownerType" as o, "userId", "occurredAt" as t, "productType" as p,
-                           not "cancelled" as vis, "type" as ty, "zeroAmount" as z from "wqPrjWebTransaction"
+                    select "ownerType" as o, "userId", "occurredAt" as t, "source"::int as s, 0 as u,
+                           coalesce("productType", '') as p, "type" as ty, "zeroAmount" as z, not "cancelled" as vis
+                    from "wqPrjTransaction"
                   union all
-                    select 2, 0, "ownerType", "userId", "occurredAt", "productType", not "cancelled", "type", "zeroAmount"
-                    from "wqPrjCcTransaction"
+                    select i."ownerType", i."userId", i."occurredAt", i."source"::int, 1,
+                           coalesce(i."productType", ''), '', i."zeroAmount", not i."cancelled"
+                    from "wqPrjTransaction" i
+                    where i."batchId" is null and %1$s
                   union all
-                    select 1, 1, "ownerType", "userId", "occurredAt", "productType", "visibleExclCancelled", '', false
-                    from %1$s web
-                  union all
-                    select 2, 1, "ownerType", "userId", "occurredAt", "productType", "visibleExclCancelled", '', false
-                    from %2$s cc
-                ),
-                keyed as (
-                    select distinct v, u, o, "userId", z, pk.prod, tk.typ, t, vis, src_id
-                    from (select row_number() over () as src_id, * from src) s,
-                         lateral (values (s.p), ('')) as pk(prod),
-                         lateral (values (s.ty), ('')) as tk(typ)
-                    where pk.prod is not null
+                    select k."ownerType", k."userId", k."startedAt", k."firstSource"::int, 1,
+                           coalesce(k."productType", ''), '', false, k.visible
+                    from (%2$s) k
                 ),
                 expected as (
-                    select o, "userId", v, u, z, prod, typ, (t at time zone 'UTC')::date as "day",
-                           count(*) as "cntAll", count(*) filter (where vis) as "cntExcl"
-                    from keyed group by 1, 2, 3, 4, 5, 6, 7, 8
+                    select o, "userId", date_trunc('month', t at time zone 'UTC')::date as "month", s, u, p, ty, z,
+                           count(*) as cnt, count(*) filter (where vis) as excl
+                    from src group by 1, 2, 3, 4, 5, 6, 7, 8
                 ),
                 stored as (
-                    select "ownerType"::int as o, "userId", "viewKind"::int as v, "pageUnit"::int as u,
-                           "zeroAmount" as z,
-                           "productType" as prod, "type" as typ, "day", "cntAll",
-                           "cntExclCancelled" as "cntExcl"
-                    from "wqPrjCount"
+                    select "ownerType" as o, "userId", "month", "source"::int as s, "unit"::int as u,
+                           "productType" as p, "type" as ty, "zeroAmount" as z,
+                           "cnt", "cntExclCancelled" as excl
+                    from "wqOwnerMonth"
                 )
-                select case when e."userId" is null then 'orphan counter row'
-                            when s."userId" is null then 'missing counter row'
-                            else 'counter mismatch' end as problem,
+                select case when e."userId" is null then 'orphan count row'
+                            when s."userId" is null then 'missing count row'
+                            else 'count mismatch' end as problem,
                        coalesce(e.o, s.o) as "ownerType",
                        coalesce(e."userId", s."userId") as "userId",
-                       coalesce(e.v, s.v) as "viewKind",
+                       coalesce(e."month", s."month") as "month",
+                       coalesce(e.s, s.s) as "source",
+                       case coalesce(e.u, s.u) when 0 then 'TX' else 'ENTRY' end as "unit",
+                       coalesce(e.p, s.p) as "productType",
+                       coalesce(e.ty, s.ty) as "type",
                        coalesce(e.z, s.z) as "zeroAmount",
-                       case coalesce(e.u, s.u) when 0 then 'TRANSACTION' else 'HIGH_LEVEL' end as "pageUnit",
-                       coalesce(e.prod, s.prod) as "productType",
-                       coalesce(e.typ, s.typ) as "type",
-                       coalesce(e."day", s."day") as "day",
-                       e."cntAll" as "expectedAll", s."cntAll" as "storedAll",
-                       e."cntExcl" as "expectedExcl", s."cntExcl" as "storedExcl"
+                       e.cnt as "expectedCnt", s.cnt as "storedCnt",
+                       e.excl as "expectedExcl", s.excl as "storedExcl"
                 from expected e
                 full outer join stored s
-                  on s.o = e.o and s."userId" = e."userId" and s.v = e.v and s.u = e.u and s.z = e.z
-                 and s.prod = e.prod and s.typ = e.typ and s."day" = e."day"
+                  on s.o = e.o and s."userId" = e."userId" and s."month" = e."month" and s.s = e.s and s.u = e.u
+                 and s.p = e.p and s.ty = e.ty and s.z = e.z
                 where e."userId" is null or s."userId" is null
-                   or e."cntAll" <> s."cntAll" or e."cntExcl" <> s."cntExcl"
+                   or e.cnt <> s.cnt or e.excl <> s.excl
                 order by 2, 3, 4, 5, 6, 7, 8, 9
-                """.formatted(WEB_TIMELINE, CC_TIMELINE))
+                """.formatted(NOT_A_CANCELLATION, SESSION_KEY))
                 .stream().map(ProjectionInvariants::describe).toList();
     }
 
@@ -331,95 +392,43 @@ public final class ProjectionInvariants {
     }
 
     /**
-     * P-8: each view's page index ("wqPrjTimeline" read as {@link #WEB_TIMELINE} or
-     * {@link #CC_TIMELINE}) holds exactly the rows its view's transactions justify, at the right
-     * key and with the right visibility.
-     *
-     * Per view V (its transaction view holds exactly the transactions whose source feeds V): one session row
-     * for each session with at least one non-cancellation transaction in V, at the session key
-     * (startedAt, productType) over ALL the session's non-cancellation transactions -- the product being
-     * the first transaction's by (occurredAt, sourceId, source), productId from the same transaction and carried
-     * on the row -- visible iff at least one of its non-cancellation transactions in V is not cancelled,
-     * carrying the session's currency; and one row per non-cancellation
-     * unsessioned transaction in V, at the transaction's own (occurredAt, productType) with its own productId
-     * and currency,
-     * visible iff the transaction is not cancelled. Rows are matched on (userId, kind, refId), so a row at the
-     * wrong key reads as a key mismatch rather than an orphan plus a missing row.
+     * P-8: each session's level-1/2 entry key and visibility (plan D4). Levels 1-2 merge the sessions
+     * with the standalone transaction rows themselves, so a session row is the only derived entry:
+     * its "startedAt", "productId" and "productType" (also checked by {@link #aggregationDrift}), its
+     * "firstSourceId" and "firstSource" -- the first transaction's identity, which decides the policies
+     * the session is shown in -- and its "visibleExclCancelled" must equal what its transactions justify.
+     * Missing and orphan session rows are reported by {@link #aggregationDrift}.
      */
     public List<String> highLevelDrift() {
-        List<String> drift = new ArrayList<>();
-        for (String[] view : new String[][] {
-                {"WEB", "wqPrjWebTransaction", WEB_TIMELINE}, {"CC", "wqPrjCcTransaction", CC_TIMELINE}}) {
-            drift.addAll(sql.rows("""
-                    with session_key as (
-                        select i."ownerType", i."userId", i."batchId", min(i."occurredAt") as "startedAt",
-                               (array_agg(i."productId"
-                                    order by i."occurredAt", i."sourceId", i."source"))[1] as "productId",
-                               (array_agg(i."productType"
-                                    order by i."occurredAt", i."sourceId", i."source"))[1] as "productType",
-                               min(i."currency"::text) as currency
-                        from "wqPrjTransaction" i
-                        where i."batchId" is not null and %3$s and not i."zeroAmount"
-                        group by 1, 2, 3
-                    ),
-                    expected as (
-                        select k."ownerType", k."userId", k."startedAt" as "occurredAt", 0::smallint as kind,
-                               k."batchId" as "refId", k."productId", k."productType", k.currency,
-                               bool_or(not i."cancelled") as visible
-                        from "%1$s" i
-                        join session_key k on k."ownerType" = i."ownerType" and k."userId" = i."userId"
-                         and k."batchId" = i."batchId"
-                        where %3$s and not i."zeroAmount"
-                        group by 1, 2, 3, 4, 5, 6, 7, 8
-                      union all
-                        select i."ownerType", i."userId", i."occurredAt", i."source", i."sourceId", i."productId",
-                               i."productType", i."currency"::text, not i."cancelled"
-                        from "%1$s" i
-                        where i."batchId" is null and %3$s and not i."zeroAmount"
-                    )
-                    select case when e."refId" is null then 'orphan page row'
-                                when h."refId" is null then 'missing page row'
-                                when e."occurredAt" <> h."occurredAt"
-                                  or e."productId" is distinct from h."productId"
-                                  or e."productType" is distinct from h."productType"
-                                  then 'page row key mismatch'
-                                when e.currency is distinct from h."currency"::text
-                                  then 'page row currency mismatch'
-                                else 'page row visibility mismatch' end as problem,
-                           '%4$s' as view,
-                           coalesce(e."ownerType", h."ownerType") as "ownerType",
-                           coalesce(e."userId", h."userId") as "userId",
-                           coalesce(e.kind, h."kind") as kind,
-                           coalesce(e."refId", h."refId") as "refId",
-                           e."occurredAt" as "expectedAt", h."occurredAt" as "storedAt",
-                           e."productId" as "expectedProductId", h."productId" as "storedProductId",
-                           e."productType" as "expectedProductType",
-                           h."productType" as "storedProductType",
-                           e.currency as "expectedCurrency", h."currency" as "storedCurrency",
-                           e.visible as "expectedVisible", h."visibleExclCancelled" as "storedVisible"
-                    from expected e
-                    full outer join %2$s h
-                      on h."ownerType" = e."ownerType" and h."userId" = e."userId" and h."kind" = e.kind
-                     and h."refId" = e."refId"
-                    where e."refId" is null or h."refId" is null
-                       or e."occurredAt" <> h."occurredAt"
-                       or e."productId" is distinct from h."productId"
-                       or e."productType" is distinct from h."productType"
-                       or e.currency is distinct from h."currency"::text
-                       or e.visible <> h."visibleExclCancelled"
-                    order by 3, 4, 5, 6
-                    """.formatted(view[1], view[2], NOT_A_CANCELLATION, view[0]))
-                    .stream().map(ProjectionInvariants::describe).toList());
-        }
-        return drift;
+        return sql.rows("""
+                with k as (%s)
+                select 'session entry mismatch' as problem,
+                       s."ownerType", s."userId", s."batchId",
+                       k."startedAt" as "expectedAt", s."startedAt" as "storedAt",
+                       k."firstSourceId" as "expectedFirstSourceId", s."firstSourceId" as "storedFirstSourceId",
+                       k."firstSource" as "expectedFirstSource", s."firstSource" as "storedFirstSource",
+                       k."productId" as "expectedProductId", s."productId" as "storedProductId",
+                       k."productType" as "expectedProductType", s."productType" as "storedProductType",
+                       k.visible as "expectedVisible", s."visibleExclCancelled" as "storedVisible"
+                from "wqPrjSession" s
+                join k on k."ownerType" = s."ownerType" and k."userId" = s."userId" and k."batchId" = s."batchId"
+                where k."startedAt" <> s."startedAt"
+                   or k."firstSourceId" is distinct from s."firstSourceId"
+                   or k."firstSource" is distinct from s."firstSource"
+                   or k."productId" is distinct from s."productId"
+                   or k."productType" is distinct from s."productType"
+                   or k.visible <> s."visibleExclCancelled"
+                order by 2, 3, 4
+                """.formatted(SESSION_KEY))
+                .stream().map(ProjectionInvariants::describe).toList();
     }
 
     /**
      * P-7 (spec 7.4), the stored half: every non-cancellation transaction whose product type is eInstant
-     * carries a non-null "batchId" in "wqPrjTransaction", and so "wqPrjTimeline" (either view's page
-     * index) holds no unsessioned eInstant row. {@code eInstantProductTypes} is {@code wqs.einstant.product-types}
+     * carries a non-null "batchId" in "wqPrjTransaction", and so no endpoint has a standalone eInstant
+     * entry. {@code eInstantProductTypes} is {@code wqs.einstant.product-types}
      * (plan D3); the classification is configuration, which is why this cannot be a check
-     * constraint. Cancellations are exempt, as at ingest (IngestRules): they never get a page row.
+     * constraint. Cancellations are exempt, as at ingest (IngestRules): they are never an entry.
      */
     public List<String> eInstantDrift(java.util.Collection<String> eInstantProductTypes) {
         List<String> drift = new ArrayList<>();
@@ -434,14 +443,6 @@ public final class ProjectionInvariants {
                 where i."batchId" is null and i."productType" = any(?::text[]) and %s and not i."zeroAmount"
                 order by 2, 3, 4
                 """.formatted(NOT_A_CANCELLATION), (Object) types)
-                .stream().map(ProjectionInvariants::describe).toList());
-        drift.addAll(sql.rows("""
-                select 'unsessioned eInstant page row' as problem,
-                       h."userId", h."kind", h."refId", h."productType", h."onWeb"
-                from "wqPrjTimeline" h
-                where h."kind" <> 0 and h."productType" = any(?::text[])
-                order by 2, 3, 4
-                """, (Object) types)
                 .stream().map(ProjectionInvariants::describe).toList());
         return drift;
     }

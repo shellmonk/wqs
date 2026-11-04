@@ -1,10 +1,10 @@
 -- WQS baseline schema. Every camelCase identifier is double-quoted (spec 3).
 --
--- Sentinels used across the schema: "productType" = '' is ALL product types (unreachable from
--- input: every blank is normalised to null at the domain boundary); "type" = '' is ALL
--- transaction types (a stored code is never blank). Products are strings on the wire
--- ("productId" "TIKIKALACABANA", "productType" "instants"); the eInstant view is selected by
--- product type (wqs.einstant.product-types).
+-- The owner-month model (plan 2026-11-04): seven tables. Everything is stored -- every source, every
+-- owner type, zero-amount stream transactions -- and what an endpoint shows is decided at read time by
+-- its read policy (wqs.read.ReadPolicy: sources, owner type, zero amounts), bound into every query.
+-- Nothing here knows the endpoints. Products are strings on the wire ("productId" "TIKIKALACABANA",
+-- "productType" "instants"); the eInstant view is selected by product type (wqs.einstant.product-types).
 
 -- ---------------------------------------------------------------------------------------------
 -- Level-0 transactions
@@ -12,7 +12,7 @@
 
 -- Level-0 rows, every source stored once (spec 4). "type" holds the transaction-type code as it
 -- arrived (wqs.domain.TransactionType, plan D1); a code the enum does not list is stored as-is and
--- rolls up as NEUTRAL. Each endpoint reads its own view below, never this table.
+-- rolls up as NEUTRAL. Both endpoints read this table, each through its read policy.
 --
 -- Every row is stored: non-player owners ("ownerType" <> 1) and zero-amount stream transactions too.
 -- "zeroAmount" marks a stream transaction (source 1) of amount 0 (spec 4.1: never shown, counted
@@ -53,15 +53,6 @@ create table "wqPrjTransaction" (
     primary key ("ownerType", "userId", "occurredAt", "transactionId"),
     constraint "wqPrjTransaction_sourceKey" unique ("source", "sourceId", "occurredAt")
 ) partition by range ("occurredAt");
-
--- The user-facing view: transactions (1) and claimable prizes (3) only -- the sources whose
--- wqs.domain.SourceKind.views() include WEB. /web code reads only this view.
-create view "wqPrjWebTransaction" as
-    select * from "wqPrjTransaction" where "source" in (1, 3);
-
--- The operator unified view: all five sources.
-create view "wqPrjCcTransaction" as
-    select * from "wqPrjTransaction";
 
 create sequence "wqTransactionIdSeq" as bigint;
 
@@ -105,7 +96,12 @@ create index "wqDeadLetter_failedAt_idx" on "wqDeadLetter" ("failedAt" desc);
 
 -- Sessions and plays are keyed by their business key and NOT partitioned: a transaction joining a
 -- group finds its row by ("ownerType", "userId", "batchId"[, "subBatchId"]) alone, and a late, earlier
--- transaction only updates "startedAt" in place (plan D5) -- no row move.
+-- transaction only updates "startedAt" in place (a re-anchor) -- no row move.
+--
+-- Levels 1-2 page the owner's sessions (by "startedAt") merged with their standalone transactions
+-- ("batchId" is null) -- there is no page-index table (plan D4). "visibleExclCancelled": the session
+-- keeps at least one surviving (non-cancelled, non-zero, non-cancellation) transaction, which is
+-- exactly "txCountExclCancelled" > 0, so it is generated from it and can never drift.
 --
 -- A session's (and a play's) product pair is its FIRST transaction's, first by
 -- ("occurredAt", "sourceId", "source"). "startedAt" already is the first transaction's occurredAt;
@@ -136,6 +132,7 @@ create table "wqPrjSession" (
     "productType"              text,
     "firstSourceId"            text,
     "firstSource"              smallint,
+    "visibleExclCancelled"     boolean       not null generated always as ("txCountExclCancelled" > 0) stored,
     primary key ("ownerType", "userId", "batchId")
 );
 
@@ -164,59 +161,46 @@ create table "wqPrjPlay" (
 );
 
 -- ---------------------------------------------------------------------------------------------
--- Level-1/2 page index
+-- Owner-month counts
 -- ---------------------------------------------------------------------------------------------
 
--- One narrow row per session and per unsessioned transaction, merged at WRITE time so paging stays a
--- single covering index scan (spec 5.6). A page index, not a payload store: it carries only what
--- ordering, filtering and counting need. Payload is fetched by "refId" during assembly.
+-- One row per owner, UTC month and EXACT combination (plan D5): a total over [from, to) sums the
+-- rows of its whole months and live-counts its two partial edge months. Not partitioned: a
+-- multi-year owner holds a few rows per month. Mutable in place -- a cancel arriving today lowers a
+-- count of a month long past (spec 5.7).
 --
--- Both endpoints share the rows. "onWeb": the row is on /web's timeline -- an unsessioned
--- transaction whose source feeds WEB, or a session holding at least one such transaction. /cc reads
--- every row. "visibleExclCancelled" serves both endpoints: a session cannot mix sources -- only
--- TRANSACTION and CLAIMABLE_PRIZE carry a batch id, both feed /web and /cc, and the writer
--- rejects any other sessioned source -- so a session's surviving transactions are the same on both.
-create table "wqPrjTimeline" (
-    "ownerType"               smallint    not null,
-    "userId"                  bigint      not null,
-    "occurredAt"              timestamptz not null,  -- session "startedAt", or the transaction's "occurredAt"
-    "kind"                    smallint    not null,  -- 0 = SESSION, otherwise the source code
-    "refId"                   text        not null,  -- "batchId" for a session, "sourceId" for a transaction
-    "productId"               text,
-    "currency"                char(3)     not null,
-    "onWeb"                   boolean     not null,
-    "visibleExclCancelled"    boolean     not null default true,
-    "productType"             text,
-    primary key ("ownerType", "userId", "occurredAt", "kind", "refId")
-) partition by range ("occurredAt");
-
--- ---------------------------------------------------------------------------------------------
--- Counters
--- ---------------------------------------------------------------------------------------------
-
--- One row per UTC day, keyed on (productType, type). Rows are sparse -- they exist only for days
--- where the user had activity. A total over [from, to) sums the rows of its whole days in one
--- index range, a few thousand tiny rows even for a multi-year range (plan D3). Counters are
--- mutable in place: a cancel arriving today can decrement a counter for a transaction from eight
--- months ago, which rules out append-only storage (spec 5.7). Monthly RANGE-partitioned on "day";
--- PartitionManager provisions the partitions.
+--   "unit"         0 = TX (one row per transaction: level 0), 1 = ENTRY (one per level-1/2 page entry:
+--                  a session, or a standalone transaction -- "batchId" null, not a cancellation).
+--   "source"       the transaction's source code; for a session ENTRY its first transaction's
+--                  ("firstSource"): a session belongs to a read policy iff that source does. A read
+--                  binds its policy's sources.
+--   "productType"  the row's product type, '' = none. NEVER "all": every combination is stored
+--                  exactly once, so a filtered total sums the rows its filter selects.
+--   "type"         the transaction-type code at TX, '' at ENTRY (levels 1-2 filter no type).
+--   "zeroAmount"   the counted rows are zero-amount stream transactions (plan D6): counted apart, read
+--                  only by a policy that shows them. A session ENTRY is never zero-amount.
 --
--- "zeroAmount": the counted rows are zero-amount stream transactions (counted apart, plan D6), so
--- a total that hides them reads only the false rows. HIGH_LEVEL rows are always false.
-create table "wqPrjCount" (
+-- A session's ENTRY row sits at its current (month of "startedAt", "firstSource", "productType"): a
+-- re-anchor or a relabel moves it. "cntExclCancelled" counts the visible ones (not cancelled; for a session,
+-- "visibleExclCancelled"). Rows are deleted when "cnt" reaches 0 (sparse, arrival-order independent).
+-- The months an owner has transactions in are its TX rows' months (TX rows are never deleted): the
+-- cancel-target lookup reads them (plan D3).
+create table "wqOwnerMonth" (
     "ownerType"         smallint not null,
     "userId"            bigint   not null,
-    "viewKind"          smallint not null,  -- 1 = WEB, 2 = CC
-    "pageUnit"          smallint not null,  -- 0 = TRANSACTION (L0), 1 = HIGH_LEVEL (L1/L2)
-    "productType"       text     not null,  -- '' = ALL product types
-    "type"              text     not null,  -- '' = ALL transaction types
+    "month"             date     not null,  -- first day of the UTC month
+    "source"            smallint not null,
+    "unit"              smallint not null,
+    "productType"       text     not null,
+    "type"              text     not null,
     "zeroAmount"        boolean  not null,
-    "day"               date     not null,  -- UTC
-    "cntAll"            bigint   not null default 0,
+    "cnt"               bigint   not null default 0,
     "cntExclCancelled"  bigint   not null default 0,
-    check ("cntAll" >= 0 and "cntExclCancelled" >= 0 and "cntExclCancelled" <= "cntAll"),
-    primary key ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type", "zeroAmount", "day")
-) partition by range ("day");
+    check ("cnt" >= 0 and "cntExclCancelled" >= 0 and "cntExclCancelled" <= "cnt"),
+    check ("unit" in (0, 1) and ("unit" = 0 or "type" = '')),
+    check (extract(day from "month") = 1),
+    primary key ("ownerType", "userId", "month", "source", "unit", "productType", "type", "zeroAmount")
+);
 
 -- ---------------------------------------------------------------------------------------------
 -- Pending cancels
@@ -227,7 +211,7 @@ create table "wqPrjCount" (
 -- order-independent.
 --
 -- A cancel targets a projected transaction of its OWN source (a TRANSACTION cancel cancels a TRANSACTION, a
--- PAYMENT cancel a PAYMENT), so the target is ("source", "cancelsSourceId") of the cancel's own owner.
+-- PAYMENT cancel a PAYMENT), so the target is ("source", "targetSourceId") of the cancel's own owner.
 -- sourceId alone is not unique across sources. The same-source assumption is to
 -- be confirmed with the producer (O-13).
 --
@@ -238,7 +222,7 @@ create table "wqPrjCount" (
 create table "wqPrjPendingCancel" (
     "source"          smallint      not null,
     "cancelSourceId"  text          not null,
-    "cancelsSourceId" text          not null,
+    "targetSourceId" text          not null,
     "ownerType"       smallint      not null,
     "userId"          bigint        not null,
     "occurredAt"      timestamptz   not null,
@@ -255,35 +239,35 @@ create table "wqPrjPendingCancel" (
     primary key ("source", "cancelSourceId")
 );
 
-create index "wqPrjPendingCancel_target_idx" on "wqPrjPendingCancel" ("source", "cancelsSourceId");
+create index "wqPrjPendingCancel_target_idx" on "wqPrjPendingCancel" ("source", "targetSourceId");
 
 -- ---------------------------------------------------------------------------------------------
 -- Read-path indexes
 -- ---------------------------------------------------------------------------------------------
 
--- Covering indexes for the read paths (spec 7.7), created on the partitioned parents so Postgres
--- propagates them to every partition. Level 0 filters by "productType" and "type", levels 1/2 by
--- "productType" only (transaction types filter only the nested transactions, never the page
--- index; spec 4.1). On the page index "kind" and "refId" are key columns, not INCLUDE, so it has a
--- total order ("occurredAt" desc, "kind" desc, "refId" desc) for level 1/2 paging, like "transactionId"
--- on the transactions.
+-- Created on the partitioned parent, so Postgres propagates them to every partition (spec 7.7).
 --
--- One index per table serves both endpoints. "source" is INCLUDEd so the /web view's
--- "source" in (1, 3) is checked inside an index-only scan; "onWeb" likewise for the /web
--- timeline. They are INCLUDE, not leading key columns: a key
--- ("userId", "onWeb", ...) would give /web an exact range but leave /cc (every row, ordered by
--- time) with no ordered scan short of a second index, and PG16 has no skip scan. /web pays a
--- filter on rows of other sources inside the same user's time range -- payments and adjustments,
--- a minority -- and keeps index order, so a LIMIT still stops early.
-create index "wqPrjTransaction_cover" on "wqPrjTransaction" ("ownerType", "userId", "occurredAt" desc, "transactionId" desc) include ("cancelled", "productType", "type", "source", "zeroAmount");
-create index "wqPrjTimeline_cover" on "wqPrjTimeline" ("ownerType", "userId", "occurredAt" desc, "kind" desc, "refId" desc) include ("productType", "visibleExclCancelled", "onWeb");
+-- Level 0: key ("ownerType", "userId", "occurredAt" desc, "transactionId" desc) is the page's total
+-- order; INCLUDE carries what the filters and the read policy check ("source", "productType", "type",
+-- "cancelled", "zeroAmount"), so a key query is an index-only scan whatever the endpoint. "source" is
+-- INCLUDE, not a key column: /cc reads every source in time order, and PG16 has no skip scan.
+create index "wqPrjTransaction_cover" on "wqPrjTransaction" ("ownerType", "userId", "occurredAt" desc, "transactionId" desc) include ("source", "productType", "type", "cancelled", "zeroAmount");
 
--- Level-1/2 assembly (spec 7.3 "each bounded by the page size"): a page's sessions' transactions are
--- fetched per session by batch id. Without this the only usable index is ("userId", "occurredAt"),
--- so a long-lived session made the fetch read every row of the user inside its window. Partial on
--- sessioned transactions: unsessioned rows never probe it. Sessions and plays need no extra index:
--- their primary keys lead with ("ownerType", "userId", "batchId").
+-- Levels 1-2, standalone entries: the transactions with no session, cancellations excluded (a
+-- cancellation is never a page entry). Key = the entry order (occurredAt desc, kind desc, refId desc)
+-- with kind = "source" and refId = "sourceId" -- unique with "occurredAt" (the unique key) -- so it
+-- merges with the session reading index below into one total order (plan D4).
+create index "wqPrjTransaction_standalone" on "wqPrjTransaction" ("ownerType", "userId", "occurredAt" desc, "source" desc, "sourceId" desc) include ("productType", "cancelled", "zeroAmount") where "batchId" is null and "cancels" is null;
+
+-- Level-1/2 assembly (spec 7.3): a page's sessions' transactions are fetched per session by batch id,
+-- and a new group's zero-amount rows are counted the same way. Partial on session members.
 create index "wqPrjTransaction_batch" on "wqPrjTransaction" ("ownerType", "userId", "batchId", "occurredAt") where "batchId" is not null;
+
+-- Levels 1-2, sessions: kind 0, refId = "batchId"; INCLUDE what the product filter and
+-- excludeCancelled read. The policy's "firstSource" check reads the heap row: sessions are updated by
+-- nearly every transaction, so their pages are rarely all-visible and an index-only scan would visit
+-- the heap anyway. Sessions and plays are otherwise found by primary key.
+create index "wqPrjSession_reading" on "wqPrjSession" ("ownerType", "userId", "startedAt" desc, "batchId" desc) include ("productType", "visibleExclCancelled");
 
 -- ---------------------------------------------------------------------------------------------
 -- Quartz JobStore

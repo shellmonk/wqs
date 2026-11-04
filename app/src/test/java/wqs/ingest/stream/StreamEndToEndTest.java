@@ -154,7 +154,7 @@ class StreamEndToEndTest extends PostgresTestBase {
         publish(event("e2e-3", "2033-09-03T09:00:00Z", "TT_BUY", "2.0000", null));
 
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
-            assertThat(count("select count(*) from \"wqPrjWebTransaction\" where \"userId\" = " + USER))
+            assertThat(count("select count(*) from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where \"userId\" = " + USER))
                     .isEqualTo(3);
             assertThat(count("select count(*) from \"wqPrjSession\" where \"userId\" = " + USER))
                     .isEqualTo(1);
@@ -165,7 +165,7 @@ class StreamEndToEndTest extends PostgresTestBase {
 
         // The real PRIZE sample landed as a row of the right type, product and session.
         var prize = db().row("select \"type\", \"productId\", \"productType\", \"batchId\", \"amount\""
-                + " from \"wqPrjWebTransaction\" where \"sourceId\" = 'e2e-2'");
+                + " from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where \"sourceId\" = 'e2e-2'");
         assertThat(prize.get("type", String.class)).isEqualTo("PRIZE");
         assertThat(prize.get("productId", String.class)).isEqualTo("TIKIKALACABANA");
         assertThat(prize.get("productType", String.class)).isEqualTo("instants");
@@ -189,10 +189,10 @@ class StreamEndToEndTest extends PostgresTestBase {
         lifecycle.start();
 
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
-                assertThat(count("select count(*) from \"wqPrjWebTransaction\" where \"userId\" = " + USER))
+                assertThat(count("select count(*) from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where \"userId\" = " + USER))
                         .isEqualTo(4));
         // No replay duplicates: every sourceId appears exactly once; dead letters unchanged.
-        assertThat(count("select count(distinct \"sourceId\") from \"wqPrjWebTransaction\" where \"userId\" = "
+        assertThat(count("select count(distinct \"sourceId\") from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where \"userId\" = "
                 + USER)).isEqualTo(4);
         assertThat(count("select count(*) from \"wqDeadLetter\"")).isEqualTo(1);
         // The 5th message is offset 4. Resuming AT the stored offset (3) instead of after it would

@@ -17,7 +17,7 @@ import net.jqwik.api.Tuple;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
+import wqs.read.ViewKind;
 import wqs.read.HighLevelFilter;
 import wqs.read.HighLevelRequest;
 import wqs.read.Level0Filter;

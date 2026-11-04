@@ -5,13 +5,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
-import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
 
 class MigrationTest extends PostgresTestBase {
 
     @Test
-    void transaction_tables_exist_and_are_range_partitioned() {
+    void only_the_transactions_are_range_partitioned() {
         List<String> partitioned = db().column("""
                        select c.relname
                        from pg_class c
@@ -21,51 +19,61 @@ class MigrationTest extends PostgresTestBase {
                        order by c.relname
                        """, String.class);
 
-        assertThat(partitioned).contains("wqPrjTransaction", "wqPrjTimeline")
-                .doesNotContain("wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjWebHighLevel", "wqPrjCcHighLevel");
+        assertThat(partitioned).containsExactly("wqPrjTransaction");
     }
 
     /**
-     * Each endpoint reads a view over the one "wqPrjTransaction" table. /web's holds exactly the
-     * sources whose {@link SourceKind#views()} include WEB -- the routing and the schema cannot
-     * drift apart -- and /cc's holds every row.
+     * The owner-month model's final schema: seven tables and no views. Endpoint knowledge is not in the
+     * data -- no per-endpoint view, no view kind, no "onWeb" -- and the page index, the per-day counters
+     * and the locator are gone.
      */
     @Test
-    void each_endpoint_has_a_transaction_view_with_its_own_sources() {
-        String webCodes = java.util.Arrays.stream(SourceKind.values())
-                .filter(k -> k.views().contains(ViewKind.WEB))
-                .map(k -> String.valueOf(k.code()))
-                .collect(java.util.stream.Collectors.joining(", "));
-        assertThat(relkind("wqPrjWebTransaction")).isEqualTo("v");
-        assertThat(relkind("wqPrjCcTransaction")).isEqualTo("v");
-        assertThat(viewDef("wqPrjWebTransaction")).contains("FROM \"wqPrjTransaction\"")
-                .endsWith("WHERE (source = ANY (ARRAY[" + webCodes + "]));");
-        assertThat(viewDef("wqPrjCcTransaction")).contains("FROM \"wqPrjTransaction\"").doesNotContain("WHERE");
-        assertThat(relkind("wqPrjWebHighLevel")).as("no per-view page index").isNull();
-        assertThat(relkind("wqPrjCcHighLevel")).as("no per-view page index").isNull();
-    }
-
-    /**
-     * One page index for both endpoints: "onWeb" marks /web's rows and one "visibleExclCancelled"
-     * serves both, because a session never mixes sources.
-     */
-    @Test
-    void the_timeline_carries_on_web_and_one_visibility() {
-        for (String column : List.of("onWeb", "visibleExclCancelled")) {
-            assertThat(columnType("wqPrjTimeline", column)).as(column).isEqualTo("boolean");
-            assertThat(nullable("wqPrjTimeline", column)).as(column).isFalse();
+    void the_schema_is_seven_tables_and_no_views() {
+        List<String> tables = db().column("""
+                select c.relname from pg_class c
+                join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = 'public' and c.relkind in ('r', 'p') and not c.relispartition
+                  and c.relname <> 'flyway_schema_history'
+                order by c.relname
+                """, String.class);
+        assertThat(tables).containsExactlyInAnyOrder("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqOwnerMonth",
+                "wqPrjPendingCancel", "wqIngestCursor", "wqDeadLetter");
+        assertThat(db().column("""
+                select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = 'public' and c.relkind in ('v', 'm')
+                """, String.class)).as("no views").isEmpty();
+        for (String gone : List.of("wqPrjTimeline", "wqPrjCount", "wqPrjWebTransaction", "wqPrjCcTransaction",
+                "wqPrjTransactionLocator")) {
+            assertThat(relkind(gone)).as(gone + " is gone").isNull();
         }
-        assertThat(columnType("wqPrjTimeline", "webVisibleExclCancelled")).as("no per-endpoint visibility").isNull();
+        assertThat(db().column("""
+                select table_name || '.' || column_name from information_schema.columns
+                where table_schema = 'public' and column_name in ('viewKind', 'onWeb', 'pageUnit')
+                """, String.class)).as("no endpoint columns").isEmpty();
+    }
+
+    /**
+     * Levels 1-2 page sessions merged with standalone rows (plan D4): a session's visibility with
+     * cancelled excluded is generated from its surviving-transaction count, one flag for every policy.
+     */
+    @Test
+    void sessions_carry_one_generated_visibility() {
+        assertThat(columnType("wqPrjSession", "visibleExclCancelled")).isEqualTo("boolean");
+        assertThat(nullable("wqPrjSession", "visibleExclCancelled")).isFalse();
+        assertThat(db().value("""
+                select generation_expression from information_schema.columns
+                where table_name = 'wqPrjSession' and column_name = 'visibleExclCancelled'
+                """, String.class)).contains("\"txCountExclCancelled\" > 0");
     }
 
     /** Owner identity is ("ownerType", "userId"): the owner type leads every owner key and index. */
     @Test
     void owner_type_leads_every_owner_key() {
-        for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCount")) {
+        for (String table : List.of("wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqOwnerMonth")) {
             assertThat(primaryKey(table)).as(table).startsWith("ownerType", "userId");
         }
         for (String table : List.of("wqPrjTransaction", "wqPrjPendingCancel",
-                "wqPrjSession", "wqPrjPlay", "wqPrjTimeline", "wqPrjCount")) {
+                "wqPrjSession", "wqPrjPlay", "wqOwnerMonth")) {
             assertThat(columnType(table, "ownerType")).as(table).isEqualTo("smallint");
             assertThat(nullable(table, "ownerType")).as(table).isFalse();
         }
@@ -78,7 +86,7 @@ class MigrationTest extends PostgresTestBase {
         assertThat(relkind("wqPrjPlay")).isEqualTo("r");
         assertThat(primaryKey("wqPrjSession")).containsExactly("ownerType", "userId", "batchId");
         assertThat(primaryKey("wqPrjPlay")).containsExactly("ownerType", "userId", "batchId", "subBatchId");
-        assertThat(relkind("wqPrjSession_startedAt")).as("no session time index: paging reads the timeline").isNull();
+        assertThat(relkind("wqPrjSession_startedAt")).as("one session time index: the reading index").isNull();
         assertThat(relkind("wqPrjGroupLocator")).as("no group locator").isNull();
         assertThat(relkind("wqPrjPlay_batch")).as("the play primary key serves the batch lookup").isNull();
     }
@@ -98,10 +106,6 @@ class MigrationTest extends PostgresTestBase {
     private static String relkind(String name) {
         return db().column("select relkind::text from pg_class where relname = ?", String.class, name)
                 .stream().findFirst().orElse(null);
-    }
-
-    private static String viewDef(String name) {
-        return db().value("select pg_get_viewdef(to_regclass(?)::oid)", String.class, "\"" + name + "\"").strip();
     }
 
     /**
@@ -134,7 +138,7 @@ class MigrationTest extends PostgresTestBase {
         List<String> columns = db().column("""
                        select column_name
                        from information_schema.columns
-                       where table_name = 'wqPrjWebTransaction'
+                       where table_name = 'wqPrjTransaction'
                        order by column_name
                        """, String.class);
 
@@ -145,8 +149,7 @@ class MigrationTest extends PostgresTestBase {
     // --- Final schema (baseline migration) ---------------------------------------------------
 
     private static final List<String> PRODUCT_TABLES = List.of(
-            "wqPrjTransaction", "wqPrjWebTransaction", "wqPrjCcTransaction", "wqPrjSession", "wqPrjPlay",
-            "wqPrjTimeline", "wqPrjPendingCancel");
+            "wqPrjTransaction", "wqPrjSession", "wqPrjPlay", "wqPrjPendingCancel");
 
     @Test
     void products_are_text_and_there_is_no_product_table() {
@@ -158,45 +161,45 @@ class MigrationTest extends PostgresTestBase {
                 .as("no product table").isNull();
     }
 
-    /** Plan D3: one per-day counter table, monthly partitioned on "day"; no month tier. */
+    /**
+     * Plan D5: one owner-month count table, keyed by owner, month and the exact combination; not
+     * partitioned. The month is a first-of-month date.
+     */
     @Test
-    void counter_pk_is_user_view_unit_productType_type_day() {
-        for (String table : List.of("wqPrjCount")) {
-            List<String> pk = db().column("""
-                    select a.attname
-                    from pg_index i
-                    join pg_class c on c.oid = i.indrelid
-                    cross join lateral unnest(i.indkey) with ordinality as k(attnum, pos)
-                    join pg_attribute a on a.attrelid = c.oid and a.attnum = k.attnum
-                    where c.relname = ? and i.indisprimary
-                    order by k.pos
-                    """, String.class, table);
-            assertThat(pk).as(table + " primary key").containsExactly(
-                    "ownerType", "userId", "viewKind", "pageUnit", "productType", "type", "zeroAmount", "day");
-            assertThat(columnType(table, "productType")).as(table).isEqualTo("text");
-            assertThat(columnType(table, "type")).as(table).isEqualTo("text");
-            assertThat(columnType(table, "productId")).as(table + " has no productId").isNull();
-        }
-        assertThat(columnType("wqPrjCount", "day")).isEqualTo("date");
+    void owner_month_key_is_owner_month_and_exact_combination() {
+        assertThat(primaryKey("wqOwnerMonth")).containsExactly(
+                "ownerType", "userId", "month", "source", "unit", "productType", "type", "zeroAmount");
+        assertThat(relkind("wqOwnerMonth")).as("not partitioned").isEqualTo("r");
+        assertThat(columnType("wqOwnerMonth", "month")).isEqualTo("date");
+        assertThat(columnType("wqOwnerMonth", "source")).isEqualTo("smallint");
+        assertThat(columnType("wqOwnerMonth", "unit")).isEqualTo("smallint");
+        assertThat(columnType("wqOwnerMonth", "productType")).isEqualTo("text");
+        assertThat(columnType("wqOwnerMonth", "cnt")).isEqualTo("bigint");
+        assertThat(columnType("wqOwnerMonth", "cntExclCancelled")).isEqualTo("bigint");
+        assertThat(columnType("wqOwnerMonth", "productId")).as("has no productId").isNull();
         assertThat(db().value("""
-                select pg_get_partkeydef(to_regclass('"wqPrjCount"')::oid)
-                """, String.class)).isEqualTo("RANGE (day)");
-        for (String gone : List.of("wqPrjCountMonth", "wqPrjCountDay")) {
+                select count(*) from pg_constraint
+                where conrelid = to_regclass('"wqOwnerMonth"')::oid and contype = 'c'
+                """, Long.class)).as("checks").isGreaterThanOrEqualTo(3);
+        for (String gone : List.of("wqPrjCount", "wqPrjCountMonth", "wqPrjCountDay")) {
             assertThat(relkind(gone)).as(gone + " is gone").isNull();
         }
-        for (String table : List.of("wqPrjCount")) {
-            assertThat(db().value("""
-                    select count(*) from pg_constraint
-                    where conrelid = to_regclass(?)::oid and contype = 'c'
-                    """, Long.class, "\"" + table + "\"")).as(table + " checks").isPositive();
-        }
+    }
+
+    /** Plan D3: a parked cancel names its target by ("source", "targetSourceId"). */
+    @Test
+    void a_parked_cancel_names_its_target() {
+        assertThat(primaryKey("wqPrjPendingCancel")).containsExactly("source", "cancelSourceId");
+        assertThat(columnType("wqPrjPendingCancel", "targetSourceId")).isEqualTo("text");
+        assertThat(nullable("wqPrjPendingCancel", "targetSourceId")).isFalse();
+        assertThat(columnType("wqPrjPendingCancel", "parkedAt")).isEqualTo("timestamp with time zone");
     }
 
     /** Plan D1: transaction types are a Java enum; every "type" column holds the code as text. */
     @Test
     void type_columns_are_text_and_there_is_no_type_table() {
         for (String table : List.of("wqPrjTransaction", "wqPrjPendingCancel",
-                "wqPrjCount")) {
+                "wqOwnerMonth")) {
             assertThat(columnType(table, "type")).as(table + ".type").isEqualTo("text");
             assertThat(nullable(table, "type")).as(table + ".type").isFalse();
         }
@@ -224,15 +227,21 @@ class MigrationTest extends PostgresTestBase {
         }
     }
 
-    /** Covering indexes INCLUDE the filter columns; the session-member indexes are on the batch id. */
+    /**
+     * The final read-path indexes: the level-0 cover, the standalone-row partial index and the session
+     * reading index (merged at levels 1-2, plan D4), and the session-member index.
+     */
     @Test
     void read_path_indexes_have_their_final_shape() {
         assertThat(indexDef("wqPrjTransaction_cover")).endsWith(
-                "(\"ownerType\", \"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (cancelled, \"productType\", type, source, \"zeroAmount\")");
-        assertThat(indexDef("wqPrjTimeline_cover")).endsWith(
-                "(\"ownerType\", \"userId\", \"occurredAt\" DESC, kind DESC, \"refId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\", \"onWeb\")");
+                "(\"ownerType\", \"userId\", \"occurredAt\" DESC, \"transactionId\" DESC) INCLUDE (source, \"productType\", type, cancelled, \"zeroAmount\")");
+        assertThat(indexDef("wqPrjTransaction_standalone")).endsWith(
+                "(\"ownerType\", \"userId\", \"occurredAt\" DESC, source DESC, \"sourceId\" DESC) INCLUDE (\"productType\", cancelled, \"zeroAmount\")"
+                        + " WHERE ((\"batchId\" IS NULL) AND (cancels IS NULL))");
         assertThat(indexDef("wqPrjTransaction_batch")).endsWith(
                 "(\"ownerType\", \"userId\", \"batchId\", \"occurredAt\") WHERE (\"batchId\" IS NOT NULL)");
+        assertThat(indexDef("wqPrjSession_reading")).endsWith(
+                "(\"ownerType\", \"userId\", \"startedAt\" DESC, \"batchId\" DESC) INCLUDE (\"productType\", \"visibleExclCancelled\")");
     }
 
     /** The Quartz JobStore lives in its own schema. */

@@ -94,7 +94,7 @@ class DeadLetterTest extends PostgresTestBase {
         source.queue(payload("tx-3", WHEN), 3);
         source.deliverAll();
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(2);
         assertThat(count()).isEqualTo(1);
         var row = db().row(
                 "select \"sourceId\", \"streamOffset\", \"stream\", \"source\", \"attempts\", "
@@ -147,7 +147,7 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(count()).isEqualTo(1);
         assertThat(db().value("select \"sourceId\" from \"wqDeadLetter\"", String.class))
                 .isEqualTo("tx-unmappable");
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(2L);
     }
 
@@ -170,7 +170,7 @@ class DeadLetterTest extends PostgresTestBase {
         source.deliverAll(); // 10 projects; 11 fails everywhere; 12 arrives while recovering
 
         assertThat(offsetStore.read(STREAM)).contains(10L);
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
         assertThat(source.closeCount()).isEqualTo(1);
 
         // Backoff has not elapsed: nothing happens.
@@ -186,7 +186,7 @@ class DeadLetterTest extends PostgresTestBase {
         source.redeliverFromSubscription();
         consumer.poll();
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(3);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(3);
         assertThat(offsetStore.read(STREAM)).contains(12L);
         assertThat(count()).isZero();
     }
@@ -212,12 +212,12 @@ class DeadLetterTest extends PostgresTestBase {
         // Stale handler 0 delivers far ahead; it must be ignored.
         source.deliverVia(0, payload("tx-1000", WHEN), 1000);
         consumer.poll();
-        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isZero();
         assertThat(offsetStore.read(STREAM)).isEmpty();
 
         // The live handler (1) feeds normally.
         source.deliverVia(1, payload("tx-1", WHEN), 1);
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(1L);
     }
 
@@ -236,13 +236,13 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(source.subscribeCount()).isEqualTo(2);
 
         source.deliverVia(0, payload("tx-999", WHEN), 999);
-        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isZero();
         assertThat(offsetStore.read(STREAM)).isEmpty();
     }
 
     @Test
     void an_error_thrown_by_the_writer_enters_recovery_and_is_rethrown() {
-        ProjectionWriter erroring = new ProjectionWriter(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null) {
+        ProjectionWriter erroring = new ProjectionWriter(null, null, null, null, null, null, null, null, null, null, null, null, null, null) {
             private int calls;
 
             @Override
@@ -270,7 +270,7 @@ class DeadLetterTest extends PostgresTestBase {
         consumer.poll();
         assertThat(source.subscribedFrom()).isZero();
         source.redeliverFromSubscription();
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(2);
         assertThat(offsetStore.read(STREAM)).contains(2L);
     }
 
@@ -286,7 +286,7 @@ class DeadLetterTest extends PostgresTestBase {
         source.queue(payload("tx-3", WHEN), 3);
         source.deliverAll();
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
         assertThat(count()).isZero();
         assertThat(offsetStore.read(STREAM)).isEmpty();
     }
@@ -332,7 +332,7 @@ class DeadLetterTest extends PostgresTestBase {
         clock.advance(Duration.ofSeconds(1));
         consumer.poll();                                  // window elapsed: batch covers 1..3
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(2);
         assertThat(offsetStore.read(STREAM)).contains(3L);
     }
 
@@ -403,7 +403,7 @@ class DeadLetterTest extends PostgresTestBase {
         assertThat(source.subscribeCount()).isEqualTo(1);
         // A late delivery through the pre-stop handler is inert as well.
         source.deliverVia(0, payload("tx-2", WHEN), 2);
-        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isZero();
     }
 
     /**
@@ -432,7 +432,7 @@ class DeadLetterTest extends PostgresTestBase {
                 java.nio.charset.StandardCharsets.UTF_8);
         assertThat(raw).contains("\"sourceId\":\"tx\\u0000bad\"");
         // Not stuck: the next event projected and the offset passed the poison.
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(6L);
         assertThat(source.subscribeCount()).isEqualTo(1);
     }
@@ -477,7 +477,7 @@ class DeadLetterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
+        return db().value("select count(*)::int from " + wqs.projection.ProjectionInvariants.relation(table), Integer.class);
     }
 
     /** Fails calls numbered failFrom..failTo (1-based), otherwise delegates to the real writer. */
@@ -488,7 +488,7 @@ class DeadLetterTest extends PostgresTestBase {
         private int calls;
 
         FlakyWriter(ProjectionWriter delegate, int failFrom, int failTo) {
-            super(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+            super(null, null, null, null, null, null, null, null, null, null, null, null, null, null);
             this.delegate = delegate;
             this.failFrom = failFrom;
             this.failTo = failTo;

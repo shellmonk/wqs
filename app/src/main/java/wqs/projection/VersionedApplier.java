@@ -22,7 +22,7 @@ import wqs.projection.source.DeltaRow;
  * <ul>
  *   <li>strictly newer version: only "detail" (the allowlisted map, which holds the status) and
  *       "versionAt" are replaced, on the one transaction row -- no counter, rollup or
- *       page-index row moves, because no field they depend on may change;</li>
+ *       entry moves, because no field they depend on may change;</li>
  *   <li>a newer version that differs in an immutable field is refused
  *       ({@code immutable-field-changed}) rather than silently retracted and re-applied (O-15);</li>
  *   <li>equal: a duplicate (the overlap window); older: stale, ignored.</li>

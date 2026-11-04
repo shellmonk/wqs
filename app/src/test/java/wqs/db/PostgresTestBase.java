@@ -57,15 +57,15 @@ public abstract class PostgresTestBase {
     /**
      * Empties every table the projection writer maintains, including the ingest cursor it
      * commits and the dead letters the ingest path records. The container is shared by all test classes, so clearing only some of them leaves
-     * derived state (rollups, page index, counters)
-     * pointing at rows that no longer exist -- e.g. a session locator without its session, or a
-     * page-index row whose counters another class deleted -- which the strict updaters then
+     * derived state (rollups, counts)
+     * pointing at rows that no longer exist -- e.g. a session whose count rows another class
+     * deleted -- which the strict updaters then
      * (correctly) reject.
      */
     protected static void clearProjection() {
         for (String table : java.util.List.of(
                 "wqPrjTransaction", "wqPrjSession", "wqPrjPlay",
-                "wqPrjTimeline", "wqPrjCount", "wqPrjPendingCancel",
+                "wqOwnerMonth", "wqPrjPendingCancel",
                 "wqIngestCursor", "wqDeadLetter")) {
             db().execute("delete from \"" + table + "\"");
         }

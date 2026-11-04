@@ -5,8 +5,9 @@ import static wqs.projection.Binds.timestamptz;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.time.YearMonth;
 import java.time.ZoneOffset;
-import java.util.EnumSet;
+import java.util.List;
 import java.util.Objects;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -16,7 +17,6 @@ import org.springframework.transaction.annotation.Transactional;
 import wqs.domain.MoneyDirection;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.TransactionType;
-import wqs.domain.ViewKind;
 
 /**
  * Maintains session and play aggregates incrementally (spec 5.5). Only ever called for transactions the
@@ -32,7 +32,7 @@ import wqs.domain.ViewKind;
  *   <li>"startedAt" = earliest occurredAt (LEAST). The rows are keyed by ("userId", "batchId"
  *       [, "subBatchId"]) and not partitioned, so a transaction earlier than the current start
  *       RE-ANCHORS the group in place: "startedAt" moves earlier on the same row (plan D5). Rows
- *       derived from the session's start -- its timeline row and HIGH_LEVEL counters -- follow
+ *       derived from the session's start -- its ENTRY count in "wqOwnerMonth" -- follow
  *       through {@link RollupResult#sessionKeyChanged}. Play and session re-anchor independently.</li>
  *   <li>"endedAt" = latest occurredAt (GREATEST).</li>
  *   <li>counts and money = sums. The ExclCancelled columns are the same sums over surviving
@@ -50,7 +50,9 @@ import wqs.domain.ViewKind;
  *   <li>"zeroTxCount" = the group's zero-amount rows (plan D6), which are stored but add nothing
  *       else: no count, money, start or label, and they never create a group. A zero-amount row
  *       joining an existing group adds one; a group's first non-zero row counts the zero-amount
- *       rows already stored for it (by the "_batch" index), so any arrival order converges.</li>
+ *       rows already stored for it, so any arrival order converges. That count is bounded to the
+ *       owner's months holding zero-amount rows ({@link OwnerMonths#withZeroAmounts}, usually none, and
+ *       then no query runs), one "_batch" index probe per such month.</li>
  *   <li>Keys are owner keys: ("ownerType", "userId", "batchId"[, "subBatchId"]).</li>
  *   <li>"currency" = the first-arriving transaction's. A session is single-currency: a transaction of another
  *       currency is dead-lettered before it gets here ({@link IngestRules}), so every transaction agrees
@@ -68,7 +70,7 @@ public class RollupUpdater {
             """;
     /** Locks an existing session row and reads the key fields a fold may change. */
     private static final String LOCK_SESSION = """
-            select "startedAt", "productId", "productType" from "wqPrjSession"
+            select "startedAt", "productId", "productType", "firstSource" from "wqPrjSession"
             where "ownerType" = ? and "userId" = ? and "batchId" = ?
             for update
             """;
@@ -95,7 +97,7 @@ public class RollupUpdater {
             """;
     private static final String CLAIM_SESSION = INSERT_SESSION + """
             on conflict do nothing
-            returning "productId", "productType", "currency"
+            returning "productId", "productType", "firstSource", "currency", "txCountExclCancelled"
             """;
 
     /**
@@ -138,18 +140,24 @@ public class RollupUpdater {
                 "totalPlaysExclCancelled" = "wqPrjSession"."totalPlaysExclCancelled" + excluded."totalPlaysExclCancelled",
                 "totalWinsExclCancelled" = "wqPrjSession"."totalWinsExclCancelled" + excluded."totalWinsExclCancelled",
                 "netExclCancelled" = "wqPrjSession"."netExclCancelled" + excluded."netExclCancelled"
-            returning "productId", "productType", "currency"
+            returning "productId", "productType", "firstSource", "currency", "txCountExclCancelled"
             """;
 
     /**
-     * The zero-amount rows already stored for a group that is being created, through the "_batch"
-     * index (no time bound: a group's rows may lie in any partition). Cancellations never fold, so
-     * a zero-amount cancellation is not counted either. {@code %s}: the play predicate or nothing.
+     * The zero-amount rows already stored for a group that is being created, one "_batch" index probe
+     * per month of the owner's that holds zero-amount rows (the month bounds as two parallel arrays, as
+     * the cancel lookup binds them; "offset 0" keeps each a per-month probe Postgres prunes to its
+     * partition). Cancellations never fold, so a zero-amount cancellation is not counted either.
+     * {@code %s}: the play predicate or nothing.
      */
-    private static final String ZERO_ROWS = """
-            select count(*) from "wqPrjTransaction"
-            where "ownerType" = ? and "userId" = ? and "batchId" = ?%s
-              and "zeroAmount" and "cancels" is null
+    static final String ZERO_ROWS = """
+            select count(*) from unnest(cast(? as timestamptz[]), cast(? as timestamptz[])) as "m" ("fromAt", "toAt")
+            cross join lateral (
+                select 1 from "wqPrjTransaction"
+                where "ownerType" = ? and "userId" = ? and "batchId" = ?%s
+                  and "occurredAt" >= "m"."fromAt" and "occurredAt" < "m"."toAt"
+                  and "zeroAmount" and "cancels" is null
+                offset 0) as "z"
             """;
     private static final String PLAY_ZERO = """
             update "wqPrjPlay" set "zeroTxCount" = "wqPrjPlay"."zeroTxCount" + 1
@@ -161,12 +169,15 @@ public class RollupUpdater {
             """;
 
     private static final RowMapper<SessionLabel> SESSION_LABEL = (rs, n) -> new SessionLabel(
-            rs.getString("productId"), rs.getString("productType"), rs.getString("currency"));
+            rs.getString("productId"), rs.getString("productType"), rs.getShort("firstSource"),
+            rs.getString("currency"), rs.getInt("txCountExclCancelled"));
 
     private final JdbcClient jdbc;
+    private final OwnerMonths ownerMonths;
 
-    public RollupUpdater(JdbcClient jdbc) {
+    public RollupUpdater(JdbcClient jdbc, OwnerMonths ownerMonths) {
         this.jdbc = jdbc;
+        this.ownerMonths = ownerMonths;
     }
 
     /**
@@ -190,9 +201,6 @@ public class RollupUpdater {
      * with the stream consumer, relies on retry rather than lock order: a 40P01 on either side rolls
      * that transaction back and is retried (the stream re-applies its batch, the poller's run fails
      * and the next fire re-polls), so both converge (phase 6 ruling I2).
-     *
-     * @throws IllegalArgumentException a sessioned transaction from a source that does not feed
-     *         every view; see {@link #requireSessionable}
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public RollupResult applyTransaction(ProjectionTransaction transaction) {
@@ -203,7 +211,6 @@ public class RollupUpdater {
             countZero(transaction);
             return RollupResult.NONE;
         }
-        requireSessionable(transaction);
 
         MoneyDirection direction = TransactionType.directionOf(transaction.type());
         BigDecimal plays = direction == MoneyDirection.PLAY ? transaction.amount().abs() : BigDecimal.ZERO;
@@ -249,33 +256,24 @@ public class RollupUpdater {
         boolean keyChanged = !sessionIsNew
                 && (!start.isEqual(before.startedAt())
                         || !Objects.equals(before.productId(), label.productId())
-                        || !Objects.equals(before.productType(), label.productType()));
+                        || !Objects.equals(before.productType(), label.productType())
+                        || before.firstSource() != label.firstSource());
+        // This live transaction is the session's only survivor after the fold: every earlier one was
+        // cancelled, so the session was hidden ("visibleExclCancelled" false) and is visible again.
+        boolean revived = !sessionIsNew && label.survivors() == 1;
         return new RollupResult(
                 sessionIsNew,
                 playIsNew,
                 start.toInstant(),
                 label.productId(),
                 label.productType(),
+                label.firstSource(),
                 label.currency(),
                 keyChanged ? before.startedAt().toInstant() : null,
                 keyChanged ? before.productType() : null,
-                keyChanged);
-    }
-
-    /**
-     * The sessioned-source rule: only sources that feed EVERY view (TRANSACTION and CLAIMABLE_PRIZE
-     * today, the only ones that carry a batch id) may open or join a session. A session therefore
-     * never mixes sources, and one "visibleExclCancelled" on its timeline row is right for both
-     * endpoints. {@link IngestRules#rejection} rejects such a transaction by name
-     * ({@code sessioned-source-not-on-every-view}) before anything of it is written, so this is an
-     * assertion: reaching it is a bug, and the non-transient exception dead-letters the transaction.
-     */
-    static void requireSessionable(ProjectionTransaction transaction) {
-        if (!transaction.source().views().containsAll(EnumSet.allOf(ViewKind.class))) {
-            throw new IllegalArgumentException("transaction " + transaction.sourceId() + " of source "
-                    + transaction.source() + " carries batchId " + transaction.batchId()
-                    + ", but only sources that feed every view may be sessioned");
-        }
+                keyChanged ? before.firstSource() : 0,
+                keyChanged,
+                revived);
     }
 
     /**
@@ -295,8 +293,13 @@ public class RollupUpdater {
 
     /** The zero-amount rows stored so far for the transaction's play ({@code play}) or session. */
     private int zeroRows(ProjectionTransaction transaction, boolean play) {
+        List<YearMonth> months = ownerMonths.withZeroAmounts(transaction.ownerType(), transaction.userId());
+        if (months.isEmpty()) {
+            return 0; // the common case: the owner has no zero-amount row, so nothing to count
+        }
+        String[][] bounds = OwnerMonths.bounds(months);
         var spec = jdbc.sql(ZERO_ROWS.formatted(play ? " and \"subBatchId\" = ?" : ""))
-                .params(transaction.ownerType(), transaction.userId(), transaction.batchId());
+                .params(bounds[0], bounds[1], transaction.ownerType(), transaction.userId(), transaction.batchId());
         if (play) {
             spec = spec.param(transaction.subBatchId());
         }
@@ -317,7 +320,7 @@ public class RollupUpdater {
         return jdbc.sql(LOCK_SESSION)
                 .params(transaction.ownerType(), transaction.userId(), transaction.batchId())
                 .query((rs, n) -> new SessionKey(rs.getObject("startedAt", OffsetDateTime.class),
-                        rs.getString("productId"), rs.getString("productType")))
+                        rs.getString("productId"), rs.getString("productType"), rs.getShort("firstSource")))
                 .optional()
                 .orElse(null);
     }
@@ -376,12 +379,16 @@ public class RollupUpdater {
                 c.net(), zeroTxCount};
     }
 
-    /** The session's labels after a fold: the first transaction's product pair, and the currency. */
-    private record SessionLabel(String productId, String productType, String currency) {
+    /**
+     * The session's labels after a fold: the first transaction's product pair and the currency; and
+     * its "txCountExclCancelled" (surviving transactions) after the fold.
+     */
+    private record SessionLabel(String productId, String productType, short firstSource, String currency,
+                                int survivors) {
     }
 
-    /** An existing session's start and product before this transaction is folded in. */
-    private record SessionKey(OffsetDateTime startedAt, String productId, String productType) {
+    /** An existing session's start, product and first source before this transaction is folded in. */
+    private record SessionKey(OffsetDateTime startedAt, String productId, String productType, short firstSource) {
     }
 
     /**

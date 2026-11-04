@@ -4,7 +4,7 @@ import java.time.Instant;
 import java.util.Set;
 import org.springframework.stereotype.Service;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ViewKind;
+import wqs.read.ViewKind;
 import wqs.read.HighLevelAssembler;
 import wqs.read.HighLevelEntry;
 import wqs.read.HighLevelFilter;
@@ -47,7 +47,7 @@ public class WebProjectionService {
     }
 
     /**
-     * A level-1 or level-2 page (spec 7.3): the page index walked and assembled in one reader
+     * A level-1 or level-2 page (spec 7.3): the entries walked and assembled in one reader
      * transaction (ruling R4). {@code transactionTypes} filters only the nested transactions (D11).
      * Arguments are validated by the caller: page and pageSize >= 1, from <= to.
      */

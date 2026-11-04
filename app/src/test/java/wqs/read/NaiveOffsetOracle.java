@@ -9,11 +9,11 @@ import java.util.Set;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.db.TestSql;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
 
 /**
- * The permanent naive-OFFSET oracle (spec 8.1): straight SQL against the view's transaction table (level
- * 0) or high-level page index (levels 1-2), no counters, no decomposition. Deliberately obvious and never optimised -- it is what the
+ * The permanent naive-OFFSET oracle (spec 8.1): straight SQL against the transaction table (level 0)
+ * or the naive merge of sessions and standalone transactions (levels 1-2, plan D4), each through the
+ * endpoint's read policy written out by hand, no counts, no decomposition. Deliberately obvious and never optimised -- it is what the
  * production reader is compared to.
  */
 public final class NaiveOffsetOracle {
@@ -30,7 +30,7 @@ public final class NaiveOffsetOracle {
 
     public long count(ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select count(*) from \"" + v.transactionView() + "\" where " + where(f, typeCodes, from, to, binds);
+        String sql = "select count(*) from \"wqPrjTransaction\" i where " + where(v, f, typeCodes, from, to, binds);
         // A non-numeric or null result is a broken oracle, not zero: fail loudly.
         return ((Number) this.sql.value(sql, Object.class, binds.toArray())).longValue();
     }
@@ -43,19 +43,31 @@ public final class NaiveOffsetOracle {
     public List<TransactionEntry> page(
             ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to, long offset, int limit) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select i.*, i.\"detail\"::text as \"detailText\", i.\"type\" as \"typeCode\" from \"" + v.transactionView()
-                + "\" i where "
-                + where(f, typeCodes, from, to, binds)
+        String sql = "select i.*, i.\"detail\"::text as \"detailText\", i.\"type\" as \"typeCode\""
+                + " from \"wqPrjTransaction\" i where "
+                + where(v, f, typeCodes, from, to, binds)
                 + " order by i.\"occurredAt\" desc, i.\"transactionId\" desc offset ? limit ?";
         binds.add(offset);
         binds.add(limit);
         return this.sql.rows(sql, binds.toArray()).stream().map(NaiveOffsetOracle::entry).toList();
     }
 
+    /** The endpoint's read policy, by hand: its sources, players only, no zero-amount rows. */
+    static ReadPolicy policy(ViewKind v) {
+        return switch (v) {
+            case WEB -> ReadPolicy.WEB;
+            case CC -> ReadPolicy.CC;
+        };
+    }
+
     private static String where(
-            Level0Filter f, Set<String> typeCodes, Instant from, Instant to, List<Object> binds) {
-        StringBuilder w = new StringBuilder("\"userId\" = ? and \"occurredAt\" >= ?::timestamptz and \"occurredAt\" < ?::timestamptz");
+            ViewKind v, Level0Filter f, Set<String> typeCodes, Instant from, Instant to, List<Object> binds) {
+        ReadPolicy p = policy(v);
+        StringBuilder w = new StringBuilder("\"ownerType\" = ? and \"userId\" = ? and \"source\" = any(?)"
+                + " and not \"zeroAmount\" and \"occurredAt\" >= ?::timestamptz and \"occurredAt\" < ?::timestamptz");
+        binds.add(p.ownerType());
         binds.add(f.userId());
+        binds.add(sources(p));
         // ISO-8601 with Z: an explicit UTC instant, independent of the session TimeZone.
         binds.add(from.toString());
         binds.add(to.toString());
@@ -79,19 +91,19 @@ public final class NaiveOffsetOracle {
 
     // ------------------------------------------------------------------ high-level (levels 1-2)
 
-    /** Live count of the view's page-index rows; no counters, no decomposition. */
+    /** Live count of the endpoint's entries (the naive merge); no counts, no decomposition. */
     public long highLevelCount(ViewKind v, HighLevelFilter f, Instant from, Instant to) {
         List<Object> binds = new ArrayList<>();
-        String sql = "select count(*) from " + highLevelTable(v) + " where " + highLevelWhere(f, from, to, binds);
+        String sql = "select count(*) from " + highLevelTable(v) + " where " + highLevelWhere(v, f, from, to, binds);
         return ((Number) this.sql.value(sql, Object.class, binds.toArray())).longValue();
     }
 
-    /** Plain {@code order by ... offset ... limit} over the page index, in the level-1/2 total order. */
+    /** Plain {@code order by ... offset ... limit} over the naive merge, in the level-1/2 total order. */
     public List<HighLevelKey> highLevelPage(
             ViewKind v, HighLevelFilter f, Instant from, Instant to, long offset, int limit) {
         List<Object> binds = new ArrayList<>();
         String sql = "select \"occurredAt\", \"kind\", \"refId\" from " + highLevelTable(v) + " where "
-                + highLevelWhere(f, from, to, binds)
+                + highLevelWhere(v, f, from, to, binds)
                 + " order by \"occurredAt\" desc, \"kind\" desc, \"refId\" desc offset ? limit ?";
         binds.add(offset);
         binds.add(limit);
@@ -108,8 +120,9 @@ public final class NaiveOffsetOracle {
         };
     }
 
-    private static String highLevelWhere(HighLevelFilter f, Instant from, Instant to, List<Object> binds) {
-        StringBuilder w = new StringBuilder("\"userId\" = ? and \"occurredAt\" >= ?::timestamptz and \"occurredAt\" < ?::timestamptz");
+    private static String highLevelWhere(ViewKind v, HighLevelFilter f, Instant from, Instant to, List<Object> binds) {
+        StringBuilder w = new StringBuilder("\"ownerType\" = ? and \"userId\" = ? and \"occurredAt\" >= ?::timestamptz and \"occurredAt\" < ?::timestamptz");
+        binds.add(policy(v).ownerType());
         binds.add(f.userId());
         binds.add(from.toString());
         binds.add(to.toString());
@@ -121,6 +134,10 @@ public final class NaiveOffsetOracle {
             binds.add(f.productTypes().toArray(String[]::new));
         }
         return w.toString();
+    }
+
+    private static Integer[] sources(ReadPolicy p) {
+        return p.sources().stream().map(SourceKind::code).toArray(Integer[]::new);
     }
 
     /** Same field rules as the view mappers: kind is the source's name, detail the raw JSON. */

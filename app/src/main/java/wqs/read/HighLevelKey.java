@@ -4,8 +4,8 @@ import java.time.Instant;
 
 /**
  * Position of a high-level row (a session or an unsessioned transaction, spec 5.6) in the level-1/2
- * total order ("occurredAt" desc, "kind" desc, "refId" desc) -- the page index's primary key,
- * less the user, read backwards. {@code kind} is 0 for a session, else the transaction's source code;
+ * total order ("occurredAt" desc, "kind" desc, "refId" desc) -- sessions and
+ * standalone transactions merged (plan D4). {@code kind} is 0 for a session, else the transaction's source code;
  * {@code refId} is the session's "batchId" or the transaction's "sourceId".
  */
 public record HighLevelKey(Instant occurredAt, short kind, String refId) {}

@@ -30,8 +30,8 @@ class TransactionInserterTest extends PostgresTestBase {
         assertThat(inserter.insertIfAbsent(transaction("tx-1"))).isTrue();
 
         assertThat(count("wqPrjTransaction")).isEqualTo(1);
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
-        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
     }
 
     @Test
@@ -42,8 +42,8 @@ class TransactionInserterTest extends PostgresTestBase {
 
         assertThat(inserter.insertIfAbsent(payment)).isTrue();
 
-        assertThat(count("wqPrjWebTransaction")).isZero();
-        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isZero();
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
     }
 
     @Test
@@ -54,8 +54,8 @@ class TransactionInserterTest extends PostgresTestBase {
 
         assertThat(secondInsert).isFalse();
         assertThat(count("wqPrjTransaction")).isEqualTo(1);
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
-        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
     }
 
     /** Plan D2: the duplicate key is (source, sourceId, occurredAt); sourceId alone is not unique across sources. */
@@ -94,7 +94,7 @@ class TransactionInserterTest extends PostgresTestBase {
         inserter.insertIfAbsent(withDetail);
 
         String gameCode = db().value("""
-                          select "detail" ->> 'gameCode' from "wqPrjWebTransaction" where "sourceId" = ?
+                          select "detail" ->> 'gameCode' from (select * from "wqPrjTransaction" where "source" in (1, 3)) w where "sourceId" = ?
                           """, String.class, "tx-detail");
         assertThat(gameCode).isEqualTo("CRZ8");
     }
@@ -111,12 +111,13 @@ class TransactionInserterTest extends PostgresTestBase {
                 "select \"transactionId\" from \"wqPrjTransaction\" where \"source\" = ? and \"sourceId\" = ?", Long.class,
                 SourceKind.TRANSACTION.code(), "tx-full");
 
-        for (String table : new String[] {"wqPrjWebTransaction", "wqPrjCcTransaction"}) {
+        for (String table : new String[] {wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS, "wqPrjTransaction"}) {
             var row = db().row(
                     "select \"userId\", \"transactionId\", \"source\", \"sourceId\", \"occurredAt\", "
                             + "\"productId\", \"productType\", \"batchId\", \"subBatchId\", \"type\", \"amount\", "
                             + "\"currency\", \"balanceAfter\", \"cancels\", \"cancelled\", "
-                            + "\"detail\" ->> 'gameCode' as game from \"" + table + "\" where \"sourceId\" = ?",
+                            + "\"detail\" ->> 'gameCode' as game from " + ProjectionInvariants.relation(table)
+                            + " where \"sourceId\" = ?",
                     "tx-full");
             assertThat(row.get("userId", Long.class)).as(table).isEqualTo(7L);
             assertThat(row.get("transactionId", Long.class)).as(table).isEqualTo(locatorId);
@@ -144,6 +145,6 @@ class TransactionInserterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
+        return db().value("select count(*)::int from " + wqs.projection.ProjectionInvariants.relation(table), Integer.class);
     }
 }

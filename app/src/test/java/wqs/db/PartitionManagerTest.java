@@ -22,12 +22,10 @@ class PartitionManagerTest extends PostgresTestBase {
     void creates_partitions_for_the_requested_window() {
         int created = manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 2);
 
-        // 3 months (Jan, Feb, Mar) x 3 partitioned tables
-        assertThat(created).isEqualTo(9);
+        // 3 months (Jan, Feb, Mar) x the one partitioned table
+        assertThat(created).isEqualTo(3);
         assertThat(testPartitionNames())
-                .contains("wqPrjTransaction_2031_01", "wqPrjTransaction_2031_02", "wqPrjTransaction_2031_03",
-                          "wqPrjTimeline_2031_01", "wqPrjTimeline_2031_02", "wqPrjTimeline_2031_03",
-                          "wqPrjCount_2031_01", "wqPrjCount_2031_02", "wqPrjCount_2031_03");
+                .containsExactlyInAnyOrder("wqPrjTransaction_2031_01", "wqPrjTransaction_2031_02", "wqPrjTransaction_2031_03");
     }
 
     @Test
@@ -75,26 +73,6 @@ class PartitionManagerTest extends PostgresTestBase {
         Integer januaryCount = db().value("select count(*)::int from \"wqPrjTransaction_2031_01\"", Integer.class);
         assertThat(februaryCount).isEqualTo(1);
         assertThat(januaryCount).isZero();
-    }
-
-    @Test
-    void date_partitioned_count_table_routes_first_and_last_day_of_a_month_correctly() {
-        manager.ensurePartitionsAhead(YearMonth.of(2031, 1), 1);
-
-        for (String day : List.of("2031-01-01", "2031-01-31", "2031-02-01", "2031-02-28")) {
-            db().execute("""
-                          insert into "wqPrjCount"
-                            ("ownerType","userId","viewKind","pageUnit","productType","type","zeroAmount","day","cntAll","cntExclCancelled")
-                          values (1, 1, 1, 0, '', '', false, date '%s', 1, 1)
-                          """.formatted(day));
-        }
-
-        assertThat(rowsIn("wqPrjCount_2031_01")).containsExactlyInAnyOrder("2031-01-01", "2031-01-31");
-        assertThat(rowsIn("wqPrjCount_2031_02")).containsExactlyInAnyOrder("2031-02-01", "2031-02-28");
-    }
-
-    private List<String> rowsIn(String partition) {
-        return db().column("select \"day\"::text from \"" + partition + "\"", String.class);
     }
 
     private void dropTestPartitions() {

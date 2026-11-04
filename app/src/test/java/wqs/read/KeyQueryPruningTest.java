@@ -22,12 +22,11 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
 
 /**
- * Plan D4: the key query is bounded by the days the page itself covers -- from the start of the
- * day holding the page's last row up to the end of the segment holding its first -- so a page
+ * Plan D5: the key query is bounded by the months the page itself covers -- from the start of the
+ * month holding the page's last row up to the end of the segment holding its first -- so a page
  * over a five-year range whose rows all sit in one month opens only that month's partition, not
  * every partition back to {@code from}. Checked on the plan of the key query the reader actually
  * ran, at both page units and in both views. (2037-2041: years no other test drops partitions of.)
@@ -41,7 +40,6 @@ class KeyQueryPruningTest extends ReadPropertyBase {
     private static final Instant FROM = Instant.parse("2037-01-01T00:00:00Z");
     private static final Instant TO = Instant.parse("2042-01-01T00:00:00Z");
     private static final Pattern TRANSACTION_PARTITION = Pattern.compile("wqPrjTransaction_(\\d{4}_\\d{2})");
-    private static final Pattern TIMELINE_PARTITION = Pattern.compile("wqPrjTimeline_(\\d{4}_\\d{2})");
 
     @Autowired @Qualifier("readerDataSource") javax.sql.DataSource readerDataSource;
 
@@ -138,7 +136,7 @@ class KeyQueryPruningTest extends ReadPropertyBase {
             assertThat(page.entries()).as(v.name()).isEqualTo(oracle.highLevelPage(v, f, FROM, TO, 4, 4))
                     .extracting(HighLevelKey::refId).allMatch(id -> id.startsWith("page-"));
             assertThat(recorder.executed()).as(v + " one key query").hasSize(1);
-            assertThat(partitions(recorder, TIMELINE_PARTITION)).as(v + " key query partitions")
+            assertThat(partitions(recorder, TRANSACTION_PARTITION)).as(v + " key query partitions (standalone side)")
                     .containsExactly("2040_03");
         }
     }

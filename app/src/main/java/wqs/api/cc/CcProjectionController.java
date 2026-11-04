@@ -10,7 +10,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import wqs.api.ProjectionParams;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ViewKind;
+import wqs.read.ViewKind;
 import wqs.read.ProjectionResponse;
 import wqs.read.ReadMetrics;
 import wqs.read.cc.CcProjectionService;

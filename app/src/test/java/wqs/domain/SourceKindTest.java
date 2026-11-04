@@ -7,16 +7,12 @@ import org.junit.jupiter.api.Test;
 class SourceKindTest {
 
     @Test
-    void transactions_and_prizes_feed_both_views() {
-        assertThat(SourceKind.TRANSACTION.views()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
-        assertThat(SourceKind.CLAIMABLE_PRIZE.views()).containsExactlyInAnyOrder(ViewKind.WEB, ViewKind.CC);
-    }
-
-    @Test
-    void operator_only_sources_feed_cc_alone() {
-        assertThat(SourceKind.PAYMENT.views()).containsExactly(ViewKind.CC);
-        assertThat(SourceKind.LIMIT.views()).containsExactly(ViewKind.CC);
-        assertThat(SourceKind.MANUAL_ADJUSTMENT.views()).containsExactly(ViewKind.CC);
+    void codes_are_the_stored_values() {
+        assertThat(SourceKind.TRANSACTION.code()).isEqualTo(1);
+        assertThat(SourceKind.MANUAL_ADJUSTMENT.code()).isEqualTo(2);
+        assertThat(SourceKind.CLAIMABLE_PRIZE.code()).isEqualTo(3);
+        assertThat(SourceKind.PAYMENT.code()).isEqualTo(4);
+        assertThat(SourceKind.LIMIT.code()).isEqualTo(5);
     }
 
     @Test

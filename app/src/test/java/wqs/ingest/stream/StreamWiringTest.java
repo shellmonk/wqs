@@ -81,7 +81,7 @@ class StreamWiringTest extends PostgresTestBase {
         source.deliverAll();
 
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
-            assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\"", Integer.class))
+            assertThat(db().value("select count(*)::int from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w", Integer.class))
                     .isEqualTo(1);
             assertThat(offsetStore.read(STREAM)).contains(0L);
         });

@@ -3,7 +3,6 @@ package wqs.read;
 import java.time.Instant;
 import java.util.List;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import wqs.domain.ViewKind;
 
 /** Level-0 reads of one view's projected transaction table. Stateless: every method takes the transaction's client. */
 public interface Level0Query {

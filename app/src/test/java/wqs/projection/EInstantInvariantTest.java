@@ -14,7 +14,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
+import wqs.read.ViewKind;
 import wqs.gen.TxTypes;
 import wqs.read.HighLevelEntry;
 import wqs.read.ProjectionResponse;
@@ -74,10 +74,10 @@ class EInstantInvariantTest extends ReadPropertyBase {
     @Test
     void dataset_offers_unsessioned_einstant_transactions_and_projects_the_rest() {
         assertThat(eInstant.productTypes()).contains("instants");
-        assertThat(db().count("\"wqPrjCcTransaction\" where \"sourceId\" like '%-loose%'")).isZero();
-        assertThat(db().count("\"wqPrjCcTransaction\" where \"productType\" = 'instants' and \"batchId\" is not null"))
+        assertThat(db().count("\"wqPrjTransaction\" where \"sourceId\" like '%-loose%'")).isZero();
+        assertThat(db().count("\"wqPrjTransaction\" where \"productType\" = 'instants' and \"batchId\" is not null"))
                 .isEqualTo(11);
-        assertThat(db().count("\"wqPrjCcTransaction\" where \"sourceId\" = 'e0-a-x'")).isOne();
+        assertThat(db().count("\"wqPrjTransaction\" where \"sourceId\" = 'e0-a-x'")).isOne();
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
@@ -86,19 +86,13 @@ class EInstantInvariantTest extends ReadPropertyBase {
         assertThat(new ProjectionInvariants(jdbc()).eInstantDrift(eInstant.productTypes())).isEmpty();
     }
 
-    /** The oracle above can fail: a stored unsessioned eInstant transaction and page row are drift. */
+    /** The oracle above can fail: a stored unsessioned eInstant transaction is drift. */
     @Test
     void einstant_drift_reports_an_unsessioned_transaction() {
         db().execute("""
                 update "wqPrjTransaction" set "batchId" = null, "subBatchId" = null where "sourceId" = 'e1-a'""");
-        db().execute("""
-                insert into "wqPrjTimeline" ("ownerType", "userId", "occurredAt", "kind", "refId", "productType", "currency",
-                        "onWeb")
-                values (1, 1, '2034-02-11T10:00:00Z', 1, 'planted', 'instants', 'EUR', true)""");
         assertThat(new ProjectionInvariants(jdbc()).eInstantDrift(eInstant.productTypes()))
-                .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant transaction").contains("e1-a"))
-                .anySatisfy(l -> assertThat(l).contains("unsessioned eInstant page row").contains("planted"))
-                .hasSize(2);
+                .singleElement().asString().contains("unsessioned eInstant transaction").contains("e1-a");
     }
 
     @Test

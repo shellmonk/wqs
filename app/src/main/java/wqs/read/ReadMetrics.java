@@ -10,7 +10,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.springframework.stereotype.Component;
-import wqs.domain.ViewKind;
 
 /**
  * Read-side metrics; names and tags per spec 11.2. Every meter is registered up front, for each

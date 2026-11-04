@@ -1,35 +1,25 @@
 package wqs.domain;
 
-import java.util.Set;
-
 /**
- * The five ingestion sources and which views each feeds (spec section 4).
- *
- * /web carries transactions and claimable prizes only; /cc carries all five. Routing lives here
- * so there is exactly one place that decides it.
+ * The five ingestion sources (spec section 4), by their stored code. Which endpoint shows which
+ * source is not domain knowledge: each endpoint's {@code wqs.read.ReadPolicy} states it.
  */
 public enum SourceKind {
 
-    TRANSACTION(1, Set.of(ViewKind.WEB, ViewKind.CC)),
-    MANUAL_ADJUSTMENT(2, Set.of(ViewKind.CC)),
-    CLAIMABLE_PRIZE(3, Set.of(ViewKind.WEB, ViewKind.CC)),
-    PAYMENT(4, Set.of(ViewKind.CC)),
-    LIMIT(5, Set.of(ViewKind.CC));
+    TRANSACTION(1),
+    MANUAL_ADJUSTMENT(2),
+    CLAIMABLE_PRIZE(3),
+    PAYMENT(4),
+    LIMIT(5);
 
     private final int code;
-    private final Set<ViewKind> views;
 
-    SourceKind(int code, Set<ViewKind> views) {
+    SourceKind(int code) {
         this.code = code;
-        this.views = views;
     }
 
     public int code() {
         return code;
-    }
-
-    public Set<ViewKind> views() {
-        return views;
     }
 
     public static SourceKind ofCode(int code) {

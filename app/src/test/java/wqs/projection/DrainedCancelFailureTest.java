@@ -120,7 +120,7 @@ class DrainedCancelFailureTest extends PostgresTestBase {
     }
 
     private static boolean cancelled(String sourceId) {
-        return db().value("select \"cancelled\" from \"wqPrjCcTransaction\" where \"sourceId\" = ?", Boolean.class, sourceId);
+        return db().value("select \"cancelled\" from \"wqPrjTransaction\" where \"sourceId\" = ?", Boolean.class, sourceId);
     }
 
     private static int count(String table) {

@@ -4,13 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static wqs.domain.SourceKind.TRANSACTION;
 
 import java.time.Instant;
-import java.time.LocalDate;
+import java.time.YearMonth;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import java.math.BigDecimal;
 import wqs.domain.ProjectionTransaction;
-import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
 import wqs.read.web.WebLevel0Query;
 
@@ -29,51 +28,61 @@ class CounterReaderTest extends Level0TestSupport {
         reset();
     }
 
+    private static final YearMonth JAN = YearMonth.of(2034, 1);
+    private static final YearMonth FEB = YearMonth.of(2034, 2);
+
     @Test
-    void counter_reader_matches_live_counts_per_day() {
+    void counter_reader_matches_live_counts_per_month() {
         project(
                 transaction(TRANSACTION, "a", "2034-01-10T10:00:00Z", "P11", null, null),
-                // No product type: only the ALL key counts it, so the day total equalling the
-                // live count proves the reader reads the ALL sentinel (''), not a product key.
-                transaction(TRANSACTION, "b", "2034-01-10T11:00:00Z", null, null, null),
+                // No product type: its row has productType '' (none), so the month total equalling
+                // the live count proves an unfiltered read sums every product type, none included.
+                transaction(TRANSACTION, "b", "2034-01-20T11:00:00Z", null, null, null),
                 transaction(TRANSACTION, "c", "2034-02-03T10:00:00Z", "P11", null, null),
                 transaction(TRANSACTION, "x", "2034-02-03T12:00:00Z", "P11", "a", null));
         Level0Filter all = new Level0Filter(USER, false);
 
-        var days = counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
-                LocalDate.parse("2034-01-01"), LocalDate.parse("2034-02-28"));
-        assertThat(days).containsEntry(LocalDate.parse("2034-01-10"),
-                web.count(readerJdbc, all, Instant.parse("2034-01-10T00:00:00Z"), Instant.parse("2034-01-11T00:00:00Z")));
-        assertThat(days).containsEntry(LocalDate.parse("2034-02-03"),
-                web.count(readerJdbc, all, Instant.parse("2034-02-03T00:00:00Z"), Instant.parse("2034-02-04T00:00:00Z")));
-        assertThat(days).containsOnlyKeys(LocalDate.parse("2034-01-10"), LocalDate.parse("2034-02-03"));
+        var months = counters.monthCounts(readerJdbc, ReadPolicy.WEB, USER, TX_UNIT, NONE, NO_TYPES, false, JAN, FEB);
+        assertThat(months).containsEntry(JAN,
+                web.count(readerJdbc, all, Instant.parse("2034-01-01T00:00:00Z"), Instant.parse("2034-02-01T00:00:00Z")));
+        assertThat(months).containsEntry(FEB,
+                web.count(readerJdbc, all, Instant.parse("2034-02-01T00:00:00Z"), Instant.parse("2034-03-01T00:00:00Z")));
+        assertThat(months).containsOnlyKeys(JAN, FEB).containsEntry(JAN, 2L);
 
         // excl column: "a" is cancelled
-        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, true,
-                LocalDate.parse("2034-01-01"), LocalDate.parse("2034-01-31")))
-                .containsEntry(LocalDate.parse("2034-01-10"), 1L);
-
-        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
-                LocalDate.parse("2034-01-09"), LocalDate.parse("2034-01-12")))
-                .containsOnly(java.util.Map.entry(LocalDate.parse("2034-01-10"), 2L));
-        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false,
-                LocalDate.parse("2034-01-11"), LocalDate.parse("2034-01-12"))).isEmpty();
+        assertThat(counters.monthCounts(readerJdbc, ReadPolicy.WEB, USER, TX_UNIT, NONE, NO_TYPES, true, JAN, JAN))
+                .containsOnly(java.util.Map.entry(JAN, 1L));
+        assertThat(counters.monthCounts(readerJdbc, ReadPolicy.WEB, USER, TX_UNIT, NONE, NO_TYPES, false,
+                YearMonth.of(2034, 3), YearMonth.of(2034, 5))).isEmpty();
     }
 
     @Test
-    void counter_reader_separates_views() {
+    void counter_reader_applies_the_policy_sources_owner_type_and_zero_amounts() {
         project(
                 transaction(TRANSACTION, "a", "2034-01-10T10:00:00Z", "P11", null, null),
-                transaction(wqs.domain.SourceKind.PAYMENT, "p", "2034-01-10T12:00:00Z", "P11", null, null));
+                transaction(wqs.domain.SourceKind.PAYMENT, "p", "2034-01-10T12:00:00Z", "P11", null, null),
+                new ProjectionTransaction((short) 2, USER, TRANSACTION, "n", Instant.parse("2034-01-11T10:00:00Z"),
+                        "P11", "keno", null, null, TxTypes.PLAY, new BigDecimal("1.0000"), "EUR", null, null, null),
+                new ProjectionTransaction(USER, TRANSACTION, "z", Instant.parse("2034-01-12T10:00:00Z"),
+                        "P11", "keno", null, null, TxTypes.PLAY, new BigDecimal("0.0000"), "EUR", null, null, null));
         Level0Filter all = new Level0Filter(USER, false);
-        LocalDate day = LocalDate.parse("2034-01-10");
-        Instant lo = Instant.parse("2034-01-10T00:00:00Z");
-        Instant hi = Instant.parse("2034-01-11T00:00:00Z");
+        Instant lo = Instant.parse("2034-01-01T00:00:00Z");
+        Instant hi = Instant.parse("2034-02-01T00:00:00Z");
         long webLive = web.count(readerJdbc, all, lo, hi);
         long ccLive = cc.count(readerJdbc, all, lo, hi);
-        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, NONE, NO_TYPES, false, day, day)).containsEntry(day, webLive);
-        assertThat(counters.dayCounts(readerJdbc, ReadPolicy.CC, USER, ViewKind.CC, TX_UNIT, NONE, NO_TYPES, false, day, day)).containsEntry(day, ccLive);
-        assertThat(webLive).isNotEqualTo(ccLive);
+        assertThat(counters.monthCounts(readerJdbc, ReadPolicy.WEB, USER, TX_UNIT, NONE, NO_TYPES, false, JAN, JAN))
+                .containsOnly(java.util.Map.entry(JAN, webLive));
+        assertThat(counters.monthCounts(readerJdbc, ReadPolicy.CC, USER, TX_UNIT, NONE, NO_TYPES, false, JAN, JAN))
+                .containsOnly(java.util.Map.entry(JAN, ccLive));
+        assertThat(webLive).isEqualTo(1);
+        assertThat(ccLive).isEqualTo(2);
+        // A policy that shows zero amounts, and one for the other owner type.
+        ReadPolicy withZeros = new ReadPolicy(ReadPolicy.WEB.sources(), (short) 1, true);
+        assertThat(counters.monthCounts(readerJdbc, withZeros, USER, TX_UNIT, NONE, NO_TYPES, false, JAN, JAN))
+                .containsOnly(java.util.Map.entry(JAN, 2L));
+        ReadPolicy owner2 = new ReadPolicy(ReadPolicy.WEB.sources(), (short) 2, false);
+        assertThat(counters.monthCounts(readerJdbc, owner2, USER, TX_UNIT, NONE, NO_TYPES, false, JAN, JAN))
+                .containsOnly(java.util.Map.entry(JAN, 1L));
     }
 
     @Test
@@ -91,18 +100,17 @@ class CounterReaderTest extends Level0TestSupport {
             }
         }
         project(transactions.toArray(ProjectionTransaction[]::new));
-        LocalDate mar = LocalDate.parse("2034-03-01");
-        LocalDate day = LocalDate.parse("2034-03-10");
-        LocalDate marEnd = LocalDate.parse("2034-03-31");
-        // A run of days summed over the month, and the single day: the same totals.
-        java.util.function.BiFunction<java.util.Set<String>, java.util.Set<String>, Long> month =
-                (p, t) -> counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, p, t, false, mar, marEnd)
+        YearMonth mar = YearMonth.of(2034, 3);
+        // A run of months summed, and the single month: the same totals.
+        java.util.function.BiFunction<java.util.Set<String>, java.util.Set<String>, Long> run =
+                (p, t) -> counters.monthCounts(readerJdbc, ReadPolicy.WEB, USER, TX_UNIT, p, t, false,
+                                YearMonth.of(2034, 1), YearMonth.of(2034, 6))
                         .values().stream().mapToLong(Long::longValue).sum();
-        java.util.function.BiFunction<java.util.Set<String>, java.util.Set<String>, Long> daily =
-                (p, t) -> counters.dayCounts(readerJdbc, ReadPolicy.WEB, USER, ViewKind.WEB, TX_UNIT, p, t, false, day, day)
-                        .getOrDefault(day, 0L);
+        java.util.function.BiFunction<java.util.Set<String>, java.util.Set<String>, Long> single =
+                (p, t) -> counters.monthCounts(readerJdbc, ReadPolicy.WEB, USER, TX_UNIT, p, t, false, mar, mar)
+                        .getOrDefault(mar, 0L);
 
-        for (var f : java.util.List.of(month, daily)) {
+        for (var f : java.util.List.of(run, single)) {
             assertThat(f.apply(NONE, NO_TYPES)).isEqualTo(31L);
             assertThat(f.apply(java.util.Set.of("a", "b"), NO_TYPES)).isEqualTo(15L);
             assertThat(f.apply(NONE, java.util.Set.of(TxTypes.WIN))).isEqualTo(9L);

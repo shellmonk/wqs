@@ -6,20 +6,15 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.YearMonth;
-import java.time.ZoneOffset;
 import java.util.List;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import wqs.domain.CounterSentinels;
 import wqs.domain.MoneyDirection;
-import wqs.domain.PageUnit;
 import wqs.domain.ProjectionTransaction;
-import wqs.domain.SourceKind;
 import wqs.domain.TransactionType;
-import wqs.domain.ViewKind;
 
 /**
  * Applies a cancellation to an already-projected transaction (spec 6.3), or parks it until the transaction
@@ -35,29 +30,26 @@ import wqs.domain.ViewKind;
  *
  * <p><b>Effects</b>, each the exact inverse of what the original contributed when it arrived:
  * <ul>
- *   <li>Transaction row: "cancelled" = true on the original's one row; the TRANSACTION
- *       excl-cancelled counter loses one in each view its source feeds, at the original's own (occurredAt, productType).
- *       cntAll is untouched -- a cancelled transaction is still returned when the filter is off.</li>
+ *   <li>Transaction row: "cancelled" = true on the original's one row; its TX excl-cancelled count
+ *       in "wqOwnerMonth" loses one, at the original's own (month, source, productType, type). "cnt" is
+ *       untouched -- a cancelled transaction is still returned when the filter is off.</li>
+ *   <li>A standalone original (no batch id) is its own level-1/2 entry: its ENTRY excl-cancelled
+ *       count loses one at its own key.</li>
  *   <li>Rollups (sessioned original): txCountExclCancelled -1 and the original's own money
  *       (computed exactly as {@link RollupUpdater} added it) on its play and its session; the
- *       session's playCountExclCancelled -1 when the play's txCountExclCancelled reaches 0.</li>
- *   <li>Page index: a session row is visible while the session has at least one surviving
- *       (non-cancelled, non-cancellation) transaction. A session never mixes sources (only sources
- *       that feed every view are sessioned, {@link RollupUpdater#requireSessionable}), so that is
- *       one check against "wqPrjTransaction" and one "visibleExclCancelled" flag for both
- *       endpoints. If nothing survives, the row flips to hidden and the HIGH_LEVEL excl-cancelled
- *       counter loses one in each view the original's source feeds, at the SESSION's key (start and
- *       productType from the session row, never the original's). An unsessioned original's own row
- *       flips at the transaction's key. A live transaction joining later revives the row
- *       ({@link HighLevelUpdater}).</li>
+ *       session's playCountExclCancelled -1 when the play's txCountExclCancelled reaches 0. When the
+ *       session's txCountExclCancelled reaches 0 nothing of it survives: its generated
+ *       "visibleExclCancelled" turns false and its ENTRY excl-cancelled count loses one, at the
+ *       SESSION's key (start, first source, productType from the session row, never the original's).
+ *       A live transaction joining later revives it ({@link RollupUpdater}).</li>
  * </ul>
  * The session's key is not touched: startedAt and the product fold over every transaction, cancelled or
- * not, so a cancel never moves a row.
+ * not, so a cancel never moves an entry.
  *
  * <p><b>A zero-amount original</b> (spec 4.1, plan D6) is stored like any other but is in no rollup
- * sum and no page unit: the cancel resolves against it -- it never parks -- marks its row cancelled
- * and takes it out of its own ("zeroAmount" = true) TRANSACTION excl-cancelled tally, and nothing
- * else. Nor does a live zero-amount row keep a session visible.
+ * sum: the cancel resolves against it -- it never parks -- marks its row cancelled and takes it out
+ * of its own ("zeroAmount" = true) TX excl-cancelled tally and, when standalone, of its own
+ * zero-amount ENTRY tally; nothing else. Nor does a live zero-amount row keep a session visible.
  *
  * <p><b>Owners.</b> Every lookup and update is by the owner ("ownerType", "userId"): a cancel resolves
  * only an original of its own owner, so owner "2-7" can never cancel player "1-7"'s transaction.
@@ -72,8 +64,6 @@ import wqs.domain.ViewKind;
  */
 @Component
 public class CancellationApplier {
-
-    private static final short KIND_SESSION = 0;
 
     /**
      * The original within the owner's months. The month bounds arrive as two parallel arrays, so the
@@ -116,7 +106,7 @@ public class CancellationApplier {
                 "totalWinsExclCancelled" = "wqPrjSession"."totalWinsExclCancelled" - ?,
                 "netExclCancelled" = "wqPrjSession"."netExclCancelled" - ?
             where "ownerType" = ? and "userId" = ? and "batchId" = ?
-            returning "ownerType", "userId", "batchId", "startedAt", "endedAt", "productType",
+            returning "ownerType", "userId", "batchId", "startedAt", "productType", "firstSource",
                       "txCountExclCancelled", "playCountExclCancelled"
             """;
 
@@ -128,9 +118,8 @@ public class CancellationApplier {
             rs.getBoolean("zeroAmount"));
     private static final RowMapper<Session> SESSION = (rs, n) -> new Session(
             rs.getShort("ownerType"), rs.getLong("userId"), rs.getString("batchId"),
-            rs.getObject("startedAt", OffsetDateTime.class),
-            rs.getObject("endedAt", OffsetDateTime.class), rs.getString("productType"),
-            rs.getInt("txCountExclCancelled"), rs.getInt("playCountExclCancelled"));
+            rs.getObject("startedAt", OffsetDateTime.class), rs.getString("productType"),
+            rs.getShort("firstSource"), rs.getInt("txCountExclCancelled"), rs.getInt("playCountExclCancelled"));
 
     private final JdbcClient jdbc;
     private final CounterUpdater counterUpdater;
@@ -163,7 +152,6 @@ public class CancellationApplier {
             return false;
         }
 
-        SourceKind source = SourceKind.ofCode(original.source());
         if (original.cancelled()) {
             lowerCancelledBy(cancel, original);
             return true;
@@ -173,29 +161,29 @@ public class CancellationApplier {
         short ownerType = original.ownerType();
         long userId = original.userId();
         Instant occurredAt = original.occurredAt().toInstant();
-        for (ViewKind view : source.views()) {
-            counterUpdater.uncountExclCancelled(
-                    ownerType, userId, view, PageUnit.TRANSACTION, original.productType(), original.type(),
-                    original.zeroAmount(), occurredAt);
-        }
+        counterUpdater.uncountTransactionExcl(ownerType, userId, occurredAt, original.source(),
+                original.productType(), original.type(), original.zeroAmount());
 
-        // A cancellation contributed to no rollup and no page unit, so cancelling one (should a
-        // producer ever do so) has only the transaction-level effect above. Nor did a zero-amount
-        // transaction (plan D6): in no rollup sum, no page unit.
-        if (isCancellation(original.cancels()) || original.zeroAmount()) {
+        // A cancellation contributed to no rollup and is no entry, so cancelling one (should a
+        // producer ever do so) has only the transaction-level effect above.
+        if (isCancellation(original.cancels())) {
             return true;
         }
-
         if (original.batchId() == null) {
-            hide(source, ownerType, userId, occurredAt, (short) source.code(), original.sourceId(),
-                    original.productType());
+            counterUpdater.uncountEntryExcl(ownerType, userId, occurredAt, original.source(),
+                    original.productType(), original.zeroAmount());
+            return true;
+        }
+        // A zero-amount session member is in no rollup sum (plan D6): its "zeroTxCount" counts it,
+        // cancelled or not.
+        if (original.zeroAmount()) {
             return true;
         }
 
         Session session = subtractFromRollups(original);
-        if (!sessionSurvives(session)) {
-            hide(source, ownerType, userId, session.startedAt().toInstant(), KIND_SESSION,
-                    session.batchId(), session.productType());
+        if (session.txCountExclCancelled() == 0) {
+            counterUpdater.uncountEntryExcl(ownerType, userId, session.startedAt().toInstant(),
+                    session.firstSource(), session.productType(), false);
         }
         return true;
     }
@@ -215,22 +203,13 @@ public class CancellationApplier {
         if (months.isEmpty()) {
             return null;
         }
-        String[] fromAt = new String[months.size()];
-        String[] toAt = new String[months.size()];
-        for (int i = 0; i < months.size(); i++) {
-            fromAt[i] = monthStart(months.get(i)).toString();
-            toAt[i] = monthStart(months.get(i).plusMonths(1)).toString();
-        }
+        String[][] bounds = OwnerMonths.bounds(months);
         return jdbc.sql(LOCATE_ORIGINAL)
-                .params(fromAt, toAt, (short) cancel.source().code(), cancel.cancels(), cancel.ownerType(),
+                .params(bounds[0], bounds[1], (short) cancel.source().code(), cancel.cancels(), cancel.ownerType(),
                         cancel.userId())
                 .query(ORIGINAL)
                 .optional()
                 .orElse(null);
-    }
-
-    private static Instant monthStart(YearMonth month) {
-        return month.atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 
     private void markCancelled(ProjectionTransaction cancel, Original original) {
@@ -284,40 +263,6 @@ public class CancellationApplier {
         return session;
     }
 
-    /**
-     * Whether the session keeps a surviving transaction. Every transaction of the session lies in
-     * [startedAt, endedAt] (both fold over all of them), so the bound loses nothing and lets the
-     * partitioned transaction table prune.
-     */
-    private boolean sessionSurvives(Session session) {
-        return Boolean.TRUE.equals(jdbc.sql(SURVIVOR)
-                .params(session.ownerType(), session.userId(), timestamptz(session.startedAt()),
-                        timestamptz(session.endedAt()), session.batchId(), "")
-                .query(Boolean.class)
-                .single());
-    }
-
-    /**
-     * Hides one page-index row and takes it out of the HIGH_LEVEL excl-cancelled tally of every
-     * view {@code source} feeds -- the views the row is counted in. The row was visible -- the
-     * original was a surviving transaction until now -- so anything but exactly one flip is a bug.
-     */
-    private void hide(SourceKind source, short ownerType, long userId, Instant at, short kind, String refId,
-                      String productType) {
-        int rows = jdbc.sql(HIDE)
-                .params(ownerType, userId, timestamptz(at), kind, refId)
-                .update();
-        if (rows != 1) {
-            throw new IllegalStateException("expected to hide exactly one visible page-index row,"
-                    + " hid " + rows + ": userId=" + userId + " at=" + at
-                    + " kind=" + kind + " refId=" + refId);
-        }
-        for (ViewKind view : source.views()) {
-            counterUpdater.uncountExclCancelled(ownerType, userId, view, PageUnit.HIGH_LEVEL, productType,
-                    CounterSentinels.ALL_TYPES, false, at);
-        }
-    }
-
     private static boolean isCancellation(String cancels) {
         return cancels != null && !cancels.isBlank();
     }
@@ -354,17 +299,11 @@ public class CancellationApplier {
             boolean cancelled, String cancels, boolean zeroAmount) {
     }
 
-    /** The session row after a cancel's subtraction: its key, bounds and survivor tallies. */
+    /** The session row after a cancel's subtraction: its entry key and survivor tallies. */
     private record Session(
-            short ownerType, long userId, String batchId, OffsetDateTime startedAt, OffsetDateTime endedAt,
-            String productType, int txCountExclCancelled, int playCountExclCancelled) {
+            short ownerType, long userId, String batchId, OffsetDateTime startedAt, String productType,
+            short firstSource, int txCountExclCancelled, int playCountExclCancelled) {
     }
-
-    private static final String HIDE = """
-            update "wqPrjTimeline" set "visibleExclCancelled" = false
-            where "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "kind" = ? and "refId" = ?
-              and "visibleExclCancelled" = true
-            """;
 
     private static final String IDENTIFIES = """
             "ownerType" = ? and "userId" = ? and "occurredAt" = ? and "source" = ? and "sourceId" = ?""";
@@ -376,12 +315,4 @@ public class CancellationApplier {
             update "wqPrjTransaction" set "cancelledBy" = least("wqPrjTransaction"."cancelledBy", ?)
             where %s
             """.formatted(IDENTIFIES);
-
-    private static final String SURVIVOR = """
-            select exists (
-                select 1 from "wqPrjTransaction"
-                where "ownerType" = ? and "userId" = ? and "occurredAt" between ? and ? and "batchId" = ?
-                  and "cancelled" = false and not "zeroAmount"
-                  and ("cancels" is null or trim("cancels") = ?))
-            """;
 }

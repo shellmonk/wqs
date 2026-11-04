@@ -62,7 +62,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.deliverAll();
         consumer.poll();
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(2);
         assertThat(offsetStore.read("wallet-transactions")).contains(2L);
     }
 
@@ -164,7 +164,7 @@ class StreamConsumerTest extends PostgresTestBase {
 
         assertThat(registry.find("wqs.ingest.events").tag("outcome", "duplicate").counter().count())
                 .isEqualTo(1.0);
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
     }
 
     @Test
@@ -190,7 +190,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.queue(payload("tx-10"), 10);
         source.deliverAll();
         consumer.poll();
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(10L);
     }
 
@@ -245,14 +245,14 @@ class StreamConsumerTest extends PostgresTestBase {
 
         assertThat(count("wqDeadLetter")).as("not dead-lettered").isZero();
         assertThat(offsetStore.read("wallet-transactions")).as("offset not advanced").isEmpty();
-        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isZero();
 
         clock.advance(Duration.ofSeconds(6));
         consumer.poll(); // backoff elapsed: re-subscribes from the stored offset
         source.redeliverFromSubscription();
         consumer.poll();
 
-        assertThat(count("wqPrjWebTransaction")).as("applied after recovery").isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).as("applied after recovery").isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(5L);
         assertThat(count("wqDeadLetter")).isZero();
     }
@@ -271,12 +271,16 @@ class StreamConsumerTest extends PostgresTestBase {
         consumer.poll();
 
         for (String table : java.util.List.of("wqPrjTransaction",
-                "wqPrjSession", "wqPrjPlay", "wqPrjTimeline")) {
+                "wqPrjSession", "wqPrjPlay")) {
             assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 2 and \"userId\" = 7",
                     Integer.class)).as(table).isEqualTo(1);
             assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 1",
                     Integer.class)).as(table).isZero();
         }
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"ownerType\" = 2 and \"userId\" = 7"
+                + " and \"unit\" = 1", Integer.class)).as("the session entry is the non-player's").isEqualTo(1);
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"ownerType\" = 1", Integer.class))
+                .isZero();
         assertThat(count("wqDeadLetter")).isZero();
         assertThat(offsetStore.read("wallet-transactions")).contains(4L);
     }
@@ -326,7 +330,7 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(db().row("select \"sourceId\", \"streamOffset\" from \"wqDeadLetter\"").asMap().values().toArray())
                 .containsExactly("tx-poison", 6L);
         assertThat(offsetStore.read("wallet-transactions")).contains(6L);
-        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isZero();
         assertThat(source.subscribeCount()).as("no recovery re-subscribe").isEqualTo(1);
     }
 
@@ -358,7 +362,7 @@ class StreamConsumerTest extends PostgresTestBase {
         source.redeliverFromSubscription();
         consumer.poll();
 
-        assertThat(count("wqPrjWebTransaction")).as("applied after recovery").isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).as("applied after recovery").isEqualTo(1);
         assertThat(offsetStore.read("wallet-transactions")).contains(5L);
         assertThat(count("wqDeadLetter")).isZero();
     }
@@ -389,14 +393,14 @@ class StreamConsumerTest extends PostgresTestBase {
             assertThat(count("wqDeadLetter")).as("%s is not poison", conflict).isZero();
             assertThat(offsetStore.read("wallet-transactions")).as("offset not advanced").isEmpty();
 
-            for (int round = 0; round < 3 && count("wqPrjWebTransaction") == 0; round++) {
+            for (int round = 0; round < 3 && count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS) == 0; round++) {
                 clock.advance(Duration.ofSeconds(6));
                 consumer.poll();
                 source.redeliverFromSubscription();
                 consumer.poll();
             }
 
-            assertThat(count("wqPrjWebTransaction")).as("applied after recovery").isEqualTo(1);
+            assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).as("applied after recovery").isEqualTo(1);
             assertThat(offsetStore.read("wallet-transactions")).contains(5L);
             assertThat(count("wqDeadLetter")).isZero();
             consumer.stop();
@@ -419,7 +423,7 @@ class StreamConsumerTest extends PostgresTestBase {
         assertThat(db().value("select \"sourceId\" from \"wqDeadLetter\"", String.class))
                 .isEqualTo("tx-rejected");
         assertThat(offsetStore.read("wallet-transactions")).contains(7L);
-        assertThat(count("wqPrjWebTransaction")).isZero();
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isZero();
     }
 
     /**
@@ -501,7 +505,7 @@ class StreamConsumerTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
+        return db().value("select count(*)::int from " + wqs.projection.ProjectionInvariants.relation(table), Integer.class);
     }
 
     private static final class MutableClock extends Clock {

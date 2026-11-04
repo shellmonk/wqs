@@ -46,63 +46,72 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     // --- P-2 -------------------------------------------------------------------------------------
 
     @Test
-    void a_bumped_product_counter_is_counter_drift() {
+    void a_bumped_product_count_is_counter_drift() {
         execute("""
-                update "wqPrjCount" set "cntAll" = "cntAll" + 1
-                where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
+                update "wqOwnerMonth" set "cnt" = "cnt" + 1
+                where "unit" = 1 and "productType" = 'bingo'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
-                .startsWith("counter mismatch").contains("pageUnit=HIGH_LEVEL", "productType=bingo");
+                .startsWith("count mismatch").contains("unit=ENTRY", "productType=bingo");
     }
 
     /**
-     * Ruling R1: the write path keys every HIGH_LEVEL counter at the ALL-types sentinel '', so a
-     * row at a real type code is drift -- the oracle compares "type" too, not only the product type.
+     * Counts are exact combinations: a TX row at another type code is drift -- the oracle compares
+     * "type" too, not only the product type. (An ENTRY row cannot carry a type at all: a CHECK.)
      */
     @Test
-    void a_counter_row_at_a_real_type_code_is_counter_drift() {
+    void a_count_row_at_another_type_code_is_counter_drift() {
         execute("""
-                update "wqPrjCount" set "type" = 'TT_BUY'
-                where "viewKind" = 2 and "pageUnit" = 1 and "productType" = 'bingo'""");
+                update "wqOwnerMonth" set "type" = 'TT_ELSEWHERE'
+                where "unit" = 0 and "source" = 4 and "type" <> '%s'""".formatted(TxTypes.CANCEL));
 
         assertThat(invariants.counterDrift()).hasSize(2)
-                .anySatisfy(d -> assertThat(d).startsWith("orphan counter row").contains(" type=TT_BUY "))
-                .anySatisfy(d -> assertThat(d).startsWith("missing counter row").contains(" type= "));
+                .anySatisfy(d -> assertThat(d).startsWith("orphan count row").contains(" type=TT_ELSEWHERE "))
+                .anySatisfy(d -> assertThat(d).startsWith("missing count row").contains(" source=4 "));
     }
 
     @Test
-    void a_stored_zero_counter_row_is_counter_drift() {
+    void a_stored_zero_count_row_is_counter_drift() {
         execute("""
-                insert into "wqPrjCount" ("ownerType", "userId", "viewKind", "pageUnit", "productType", "type",
-                    "zeroAmount", "day", "cntAll", "cntExclCancelled")
-                values (1, 1, 1, 1, 'ghost', '', false, date '2034-03-30', 0, 0)""");
+                insert into "wqOwnerMonth" ("ownerType", "userId", "month", "source", "unit", "productType", "type",
+                    "zeroAmount", "cnt", "cntExclCancelled")
+                values (1, 1, date '2034-03-01', 1, 1, 'ghost', '', false, 0, 0)""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
-                .startsWith("orphan counter row").contains("productType=ghost");
+                .startsWith("orphan count row").contains("productType=ghost");
     }
 
     @Test
-    void a_deleted_counter_row_is_counter_drift() {
+    void a_deleted_count_row_is_counter_drift() {
         execute("""
-                delete from "wqPrjCount"
-                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "type" = ''
-                  and "day" = date '2034-04-01'""");
+                delete from "wqOwnerMonth"
+                where "unit" = 1 and "source" = 4 and "month" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
-                .startsWith("missing counter row");
+                .startsWith("missing count row").contains("source=4", "unit=ENTRY");
     }
 
     @Test
     void a_changed_excl_cancelled_count_alone_is_counter_drift() {
-        // /cc transactions on April 1: pay1 (cancelled), c1 and pc1 -- excl is 2 of 3.
+        // pay1 is cancelled: its ENTRY counts 1, 0 of it visible.
         execute("""
-                update "wqPrjCount" set "cntExclCancelled" = "cntExclCancelled" - 1
-                where "viewKind" = 2 and "pageUnit" = 0 and "productType" = '' and "type" = ''
-                  and "day" = date '2034-04-01'""");
+                update "wqOwnerMonth" set "cntExclCancelled" = "cntExclCancelled" + 1
+                where "unit" = 1 and "source" = 4 and "month" = date '2034-04-01'""");
 
         assertThat(invariants.counterDrift()).singleElement().asString()
-                .startsWith("counter mismatch").contains("expectedAll=3 storedAll=3",
-                        "expectedExcl=2 storedExcl=1");
+                .startsWith("count mismatch").contains("expectedCnt=1 storedCnt=1",
+                        "expectedExcl=0 storedExcl=1");
+    }
+
+    /** A standalone entry belongs to its own source: counted under another, it is drift on both keys. */
+    @Test
+    void an_entry_counted_under_another_source_is_counter_drift() {
+        execute("""
+                update "wqOwnerMonth" set "source" = 1 where "unit" = 1 and "source" = 4""");
+
+        assertThat(invariants.counterDrift()).hasSize(2)
+                .anySatisfy(d -> assertThat(d).startsWith("orphan count row").contains(" source=1 "))
+                .anySatisfy(d -> assertThat(d).startsWith("missing count row").contains(" source=4 "));
     }
 
     // --- P-4 -------------------------------------------------------------------------------------
@@ -188,54 +197,43 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
     // --- P-8 -------------------------------------------------------------------------------------
 
+    /** "visibleExclCancelled" is generated from the survivor count: corrupting the count flips it. */
     @Test
-    void a_flipped_page_row_visibility_is_high_level_drift() {
-        // One flag serves both endpoints, so both views report it.
+    void a_flipped_session_visibility_is_high_level_drift() {
         execute("""
-                update "wqPrjTimeline" set "visibleExclCancelled" = not "visibleExclCancelled"
-                where "kind" = 0""");
-
-        assertThat(invariants.highLevelDrift()).hasSize(2)
-                .allSatisfy(l -> assertThat(l).startsWith("page row visibility mismatch").contains("refId=b1"))
-                .anySatisfy(l -> assertThat(l).contains("view=WEB"))
-                .anySatisfy(l -> assertThat(l).contains("view=CC"));
-    }
-
-    @Test
-    void a_session_row_missing_from_one_view_is_high_level_drift() {
-        // Materialisation is per view: the session must be on /web as well as /cc.
-        execute("""
-                update "wqPrjTimeline" set "onWeb" = false
-                where "kind" = 0""");
+                update "wqPrjSession" set "txCountExclCancelled" = 0""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("missing page row").contains("view=WEB", "kind=0", "refId=b1");
+                .startsWith("session entry mismatch").contains("batchId=b1", "expectedVisible=true", "storedVisible=false");
+    }
+
+    /** The first source decides which policies show the session, and keys its count. */
+    @Test
+    void a_session_with_another_first_source_is_high_level_drift() {
+        execute("""
+                update "wqPrjSession" set "firstSource" = 4""");
+
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("session entry mismatch").contains("expectedFirstSource=3", "storedFirstSource=4");
     }
 
     @Test
-    void a_session_row_with_another_currency_is_high_level_drift() {
+    void a_session_with_another_first_source_id_is_high_level_drift() {
         execute("""
-                update "wqPrjTimeline" set "currency" = 'USD' where "kind" = 0""");
+                update "wqPrjSession" set "firstSourceId" = 'zz'""");
 
-        // One shared row: both endpoints' page indexes carry the wrong currency.
-        assertThat(invariants.highLevelDrift()).hasSize(2)
-                .allSatisfy(d -> assertThat(d).startsWith("page row currency mismatch")
-                        .contains("expectedCurrency=EUR", "storedCurrency=USD"))
-                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
-                .anySatisfy(d -> assertThat(d).contains("view=CC"));
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("session entry mismatch").contains("expectedFirstSourceId=a1", "storedFirstSourceId=zz");
     }
 
-    /** The counter key is the session's product type, so the page row must carry the right one. */
+    /** The count key is the session's product type, so the session must carry the right one. */
     @Test
-    void a_session_row_with_another_product_type_is_high_level_drift() {
+    void a_session_with_another_product_type_is_high_level_drift() {
         execute("""
-                update "wqPrjTimeline" set "productType" = 'lottery' where "kind" = 0""");
+                update "wqPrjSession" set "productType" = 'lottery'""");
 
-        assertThat(invariants.highLevelDrift()).hasSize(2)
-                .allSatisfy(d -> assertThat(d).startsWith("page row key mismatch")
-                        .contains("expectedProductType=bingo", "storedProductType=lottery"))
-                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
-                .anySatisfy(d -> assertThat(d).contains("view=CC"));
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("session entry mismatch").contains("expectedProductType=bingo", "storedProductType=lottery");
     }
 
     @Test
@@ -249,7 +247,7 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
     /**
      * D6: the oracle expects the FIRST transaction's pair. Here the per-column LEAST is (P03, arcade) --
-     * no transaction's product -- while the first transaction's is (P13, arcade); a session or page row carrying
+     * no transaction's product -- while the first transaction's is (P13, arcade); a session carrying
      * the LEAST id is drift.
      */
     @Test
@@ -261,16 +259,11 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
 
         execute("""
                 update "wqPrjSession" set "productId" = 'P03' where "batchId" = 'b2'""");
-        execute("""
-                update "wqPrjTimeline" set "productId" = 'P03' where "refId" = 'b2'""");
 
         assertThat(invariants.aggregationDrift()).singleElement().asString()
                 .startsWith("session mismatch").contains("batchId=b2");
-        assertThat(invariants.highLevelDrift()).hasSize(2)
-                .allSatisfy(d -> assertThat(d).startsWith("page row key mismatch")
-                        .contains("refId=b2", "expectedProductId=P13", "storedProductId=P03"))
-                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
-                .anySatisfy(d -> assertThat(d).contains("view=CC"));
+        assertThat(invariants.highLevelDrift()).singleElement().asString()
+                .startsWith("session entry mismatch").contains("batchId=b2", "expectedProductId=P13", "storedProductId=P03");
     }
 
     private static ProjectionTransaction labelled(String id, Instant at, String productId, String productType) {
@@ -279,33 +272,12 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     }
 
     @Test
-    void a_page_row_at_a_stale_key_is_high_level_drift() {
+    void a_session_at_a_stale_start_is_high_level_drift() {
         execute("""
-                update "wqPrjTimeline" set "occurredAt" = "occurredAt" + interval '1 day'
-                where "kind" = 0""");
-
-        assertThat(invariants.highLevelDrift()).hasSize(2)
-                .allSatisfy(d -> assertThat(d).startsWith("page row key mismatch"))
-                .anySatisfy(d -> assertThat(d).contains("view=WEB"))
-                .anySatisfy(d -> assertThat(d).contains("view=CC"));
-    }
-
-    @Test
-    void a_page_row_for_a_cc_only_transaction_in_web_is_high_level_drift() {
-        execute("""
-                update "wqPrjTimeline" set "onWeb" = true where "kind" = 4 and "refId" = 'pay1'""");
+                update "wqPrjSession" set "startedAt" = "startedAt" + interval '1 day'""");
 
         assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("orphan page row").contains("view=WEB", "refId=pay1");
-    }
-
-    @Test
-    void a_deleted_unsessioned_page_row_is_high_level_drift() {
-        execute("""
-                delete from "wqPrjTimeline" where "kind" = 4""");
-
-        assertThat(invariants.highLevelDrift()).singleElement().asString()
-                .startsWith("missing page row").contains("refId=pay1");
+                .startsWith("session entry mismatch").contains("batchId=b1");
     }
 
     // --- fixtures --------------------------------------------------------------------------------
@@ -370,12 +342,48 @@ class ProjectionInvariantsTest extends ProjectionPropertyBase {
     @Test
     void a_parked_cancel_whose_target_exists_is_cancellation_drift() {
         execute("""
-                insert into "wqPrjPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "ownerType", "userId",
+                insert into "wqPrjPendingCancel" ("source", "cancelSourceId", "targetSourceId", "ownerType", "userId",
                     "occurredAt", "type", "amount", "currency")
                 values (1, 'c9', 't2', 1, 1, timestamptz '2034-04-01 00:00:00+00', 'TT_CANCEL', 1, 'EUR')""");
 
         assertThat(invariants.cancellationDrift()).singleElement().asString()
                 .startsWith("unexpected pending cancel").contains("cancelSourceId=c9");
+    }
+
+    // --- resolution (plan D3) -----------------------------------------------------------------
+
+    /**
+     * A cancel parked longer than the threshold may be removed by pendingCancelResolution: then its
+     * absent target, and a target arriving after the resolution, are legitimately uncancelled. The same
+     * states with a young cancel, or a target that arrived in time, are drift.
+     */
+    @Test
+    void a_resolved_cancel_leaves_its_target_legitimately_uncancelled() {
+        execute("""
+                insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId",
+                    "occurredAt", "type", "amount", "currency", "cancels", "ingestedAt")
+                values (1, 1, -3, 1, 'c-exp', timestamptz '2034-04-01 03:00:00+00', 'TT_CANCEL', 1, 'EUR', 't-late',
+                        now() - interval '8 days')""");
+        assertThat(invariants.cancellationDrift()).as("resolved: no parked row, target absent").isEmpty();
+
+        execute("""
+                insert into "wqPrjTransaction" ("ownerType", "userId", "transactionId", "source", "sourceId",
+                    "occurredAt", "type", "amount", "currency")
+                values (1, 1, -4, 1, 't-late', timestamptz '2034-04-01 01:00:00+00', 'TT_BUY', 1, 'EUR')""");
+        assertThat(invariants.cancellationDrift()).as("resolved, then the target arrived").isEmpty();
+
+        execute("""
+                update "wqPrjTransaction" set "ingestedAt" = now() - interval '7 days 23 hours'
+                where "sourceId" = 't-late'""");
+        assertThat(invariants.cancellationDrift()).as("the target arrived before the resolution could run")
+                .singleElement().asString().startsWith("cancel not applied").contains("sourceId=t-late");
+
+        execute("""
+                delete from "wqPrjTransaction" where "sourceId" = 't-late'""");
+        execute("""
+                update "wqPrjTransaction" set "ingestedAt" = now() - interval '6 days' where "sourceId" = 'c-exp'""");
+        assertThat(invariants.cancellationDrift()).as("too young to be resolved")
+                .singleElement().asString().startsWith("missing pending cancel").contains("cancelSourceId=c-exp");
     }
 
     private void execute(String sql) {

@@ -1,7 +1,6 @@
 package wqs.read;
 
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -19,12 +18,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import wqs.config.ReaderJdbc;
 import wqs.config.ReaderTx;
 import wqs.domain.PageUnit;
-import wqs.domain.ViewKind;
 import wqs.read.Segment.Tier;
 
 /**
  * Paged reads assembled from counters and live slices (spec 7.5, 7.6), for both page units: level
- * 0 pages the view's transaction table (TRANSACTION), levels 1 and 2 its high-level page index (HIGH_LEVEL). One
+ * 0 pages the view's transaction table (TRANSACTION), levels 1 and 2 its entries -- sessions merged with standalone transactions (HIGH_LEVEL). One
  * counter-assisted offset walk serves both; a per-unit adapter supplies the counter key, the live
  * count and the key query.
  *
@@ -105,7 +103,7 @@ public class ProjectionReader {
         return readerTx.execute(status -> segmentCounts(readerJdbc, transactionUnit(q, f), from, to).total());
     }
 
-    /** Per-segment TRANSACTION counts of [from, to): counters for whole days, live for the partial boundary days. */
+    /** Per-segment TRANSACTION counts of [from, to): counts for whole months, live for the partial edge months. */
     public SegmentCounts segmentCounts(
             JdbcClient tx, Level0Query q, Level0Filter f, Instant from, Instant to) {
         return segmentCounts(tx, transactionUnit(q, f), from, to);
@@ -115,10 +113,11 @@ public class ProjectionReader {
 
     /**
      * One level-1/2 page of the request's view (ruling R4): the same counter-assisted offset walk
-     * as level 0, over the high-level page index and its HIGH_LEVEL counters. The total, the key
+     * as level 0, over the owner's entries (sessions merged with standalone transactions, plan D4) and
+     * their ENTRY counts. The total, the key
      * walk and {@code assemble(tx, keys)} all run inside ONE REPEATABLE READ reader transaction
      * (the phase-4 snapshot rule), so the assembler must read through the {@code tx} it is given.
-     * It receives the page's keys in page-index order and is not called for a page past the end,
+     * It receives the page's keys in entry order and is not called for a page past the end,
      * which is empty with the correct total.
      */
     public <R> HighLevelPage<R> readHighLevel(
@@ -147,12 +146,12 @@ public class ProjectionReader {
         return new HighLevelPage<>(out.walk().total(), out.entries());
     }
 
-    /** Exact page-index row count of [from, to), in one REPEATABLE READ transaction. */
+    /** Exact level-1/2 entry count of [from, to), in one REPEATABLE READ transaction. */
     public long total(HighLevelQuery q, HighLevelFilter f, Instant from, Instant to) {
         return readerTx.execute(status -> segmentCounts(readerJdbc, highLevelUnit(q, f), from, to).total());
     }
 
-    /** Per-segment HIGH_LEVEL counts of [from, to): counters for whole days, live for the partial boundary days. */
+    /** Per-segment HIGH_LEVEL counts of [from, to): counts for whole months, live for the partial edge months. */
     public SegmentCounts segmentCounts(
             JdbcClient tx, HighLevelQuery q, HighLevelFilter f, Instant from, Instant to) {
         return segmentCounts(tx, highLevelUnit(q, f), from, to);
@@ -161,9 +160,9 @@ public class ProjectionReader {
     // ------------------------------------------------------------------ the walk, per page unit
 
     /**
-     * What the walk needs of one page unit: its counter key (unit, view, read policy, user, product types,
-     * transaction types -- always empty for HIGH_LEVEL, whose counters carry none (plan D4) --
-     * and excludeCancelled), a live count and an ordered key query over a sub-range.
+     * What the walk needs of one page unit: its count key (unit, read policy, user, product types,
+     * transaction types -- always empty for HIGH_LEVEL, whose counts carry none -- and
+     * excludeCancelled), a live count and an ordered key query over a sub-range.
      */
     private record Unit<K>(
             PageUnit pageUnit, ViewKind view, ReadPolicy policy, long userId, Set<String> productTypes, Set<String> typeCodes,
@@ -210,15 +209,15 @@ public class ProjectionReader {
     private record Outcome<E>(Walk<?> walk, List<E> entries) {}
 
     /**
-     * The counter-assisted offset walk (spec 7.6, plan D4), inside the caller's transaction:
+     * The counter-assisted offset walk (spec 7.6, plan D5), inside the caller's transaction:
      * count every segment of [from, to) and walk them newest-first, to the segment holding the
      * page's first unit and on to the segment holding its last (where the running count from the
      * first reaches residual + limit). ONE ordered key query then runs over exactly those
      * segments -- from the first's end down to the last's start, never below {@code from} --
      * skipping only the residual. Segment counts are exact, so the bounded range holds the
-     * page's units in the same order as [from, end) would; units tied on one instant share a day,
+     * page's units in the same order as [from, end) would; units tied on one instant share a month,
      * and so a segment, so the bound never splits a tie. Only the partitions of the page's own
-     * days are opened. A page past the end runs no key query.
+     * months are opened. A page past the end runs no key query.
      */
     private <K> Walk<K> walk(JdbcClient tx, Unit<K> u, Instant from, Instant to, long page, long pageSize) {
         SegmentCounts sc = segmentCounts(tx, u, from, to);
@@ -276,58 +275,61 @@ public class ProjectionReader {
     }
 
     /**
-     * Counts [from, to) per segment (plan D3). {@link RangeDecomposition#newestFirst} gives at most
-     * one DAY run between two LIVE ends; the run's day counters are read in ONE query (absent day
-     * = 0) and the run is split newest-first into one segment per active day, each gap of empty
-     * days becoming a single zero-count segment. The LIVE ends get a live count. So the list is at
-     * most 2 x active days + 3 long, whatever the range's length, and every segment with a
-     * non-zero count is one day or a LIVE end -- where the walk lands (plan D4).
+     * Counts [from, to) per segment (plan D5). {@link RangeDecomposition#newestFirst} gives at most
+     * one MONTH run between two LIVE ends. The owner-month counts of every month the range touches --
+     * the run's and the two edge months' -- are read in ONE query (absent month = 0). The run is split
+     * newest-first into one segment per active month, each gap of empty months becoming a single
+     * zero-count segment. A LIVE end gets a live count, skipped (zero) when its whole month counts
+     * nothing for this filter: then neither does any part of it. So the list is at most
+     * 2 x active months + 3 long, whatever the range's length, and every segment with a non-zero
+     * count is one month or a LIVE end -- where the walk lands.
      */
     private SegmentCounts segmentCounts(JdbcClient tx, Unit<?> u, Instant from, Instant to) {
         List<Segment> decomposed = RangeDecomposition.newestFirst(from, to);
-        // The counters are read FIRST, before any live count: their statement opens the read's
-        // snapshot, as it always has (a concurrent commit cannot slip in ahead of it).
-        Map<LocalDate, Long> days = Map.of();
-        for (Segment s : decomposed) {
-            if (s.tier() == Tier.DAY) {
-                days = counters.dayCounts(tx, u.policy(), u.userId(), u.view(), u.pageUnit(),
-                        u.productTypes(), u.typeCodes(), u.excludeCancelled(),
-                        day(s.start()), day(s.end()).minusDays(1));
-            }
+        if (decomposed.isEmpty()) {
+            return new SegmentCounts(List.of(), new long[0], 0);
         }
+        // The counts are read FIRST, before any live count: their statement opens the read's
+        // snapshot, as it always has.
+        Map<YearMonth, Long> months = counters.monthCounts(tx, u.policy(), u.userId(), u.pageUnit(),
+                u.productTypes(), u.typeCodes(), u.excludeCancelled(),
+                RangeDecomposition.monthOf(from), RangeDecomposition.monthOf(to.minusNanos(1)));
         List<Segment> segments = new ArrayList<>();
         List<Long> counts = new ArrayList<>();
         int counterRows = 0;
         for (Segment s : decomposed) {
             if (s.tier() == Tier.LIVE) {
                 segments.add(s);
-                counts.add(u.count().count(tx, s.start(), s.end()));
+                boolean active = months.getOrDefault(RangeDecomposition.monthOf(s.start()), 0L) > 0;
+                counts.add(active ? u.count().count(tx, s.start(), s.end()) : 0L);
                 continue;
             }
-            List<LocalDate> active = new ArrayList<>(days.keySet());
+            List<YearMonth> active = new ArrayList<>();
+            for (Map.Entry<YearMonth, Long> m : months.entrySet()) {
+                Instant start = RangeDecomposition.start(m.getKey());
+                if (!start.isBefore(s.start()) && start.isBefore(s.end()) && m.getValue() > 0) {
+                    active.add(m.getKey());
+                }
+            }
             active.sort(Comparator.reverseOrder());
             Instant cursor = s.end();
-            for (LocalDate d : active) {
-                Instant dayStart = d.atStartOfDay(ZoneOffset.UTC).toInstant();
-                Instant dayEnd = dayStart.plusSeconds(86_400);
-                if (dayEnd.isBefore(cursor)) {
-                    segments.add(new Segment(dayEnd, cursor, Tier.DAY));
+            for (YearMonth m : active) {
+                Instant monthStart = RangeDecomposition.start(m);
+                Instant monthEnd = RangeDecomposition.start(m.plusMonths(1));
+                if (monthEnd.isBefore(cursor)) {
+                    segments.add(new Segment(monthEnd, cursor, Tier.MONTH));
                     counts.add(0L);
                 }
-                segments.add(new Segment(dayStart, dayEnd, Tier.DAY));
-                counts.add(days.get(d));
+                segments.add(new Segment(monthStart, monthEnd, Tier.MONTH));
+                counts.add(months.get(m));
                 counterRows++;
-                cursor = dayStart;
+                cursor = monthStart;
             }
             if (cursor.isAfter(s.start())) {
-                segments.add(new Segment(s.start(), cursor, Tier.DAY));
+                segments.add(new Segment(s.start(), cursor, Tier.MONTH));
                 counts.add(0L);
             }
         }
         return new SegmentCounts(segments, counts.stream().mapToLong(Long::longValue).toArray(), counterRows);
-    }
-
-    private static LocalDate day(Instant i) {
-        return LocalDate.ofInstant(i, ZoneOffset.UTC);
     }
 }

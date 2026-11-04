@@ -58,15 +58,15 @@ class VersionedApplyTest extends PostgresTestBase {
         DeltaResult result = writer.applyDelta(batch(V1, prize("pr1", null, V1, DETAIL_V1), payment("pay1", V1)));
 
         assertThat(result.inserted()).isEqualTo(2);
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);    // the prize; payments are /cc only
-        assertThat(count("wqPrjCcTransaction")).isEqualTo(2);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);    // the prize; payments are /cc only
+        assertThat(count("wqPrjTransaction")).isEqualTo(2);
         assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isEqualTo(1);
         assertThat(count(ProjectionInvariants.CC_TIMELINE)).isEqualTo(2);
         assertThat(transactionSentinel(1)).isEqualTo(1);       // web TRANSACTION counter
         assertThat(transactionSentinel(2)).isEqualTo(2);       // cc TRANSACTION counter
         assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).isEqualTo(V1);
         assertThat(versionAt(SourceKind.PAYMENT, "pay1")).isEqualTo(V1);
-        assertThat(detail("wqPrjWebTransaction", "pr1")).isEqualTo(DETAIL_V1);
+        assertThat(detail(ProjectionInvariants.WEB_TRANSACTIONS, "pr1")).isEqualTo(DETAIL_V1);
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
@@ -74,7 +74,7 @@ class VersionedApplyTest extends PostgresTestBase {
     void a_zero_amount_polled_row_is_projected() {
         DeltaRow limit = row(SourceKind.LIMIT, 1, "lim1", T0, null, BigDecimal.ZERO, "XXX", V1, null);
         assertThat(writer.applyDelta(batch(V1, limit)).inserted()).isEqualTo(1);
-        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
     }
 
     @Test
@@ -90,11 +90,10 @@ class VersionedApplyTest extends PostgresTestBase {
         assertThat(transactionsWithoutDetail()).isEqualTo(transactionsBefore);
         assertThat(after.sessions()).isEqualTo(before.sessions());
         assertThat(after.plays()).isEqualTo(before.plays());
-        assertThat(after.timeline()).isEqualTo(before.timeline());
         assertThat(after.counts()).isEqualTo(before.counts());
         // Replaced in every view the source feeds.
-        assertThat(detail("wqPrjWebTransaction", "pr1")).isEqualTo(DETAIL_V2);
-        assertThat(detail("wqPrjCcTransaction", "pr1")).isEqualTo(DETAIL_V2);
+        assertThat(detail(ProjectionInvariants.WEB_TRANSACTIONS, "pr1")).isEqualTo(DETAIL_V2);
+        assertThat(detail("wqPrjTransaction", "pr1")).isEqualTo(DETAIL_V2);
         assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).isEqualTo(V2);
         assertThat(versionAt(SourceKind.PAYMENT, "pay1")).isEqualTo(V1);
     }
@@ -208,7 +207,7 @@ class VersionedApplyTest extends PostgresTestBase {
             assertThat(result.updated()).as(change.getKey()).isZero();
             assertThat(ProjectionSnapshot.of(jdbc())).as(change.getKey()).isEqualTo(before);
             assertThat(versionAt(SourceKind.CLAIMABLE_PRIZE, "pr1")).as(change.getKey()).isEqualTo(V1);
-            assertThat(detail("wqPrjCcTransaction", "pr1")).as(change.getKey()).isEqualTo(DETAIL_V1);
+            assertThat(detail("wqPrjTransaction", "pr1")).as(change.getKey()).isEqualTo(DETAIL_V1);
             assertThat(deadLetterErrors()).as(change.getKey())
                     .containsExactly(RejectedTransactionDeadLetters.IMMUTABLE_FIELD_CHANGED);
         }
@@ -236,13 +235,15 @@ class VersionedApplyTest extends PostgresTestBase {
         DeltaResult result = writer.applyDelta(batch(null, retailer));
 
         assertThat(result.inserted()).isEqualTo(1);
-        for (String table : List.of("wqPrjTransaction", "wqPrjTimeline")) {
-            assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 2 and \"userId\" = 1",
-                    Integer.class)).as(table).isEqualTo(1);
-            assertThat(db().value("select count(*)::int from \"" + table + "\" where \"ownerType\" = 1",
-                    Integer.class)).as(table).isZero();
+        for (String table : List.of("wqPrjTransaction", ProjectionInvariants.CC_TIMELINE)) {
+            assertThat(db().value("select count(*)::int from " + ProjectionInvariants.relation(table)
+                    + " where \"ownerType\" = 2 and \"userId\" = 1", Integer.class)).as(table).isEqualTo(1);
+            assertThat(db().value("select count(*)::int from " + ProjectionInvariants.relation(table)
+                    + " where \"ownerType\" = 1", Integer.class)).as(table).isZero();
         }
-        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where \"ownerType\" <> 2", Integer.class)).isZero();
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"ownerType\" <> 2", Integer.class)).isZero();
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"ownerType\" = 2", Integer.class))
+                .as("its TX and its ENTRY").isEqualTo(2);
         assertThat(count("wqDeadLetter")).isZero();
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
 
@@ -264,7 +265,7 @@ class VersionedApplyTest extends PostgresTestBase {
         })).isInstanceOf(IllegalStateException.class);
 
         assertThat(watermarks.read()).contains(V1);
-        assertThat(count("wqPrjCcTransaction")).isEqualTo(1);
+        assertThat(count("wqPrjTransaction")).isEqualTo(1);
     }
 
     @Test
@@ -319,9 +320,9 @@ class VersionedApplyTest extends PostgresTestBase {
 
     private int transactionSentinel(int view) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqPrjCount"
-                where "viewKind" = ? and "pageUnit" = 0 and "productType" = '' and "type" = ''
-                """, Integer.class, (short) view);
+                select coalesce(sum("cnt"),0)::int from "wqOwnerMonth"
+                where "unit" = 0 and "source" = any(?) and not "zeroAmount"
+                """, Integer.class, (Object) (view == 1 ? new Integer[] {1, 3} : new Integer[] {1, 2, 3, 4, 5}));
     }
 
     private Instant versionAt(SourceKind source, String sourceId) {
@@ -332,7 +333,8 @@ class VersionedApplyTest extends PostgresTestBase {
     }
 
     private String detail(String table, String sourceId) {
-        return db().value("select \"detail\"::text from \"" + table + "\" where \"sourceId\" = ?", String.class, sourceId);
+        return db().value("select \"detail\"::text from " + ProjectionInvariants.relation(table)
+                + " where \"sourceId\" = ?", String.class, sourceId);
     }
 
     private List<String> transactionsWithoutDetail() {
@@ -340,12 +342,12 @@ class VersionedApplyTest extends PostgresTestBase {
                 select 'web', "userId", "transactionId", "source", "sourceId", "occurredAt", "productId", "productType",
                        "batchId", "subBatchId", "type", "amount", "currency", "balanceAfter", "cancelled",
                        "cancelledBy", "cancels"
-                from "wqPrjWebTransaction"
+                from (select * from "wqPrjTransaction" where "source" in (1, 3)) w
                 union all
                 select 'cc', "userId", "transactionId", "source", "sourceId", "occurredAt", "productId", "productType",
                        "batchId", "subBatchId", "type", "amount", "currency", "balanceAfter", "cancelled",
                        "cancelledBy", "cancels"
-                from "wqPrjCcTransaction"
+                from "wqPrjTransaction"
                 order by 1, 5""");
     }
 

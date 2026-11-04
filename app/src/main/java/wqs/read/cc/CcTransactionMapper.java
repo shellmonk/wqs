@@ -6,12 +6,14 @@ import java.time.OffsetDateTime;
 import org.springframework.stereotype.Component;
 import wqs.domain.SourceKind;
 import wqs.read.TransactionEntry;
+import wqs.read.TransactionRowMapper;
 
-/** Maps one "wqPrjCcTransaction" row of the current result-set position to its wire entry. */
+/** Maps one "wqPrjTransaction" row of the current result-set position to its cc wire entry. */
 @Component
-public class CcTransactionMapper {
+public class CcTransactionMapper implements TransactionRowMapper {
 
     /** The row's entry; "type" is the stored code (plan D1). */
+    @Override
     public TransactionEntry toEntry(ResultSet rs) throws SQLException {
         OffsetDateTime occurredAt = rs.getObject("occurredAt", OffsetDateTime.class);
         return new TransactionEntry(

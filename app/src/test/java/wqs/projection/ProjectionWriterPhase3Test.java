@@ -50,7 +50,7 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "b1", "p1"), tx("t2", "b1", "p1"), tx("t3", "b1", "p2")), 1L));
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(3);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(3);
         assertThat(count("wqPrjSession")).isEqualTo(1);
         assertThat(count("wqPrjPlay")).isEqualTo(2);
         // One high-level row per view for the single session.
@@ -63,8 +63,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(
                 tx("t1", "b1", "p1"), tx("t2", "b1", "p1")), 1L));
 
-        assertThat(sentinel("wqPrjCount", 0)).isEqualTo(2);   // TRANSACTION
-        assertThat(sentinel("wqPrjCount", 1)).isEqualTo(1);   // HIGH_LEVEL -- one session
+        assertThat(sentinel(0)).isEqualTo(2);   // TRANSACTION
+        assertThat(sentinel(1)).isEqualTo(1);   // HIGH_LEVEL -- one session
     }
 
     @Test
@@ -86,8 +86,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
         writer.apply(batch);
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
-        assertThat(sentinel("wqPrjCount", 0)).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
+        assertThat(sentinel(0)).isEqualTo(1);
         assertThat(sessionTxCount()).isEqualTo(1);
     }
 
@@ -100,18 +100,18 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         writer.apply(new ProjectionBatch("s", List.of(cancel), 1L));
 
         // It is a row in both transaction tables, so P-2 requires it to be counted at TRANSACTION level.
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
-        assertThat(sentinel("wqPrjCount", 0)).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
+        assertThat(sentinel(0)).isEqualTo(1);
         assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isZero();
-        assertThat(sentinel("wqPrjCount", 1)).isZero();
+        assertThat(sentinel(1)).isZero();
         assertThat(count("wqPrjSession")).isZero();
     }
 
     /**
-     * Oracle check (P-2 shape): after an out-of-order, mixed-source batch, every sentinel counter
-     * equals a live COUNT over the projection, per view and per day. The session's TRANSACTIONs
-     * arrive latest-first, so its page-index row re-anchors twice -- the second time across a day
-     * AND a month boundary -- and the counters must follow it.
+     * Oracle check (P-2 shape): after an out-of-order, mixed-source batch, every view's total
+     * equals a live COUNT over the projection, per month. The session's TRANSACTIONs arrive
+     * latest-first, so its entry re-anchors twice -- the second time across a month boundary -- and
+     * the counts must follow it.
      */
     @Test
     void sentinel_counters_equal_live_counts_after_an_out_of_order_mixed_source_batch() {
@@ -127,15 +127,16 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         assertThat(count(ProjectionInvariants.WEB_TIMELINE)).isEqualTo(1);
         assertThat(count(ProjectionInvariants.CC_TIMELINE)).isEqualTo(2);
         for (int view : List.of(1, 2)) {
-            assertThat(sentinelsByDay(view, 1))
-                    .as("HIGH_LEVEL sentinel vs page-index rows, view %d", view)
-                    .isEqualTo(liveByDay(view == 1 ? ProjectionInvariants.WEB_TIMELINE : ProjectionInvariants.CC_TIMELINE,
+            assertThat(sentinelsByMonth(view, 1))
+                    .as("ENTRY total vs entries, view %d", view)
+                    .isEqualTo(liveByMonth(view == 1 ? ProjectionInvariants.WEB_TIMELINE : ProjectionInvariants.CC_TIMELINE,
                             "occurredAt"));
-            assertThat(sentinelsByDay(view, 0))
-                    .as("TRANSACTION sentinel vs transaction rows, view %d", view)
-                    .isEqualTo(liveByDay(view == 1 ? "wqPrjWebTransaction" : "wqPrjCcTransaction", "occurredAt"));
+            assertThat(sentinelsByMonth(view, 0))
+                    .as("TX total vs transaction rows, view %d", view)
+                    .isEqualTo(liveByMonth(view == 1 ? ProjectionInvariants.WEB_TRANSACTIONS : "wqPrjTransaction",
+                            "occurredAt"));
         }
-        // The month tier agrees too: October holds the session, November only the payment.
+        // October holds the session, November only the payment.
         assertThat(monthSentinel(2, 1, "2034-10-01")).isEqualTo(1);
         assertThat(monthSentinel(2, 1, "2034-11-01")).isEqualTo(1);
         assertThat(monthSentinel(1, 1, "2034-11-01")).isZero();
@@ -144,9 +145,9 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
 
     /**
      * Plan D5 end to end: a late, earlier transaction re-anchors the session IN PLACE. Its one
-     * "wqPrjSession" row gets the new "startedAt", its timeline row moves to that instant on both
-     * endpoints, and its HIGH_LEVEL counters move from the old day and month to the new ones. The
-     * totals do not change: still one session page unit, and the rollup sums every transaction.
+     * "wqPrjSession" row gets the new "startedAt", its entry moves to that instant on both
+     * endpoints, and its ENTRY count moves from the old month to the new one. The totals do not
+     * change: still one session entry, and the rollup sums every transaction.
      */
     @Test
     void a_late_earlier_transaction_re_anchors_the_session_its_timeline_row_and_counters() {
@@ -172,8 +173,8 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         for (int view : List.of(1, 2)) {
             assertThat(monthSentinel(view, 1, "2034-11-01")).as("view %d, old month", view).isZero();
             assertThat(monthSentinel(view, 1, "2034-10-01")).as("view %d, new month", view).isEqualTo(1);
-            assertThat(productDayCount(view, 1, 11, T0)).as("view %d, old day", view).isZero();
-            assertThat(productDayCount(view, 1, 11, oct30)).as("view %d, new day", view).isEqualTo(1);
+            assertThat(productMonthCount(view, 1, 11, T0)).as("view %d, old month", view).isZero();
+            assertThat(productMonthCount(view, 1, 11, oct30)).as("view %d, new month", view).isEqualTo(1);
         }
         assertEveryCounterMatchesTheProjection();
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
@@ -183,12 +184,13 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
      * Oracle check for product changes: session b2's key (start, LEAST(productType)) depends on
      * arrival order. It opens with no product, is raised to 11 in place, lowered to 7 in place by
      * a claimable prize (which materialises nothing new: both views already hold the row), then
-     * re-anchored a day earlier by a TRANSACTION at product 5. Per-product HIGH_LEVEL rows must
-     * follow every step, not only the all-products sentinel.
+     * re-anchored into the previous month by a TRANSACTION at product 5. Per-product ENTRY rows must
+     * follow every step, not only the all-products total; the prize also moves the entry to its own
+     * first source.
      */
     @Test
     void per_product_counters_follow_a_session_whose_product_changes_with_arrival_order() {
-        Instant dayBefore = T0.minus(1, java.time.temporal.ChronoUnit.DAYS);
+        Instant monthBefore = Instant.parse("2034-10-30T11:00:00Z");
         writer.apply(new ProjectionBatch("s", List.of(
                 txProduct("u1", "b2", "p1", T0, null),
                 txProduct("u2", "b2", "p2", T0.plusSeconds(10), 11),
@@ -198,19 +200,23 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         // Product-only changes: still one row per view, now at product 7.
         assertThat(highLevelProducts(ProjectionInvariants.WEB_TIMELINE)).containsExactly(Products.id(7));
         assertThat(highLevelProducts(ProjectionInvariants.CC_TIMELINE)).containsExactly(Products.id(7));
-        assertThat(productDayCount(1, 1, 7, T0)).isEqualTo(1);
-        assertThat(productDayCount(1, 1, 11, T0)).isZero();
+        assertThat(productMonthCount(1, 1, 7, T0)).isEqualTo(1);
+        assertThat(productMonthCount(1, 1, 11, T0)).isZero();
+        assertThat(db().value("select \"firstSource\" from \"wqPrjSession\" where \"batchId\" = 'b2'", Short.class))
+                .isEqualTo((short) SourceKind.CLAIMABLE_PRIZE.code());
+        assertThat(db().value("select \"source\" from \"wqOwnerMonth\" where \"unit\" = 1", Short.class))
+                .as("the entry follows its first source").isEqualTo((short) SourceKind.CLAIMABLE_PRIZE.code());
         assertEveryCounterMatchesTheProjection();
 
         writer.apply(new ProjectionBatch("s", List.of(
-                txProduct("u0", "b2", "p0", dayBefore, 5)), 2L));
+                txProduct("u0", "b2", "p0", monthBefore, 5)), 2L));
 
-        // Start AND product moved: the old (T0, 7) rows are empty, (T0 - 1 day, 5) holds the unit.
+        // Start AND product moved: the old (November, 7) row is gone, (October, 5) holds the entry.
         assertThat(highLevelProducts(ProjectionInvariants.CC_TIMELINE)).containsExactly(Products.id(5));
-        assertThat(productDayCount(2, 1, 7, T0)).isZero();
-        assertThat(productDayCount(2, 1, 5, dayBefore)).isEqualTo(1);
-        assertThat(productDayCount(2, 1, 0, T0)).isZero();
-        assertThat(productDayCount(2, 1, 0, dayBefore)).isEqualTo(1);
+        assertThat(productMonthCount(2, 1, 7, T0)).isZero();
+        assertThat(productMonthCount(2, 1, 5, monthBefore)).isEqualTo(1);
+        assertThat(productMonthCount(2, 1, 0, T0)).isZero();
+        assertThat(productMonthCount(2, 1, 0, monthBefore)).isEqualTo(1);
         assertEveryCounterMatchesTheProjection();
     }
 
@@ -304,13 +310,19 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
     }
 
     /** The day counter at test product {@code product}'s type; 0 reads the ALL sentinel ''. */
-    private int productDayCount(int view, int pageUnit, int product, Instant at) {
+    /** The view's "cnt" of one unit in the UTC month of {@code at}, for one product type (0: every one). */
+    private int productMonthCount(int view, int unit, int product, Instant at) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqPrjCount"
-                where "viewKind" = ? and "pageUnit" = ? and "productType" = ? and "type" = ''
-                  and "day" = (?::timestamptz at time zone 'UTC')::date
-                """, Integer.class, (short) view, (short) pageUnit, product == 0 ? "" : Products.type(product),
-                at.toString());
+                select coalesce(sum("cnt"),0)::int from "wqOwnerMonth"
+                where "unit" = ? and "source" = any(?) and not "zeroAmount"
+                  and (? or "productType" = ?)
+                  and "month" = date_trunc('month', ?::timestamptz at time zone 'UTC')::date
+                """, Integer.class, (short) unit, sources(view), product == 0,
+                product == 0 ? "" : Products.type(product), at.toString());
+    }
+
+    private static Integer[] sources(int view) {
+        return view == 1 ? new Integer[] {1, 3} : new Integer[] {1, 2, 3, 4, 5};
     }
 
     private ProjectionTransaction tx(String id, String batchId, String subBatchId) {
@@ -348,35 +360,35 @@ class ProjectionWriterPhase3Test extends PostgresTestBase {
         return db().value("select count(*)::int from " + ProjectionInvariants.relation(table), Integer.class);
     }
 
-    private int sentinel(String table, int pageUnit) {
+    /** /web's total "cnt" of one unit (TX 0, ENTRY 1) over every month and combination. */
+    private int sentinel(int unit) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "%s"
-                where "viewKind" = 1 and "pageUnit" = ? and "productType" = '' and "type" = ''
-                """.formatted(table), Integer.class, (short) pageUnit);
+                select coalesce(sum("cnt"),0)::int from "wqOwnerMonth"
+                where "unit" = ? and "source" = any(?) and not "zeroAmount"
+                """, Integer.class, (short) unit, sources(1));
     }
 
-    /** The HIGH_LEVEL/TRANSACTION sentinel summed over the day rows of one UTC month. */
-    private int monthSentinel(int view, int pageUnit, String period) {
+    /** The view's total "cnt" of one unit in one UTC month (its first day). */
+    private int monthSentinel(int view, int unit, String month) {
         return db().value("""
-                select coalesce(sum("cntAll"),0)::int from "wqPrjCount"
-                where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
-                  and "day" >= ?::date and "day" < ?::date + interval '1 month'
-                """, Integer.class, (short) view, (short) pageUnit, period, period);
+                select coalesce(sum("cnt"),0)::int from "wqOwnerMonth"
+                where "unit" = ? and "source" = any(?) and not "zeroAmount" and "month" = ?::date
+                """, Integer.class, (short) unit, sources(view), month);
     }
 
-    /** Non-zero day-tier sentinel cntAll per UTC day for one view and page unit. */
-    private Map<String, Integer> sentinelsByDay(int view, int pageUnit) {
+    /** Non-zero totals per UTC month for one view and unit. */
+    private Map<String, Integer> sentinelsByMonth(int view, int unit) {
         return toMap(db().rows("""
-                select "day"::text as d, "cntAll"::int as n from "wqPrjCount"
-                where "userId" = 1 and "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
-                  and "cntAll" > 0
-                """, (short) view, (short) pageUnit));
+                select "month"::text as d, sum("cnt")::int as n from "wqOwnerMonth"
+                where "userId" = 1 and "unit" = ? and "source" = any(?) and not "zeroAmount"
+                group by 1 having sum("cnt") > 0
+                """, (short) unit, sources(view)));
     }
 
-    /** The oracle: actual rows per UTC day. */
-    private Map<String, Integer> liveByDay(String table, String column) {
+    /** The oracle: actual rows per UTC month. */
+    private Map<String, Integer> liveByMonth(String table, String column) {
         return toMap(db().rows("""
-                select ("%s" at time zone 'UTC')::date::text as d, count(*)::int as n
+                select date_trunc('month', "%s" at time zone 'UTC')::date::text as d, count(*)::int as n
                 from %s where "userId" = 1 group by 1
                 """.formatted(column, ProjectionInvariants.relation(table))));
     }

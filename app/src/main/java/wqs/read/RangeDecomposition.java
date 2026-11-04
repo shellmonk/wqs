@@ -1,22 +1,20 @@
 package wqs.read;
 
 import java.time.Instant;
-import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import wqs.read.Segment.Tier;
 
 /**
- * Splits [from, to) into at most three segments, newest first (spec 7.5, plan D3): the partial
- * day at the upper end (LIVE), ONE run of whole UTC days (DAY), and the partial day at the lower
- * end (LIVE). The whole days are read from the per-day counters, the partial days by a live count.
- * The output size never depends on the range's length, so any caller-supplied range is cheap to
- * decompose; {@link ProjectionReader} splits the DAY run by its active days.
+ * Splits [from, to) into at most three segments, newest first (spec 7.5, plan D5): the partial
+ * month at the upper end (LIVE), ONE run of whole UTC months (MONTH), and the partial month at the
+ * lower end (LIVE). The whole months are read from the owner-month counts, the partial months by a
+ * live count. The output size never depends on the range's length, so any caller-supplied range is
+ * cheap to decompose; {@link ProjectionReader} splits the MONTH run by its active months.
  */
 public final class RangeDecomposition {
-
-    private static final long DAY_SECONDS = 86_400;
 
     private RangeDecomposition() {}
 
@@ -24,31 +22,40 @@ public final class RangeDecomposition {
         if (!from.isBefore(to)) {
             return List.of();
         }
-        Instant fromCeilDay = ceilDay(from);
-        Instant toFloorDay = floorDay(to);
+        Instant fromCeil = ceilMonth(from);
+        Instant toFloor = floorMonth(to);
         List<Segment> out = new ArrayList<>(3);
-        if (fromCeilDay.isAfter(toFloorDay)) {
+        if (fromCeil.isAfter(toFloor)) {
             out.add(new Segment(from, to, Tier.LIVE));
             return out;
         }
-        if (to.isAfter(toFloorDay)) {
-            out.add(new Segment(toFloorDay, to, Tier.LIVE));
+        if (to.isAfter(toFloor)) {
+            out.add(new Segment(toFloor, to, Tier.LIVE));
         }
-        if (toFloorDay.isAfter(fromCeilDay)) {
-            out.add(new Segment(fromCeilDay, toFloorDay, Tier.DAY));
+        if (toFloor.isAfter(fromCeil)) {
+            out.add(new Segment(fromCeil, toFloor, Tier.MONTH));
         }
-        if (from.isBefore(fromCeilDay)) {
-            out.add(new Segment(from, fromCeilDay, Tier.LIVE));
+        if (from.isBefore(fromCeil)) {
+            out.add(new Segment(from, fromCeil, Tier.LIVE));
         }
         return out;
     }
 
-    private static Instant floorDay(Instant i) {
-        return LocalDate.ofInstant(i, ZoneOffset.UTC).atStartOfDay(ZoneOffset.UTC).toInstant();
+    /** The UTC month holding {@code i}. */
+    static YearMonth monthOf(Instant i) {
+        return YearMonth.from(i.atZone(ZoneOffset.UTC));
     }
 
-    private static Instant ceilDay(Instant i) {
-        Instant f = floorDay(i);
-        return f.equals(i) ? f : f.plusSeconds(DAY_SECONDS);
+    static Instant start(YearMonth m) {
+        return m.atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+    }
+
+    private static Instant floorMonth(Instant i) {
+        return start(monthOf(i));
+    }
+
+    private static Instant ceilMonth(Instant i) {
+        Instant f = floorMonth(i);
+        return f.equals(i) ? f : start(monthOf(i).plusMonths(1));
     }
 }

@@ -7,7 +7,6 @@ import java.time.Instant;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import wqs.domain.AggregationLevel;
-import wqs.domain.ViewKind;
 
 /** The level-1/2 filter can never carry the ALL sentinel; a level-1/2 request is never level 0. */
 class HighLevelFilterTest {

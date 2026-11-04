@@ -11,10 +11,14 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-/** Spec 7.7: the level-0 read path scans covering indexes; they must exist on every partition. */
+/**
+ * Spec 7.7: the read paths scan covering indexes of "wqPrjTransaction" -- the level-0 cover, the
+ * standalone-row index (levels 1-2) and the session-member index -- and they exist on every partition.
+ */
 class CoveringIndexTest extends PostgresTestBase {
 
-    private static final List<String> PARENTS = List.of("wqPrjTransaction", "wqPrjTimeline");
+    private static final List<String> INDEXES =
+            List.of("wqPrjTransaction_cover", "wqPrjTransaction_standalone", "wqPrjTransaction_batch");
 
     @BeforeAll
     static void createPartition() {
@@ -24,8 +28,9 @@ class CoveringIndexTest extends PostgresTestBase {
     }
 
     @Test
-    void every_transaction_and_high_level_partition_has_the_cover_index() {
-        for (String parent : PARENTS) {
+    void every_transaction_partition_has_every_read_index() {
+        String parent = "wqPrjTransaction";
+        for (String index : INDEXES) {
             List<String> childDefs = db().column("""
                     select pg_get_indexdef(ci.oid)
                     from pg_inherits ti
@@ -34,33 +39,38 @@ class CoveringIndexTest extends PostgresTestBase {
                     join pg_inherits ii on ii.inhrelid = ci.oid
                     where ti.inhparent = to_regclass(?)::oid
                       and ii.inhparent = to_regclass(?)::oid
-                    """, String.class, "\"" + parent + "\"", "\"" + parent + "_cover\"");
+                    """, String.class, "\"" + parent + "\"", "\"" + index + "\"");
             long partitions = db().value(
                     "select count(*) from pg_inherits where inhparent = to_regclass(?)::oid", Long.class,
                     "\"" + parent + "\"");
             assertThat(partitions).as(parent + " partitions").isGreaterThan(0);
-            assertThat(childDefs).as(parent + " cover index children").hasSize((int) partitions);
-            assertThat(childDefs).allMatch(d -> d.contains("INCLUDE"));
+            assertThat(childDefs).as(index + " children").hasSize((int) partitions);
+            if (!index.endsWith("_batch")) {
+                assertThat(childDefs).allMatch(d -> d.contains("INCLUDE"));
+            }
         }
     }
 
     /**
-     * Spec 5.6 / 7.7: key columns give each page index a total order (the tie-break on equal
-     * "occurredAt"); INCLUDE carries only what filtering reads -- including each endpoint's
-     * own predicate ("source" for the /web view, "onWeb" and /web's visibility on the timeline).
+     * Spec 7.7 / plan D4: key columns give each read a total order (the tie-break on equal
+     * "occurredAt"); INCLUDE carries what filtering and the read policy read -- "source" among them, so
+     * /web's sources are checked inside an index-only scan.
      */
     @Test
     void cover_index_key_and_include_columns() {
-        String transactions = "(ownerType, userId, occurredAt DESC, transactionId DESC) INCLUDE (cancelled, productType, type, source, zeroAmount)";
-        String highLevel = "(ownerType, userId, occurredAt DESC, kind DESC, refId DESC) INCLUDE (productType, visibleExclCancelled, onWeb)";
-        for (String parent : PARENTS) {
-            String def = db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class,
-                    "\"" + parent + "_cover\"").replace("\"", "");
-            assertThat(def).as(parent).endsWith(parent.endsWith("Transaction") ? transactions : highLevel);
-        }
+        assertThat(def("wqPrjTransaction_cover")).endsWith(
+                "(ownerType, userId, occurredAt DESC, transactionId DESC) INCLUDE (source, productType, type, cancelled, zeroAmount)");
+        assertThat(def("wqPrjTransaction_standalone")).endsWith(
+                "(ownerType, userId, occurredAt DESC, source DESC, sourceId DESC) INCLUDE (productType, cancelled, zeroAmount)"
+                        + " WHERE ((batchId IS NULL) AND (cancels IS NULL))");
     }
 
-    /** Through the /web view: its "source" predicate is answered from the index too. */
+    private static String def(String index) {
+        return db().value("select pg_get_indexdef(to_regclass(?)::oid)", String.class, "\"" + index + "\"")
+                .replace("\"", "");
+    }
+
+    /** Through /web's read policy: its "source" predicate is answered from the index too. */
     @Test
     void level0_key_query_is_an_index_only_scan() throws Exception {
         List<String> plan = new ArrayList<>();
@@ -68,8 +78,8 @@ class CoveringIndexTest extends PostgresTestBase {
             s.execute("set enable_seqscan = off");
             s.execute("set enable_bitmapscan = off");
             try (ResultSet rs = s.executeQuery("""
-                    explain select "occurredAt","transactionId" from "wqPrjWebTransaction"
-                    where "ownerType" = 1 and "userId" = 1 and not "zeroAmount"
+                    explain select "occurredAt","transactionId" from "wqPrjTransaction"
+                    where "ownerType" = 1 and "userId" = 1 and "source" = any ('{1,3}'::smallint[]) and not "zeroAmount"
                       and "occurredAt" >= timestamptz '2036-07-01T00:00:00Z'
                       and "occurredAt" < timestamptz '2036-08-01T00:00:00Z'
                       and "productType" = 'instants' and "type" = 'TT_BUY' and not "cancelled"
@@ -80,7 +90,7 @@ class CoveringIndexTest extends PostgresTestBase {
         }
         String text = String.join("\n", plan);
         assertThat(text).contains("Index Only Scan");
-        assertThat(text).as("the view's source predicate, inside the scan").contains("source");
+        assertThat(text).as("the policy's source predicate, inside the scan").contains("source");
         assertThat(text).as("pruned to July 2036").contains("wqPrjTransaction_2036_07").doesNotContain("_2036_08");
         String indexName = plan.stream()
                 .filter(l -> l.contains("Index Only Scan"))

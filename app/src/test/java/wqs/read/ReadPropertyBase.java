@@ -7,7 +7,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import wqs.config.ReaderJdbc;
 import wqs.config.ReaderTx;
-import wqs.domain.ViewKind;
 import wqs.projection.ProjectionPropertyBase;
 import wqs.read.cc.CcHighLevelQuery;
 import wqs.read.cc.CcLevel0Query;

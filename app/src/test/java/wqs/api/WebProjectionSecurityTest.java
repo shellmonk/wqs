@@ -130,32 +130,30 @@ class WebProjectionSecurityTest extends ApiTestBase {
 
     /**
      * Spec 9 control 3 on the single transaction table: every source is stored once in
-     * "wqPrjTransaction" and "wqPrjTimeline", so /web's isolation rests on the "wqPrjWebTransaction"
-     * view and the "onWeb" timeline predicate. A payment is never visible through the view, never a
-     * /web page unit, never a nested /web transaction and never in a /web total. A payment can never
-     * join a session either: the writer rejects a sessioned transaction of a source that does not
-     * feed every view (dead-lettered as sessioned-source-not-on-every-view), so a session -- here one whose only transaction is cancelled -- looks the
-     * same on both endpoints.
+     * "wqPrjTransaction", and no stored row knows an endpoint, so /web's isolation rests on its read
+     * policy (plan D1) bound into every query. A payment is never a /web row, never a /web entry,
+     * never a nested /web transaction and never in a /web total. A payment carrying a batch is stored
+     * and sessioned like any transaction (the ingest rule is gone): its session belongs to the policies
+     * of its first source, so it is a /cc entry and never a /web one. A session of /web sources --
+     * here one whose only transaction is cancelled -- looks the same on both endpoints.
      */
     @Test
-    void a_payment_never_reaches_web_through_the_view_the_timeline_or_the_totals() throws Exception {
+    void a_payment_never_reaches_web_through_the_policy_the_entries_or_the_totals() throws Exception {
         writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
                 sessioned(SourceKind.TRANSACTION, "u1-s-tx", "2034-02-15T10:00:00Z", "s-web", null),
                 sessioned(SourceKind.PAYMENT, "u1-pay2", "2034-02-16T10:00:00Z", null, null),
                 sessioned(SourceKind.TRANSACTION, "u1-s-c", "2034-02-17T10:00:00Z", null, "u1-s-tx")), 2L));
-        var rejected = writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
+        var sessionedPayment = writer.apply(new wqs.projection.ProjectionBatch("wallet-transactions", List.of(
                 sessioned(SourceKind.PAYMENT, "u1-s-pay", "2034-02-16T11:00:00Z", "s-pay", null)), 3L));
-        assertThat(rejected.deadLettered()).as("a sessioned payment is rejected, never projected").isEqualTo(1);
-        assertThat(rejected.projected()).isZero();
-        assertThat(db().value("select \"error\" from \"wqDeadLetter\" where \"sourceId\" = 'u1-s-pay'", String.class))
-                .isEqualTo("sessioned-source-not-on-every-view");
-        List<String> payments = List.of("u1-payment", "u1-pay2");
+        assertThat(sessionedPayment.projected()).as("a sessioned payment is stored like any row").isEqualTo(1);
+        assertThat(sessionedPayment.deadLettered()).isZero();
+        List<String> payments = List.of("u1-payment", "u1-pay2", "u1-s-pay");
 
         assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" where \"source\" = ?", String.class,
                 (short) SourceKind.PAYMENT.code())).as("stored once, in the one table")
                 .containsExactlyInAnyOrderElementsOf(payments);
-        assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\" where \"source\" = ?",
-                Integer.class, (short) SourceKind.PAYMENT.code())).as("never through the /web view").isZero();
+        assertThat(db().value("select \"firstSource\" from \"wqPrjSession\" where \"batchId\" = 's-pay'", Short.class))
+                .as("the session of a payment").isEqualTo((short) SourceKind.PAYMENT.code());
 
         for (String level : List.of("0", "1", "2")) {
             for (String excl : List.of("false", "true")) {
@@ -164,6 +162,7 @@ class WebProjectionSecurityTest extends ApiTestBase {
                     page.andExpect(jsonPath("$..txId", not(hasItem(payment))));
                 }
                 page.andExpect(jsonPath("$..kind", not(hasItem(SourceKind.PAYMENT.name()))));
+                page.andExpect(jsonPath("$..batchId", not(hasItem("s-pay"))));
             }
         }
         // L0 totals: u1-tx, u1-prize, u1-s-tx, u1-s-c; excluding cancelled drops u1-s-tx.
@@ -171,7 +170,7 @@ class WebProjectionSecurityTest extends ApiTestBase {
                 .andExpect(jsonPath("$.totalRowCount").value(4));
         mvc.perform(webAt("0", "true").header(PRINCIPAL_HEADER, "1"))
                 .andExpect(jsonPath("$.totalRowCount").value(3));
-        // Timeline paging and totals: u1-tx, u1-prize and s-web; the payments are /cc only.
+        // Entry paging and totals: u1-tx, u1-prize and s-web; the payments (and their session) are /cc only.
         for (String level : List.of("1", "2")) {
             mvc.perform(webAt(level, "false").header(PRINCIPAL_HEADER, "1"))
                     .andExpect(jsonPath("$.totalRowCount").value(3))
@@ -181,12 +180,13 @@ class WebProjectionSecurityTest extends ApiTestBase {
                     .andExpect(jsonPath("$.data[*].txId", contains("u1-prize", "u1-tx")));
             mvc.perform(cc(level, "false"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.totalRowCount").value(5))
-                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-web")));
+                    .andExpect(jsonPath("$.totalRowCount").value(6))
+                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-web")))
+                    .andExpect(jsonPath("$.data[*].batchId", hasItem("s-pay")));
             // The emptied session is hidden on /cc exactly as on /web.
             mvc.perform(cc(level, "true"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.totalRowCount").value(4))
+                    .andExpect(jsonPath("$.totalRowCount").value(5))
                     .andExpect(jsonPath("$.data[*].batchId", not(hasItem("s-web"))))
                     .andExpect(jsonPath("$.data[*].txId", hasItem("u1-pay2")));
         }

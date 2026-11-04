@@ -12,9 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import wqs.db.PartitionProvisioner;
-import wqs.domain.PageUnit;
 import wqs.domain.ProjectionTransaction;
-import wqs.domain.ViewKind;
 import wqs.projection.source.DeltaRow;
 
 /**
@@ -23,14 +21,14 @@ import wqs.projection.source.DeltaRow;
  * Implements the ordering of spec 6.2: for each transaction, the ingest rules of spec 4.1 (a
  * currency-mismatched or unsessioned eInstant transaction is dead-lettered alone), then gate and
  * insert, then (for a cancellation)
- * apply or park it, then rollups, page index and counters; after the projected transactions, drain the cancels
+ * apply or park it, then rollups and owner-month counts; after the projected transactions, drain the cancels
  * parked for projected transactions this batch inserted; then the offset last -- all in one transaction, so
  * projection state and consumer position advance or roll back together.
  *
  * <p>Everything is stored: zero-amount transactions and non-player owners take the same path as any
  * other (the owner type is part of every owner key). What an endpoint shows is decided at read
  * time by its {@code wqs.read.ReadPolicy}. A zero-amount transaction is counted apart and adds
- * nothing to a session's txCount or page index (plan D6).
+ * nothing to a session's txCount (plan D6).
  *
  * <p>{@link #applyDelta} is the polled sources' path (phase 6): versioned upserts and the
  * poller's watermark, likewise in one transaction.
@@ -42,7 +40,6 @@ public class ProjectionWriter {
 
     private final TransactionInserter transactionInserter;
     private final RollupUpdater rollupUpdater;
-    private final HighLevelUpdater highLevelUpdater;
     private final CounterUpdater counterUpdater;
     private final CancellationApplier cancellationApplier;
     private final PendingCancelStore pendingCancelStore;
@@ -59,7 +56,6 @@ public class ProjectionWriter {
     public ProjectionWriter(
             TransactionInserter transactionInserter,
             RollupUpdater rollupUpdater,
-            HighLevelUpdater highLevelUpdater,
             CounterUpdater counterUpdater,
             CancellationApplier cancellationApplier,
             PendingCancelStore pendingCancelStore,
@@ -74,7 +70,6 @@ public class ProjectionWriter {
             DeltaMetrics deltaMetrics) {
         this.transactionInserter = transactionInserter;
         this.rollupUpdater = rollupUpdater;
-        this.highLevelUpdater = highLevelUpdater;
         this.counterUpdater = counterUpdater;
         this.cancellationApplier = cancellationApplier;
         this.pendingCancelStore = pendingCancelStore;
@@ -97,8 +92,7 @@ public class ProjectionWriter {
     public WriteResult apply(ProjectionBatch batch) {
         // FIRST, before any projection write, and in its own transaction: no DDL ever runs inside
         // this one (spec 5.8, R100). The occurredAt months cover every partitioned row the batch
-        // can write -- projected transaction rows, page-index rows (a session's re-anchored start is
-        // a transaction's occurredAt) and "wqPrjCount" days. A month beyond the sanity window throws, which is poison.
+        // can write: only transaction rows are partitioned. A month beyond the sanity window throws, which is poison.
         partitionProvisioner.ensureMonths(batch.transactions().stream()
                 .map(transaction -> YearMonth.from(transaction.occurredAt().atZone(ZoneOffset.UTC)))
                 .collect(Collectors.toSet()));
@@ -167,7 +161,7 @@ public class ProjectionWriter {
      * polled again.
      *
      * <p>Per row, whatever its owner type (every owner is stored): first sight is the
-     * stream's insert path -- the ingest rules, then the gate, rollups, page index and counters --
+     * stream's insert path -- the ingest rules, then the gate, rollups and counts --
      * with the row's version recorded; zero-amount hiding does not apply (it is about transactions
      * only). A row already stored is decided by {@link VersionedApplier}: newer replaces "detail",
      * equal is a duplicate, older is stale, and a newer version changing an immutable field is
@@ -232,40 +226,43 @@ public class ProjectionWriter {
     }
 
     /**
-     * Rollups, page index and counters for one newly inserted transaction.
+     * Rollups and owner-month counts for one newly inserted transaction (plan D5, D6).
      *
-     * A cancellation transaction is a transaction row like any other, so it is counted at the
-     * TRANSACTION page unit (P-2: counters equal live COUNTs); the rollup and page-index updaters return
-     * nothing for it, so it creates no page unit. Its effect on its original is applied by
-     * {@link CancellationApplier}.
+     * Every transaction is counted at TX, a cancellation too (P-2: counts equal live COUNTs); a
+     * cancellation's effect on its original is applied by {@link CancellationApplier}. Every page
+     * entry is counted at ENTRY: a standalone transaction (no batch id, not a cancellation) at its own
+     * key, zero-amount ones under "zeroAmount"; a session at its current (start, first source, product
+     * type), moved
+     * when this transaction re-anchors or relabels it, and back in the excl tally when it revives it.
+     * A sessioned zero-amount transaction is in no entry.
      */
     private void project(ProjectionTransaction transaction) {
         RollupResult rollup = rollupUpdater.applyTransaction(transaction);
-        HighLevelResult highLevel = highLevelUpdater.applyTransaction(transaction, rollup);
-
         counterUpdater.countTransaction(transaction);
-
-        // HIGH_LEVEL counters mirror the page index per view, at the row's CURRENT key: the
-        // session's (start, product type) for a session row, the transaction's own for an unsessioned one.
-        boolean sessioned = rollup.sessionStart() != null;
-        Instant at = sessioned ? rollup.sessionStart() : transaction.occurredAt();
-        String productType = sessioned ? rollup.sessionProductType() : transaction.productType();
-
-        for (ViewKind view : highLevel.inserted()) {
-            counterUpdater.countHighLevel(transaction.ownerType(), transaction.userId(), view, productType, at);
+        if (transaction.isCancellation()) {
+            return;
         }
-        for (ViewKind view : highLevel.moved()) {
-            counterUpdater.moveHighLevel(
-                    transaction.ownerType(), transaction.userId(), view,
-                    highLevel.movedFromProductType(), highLevel.movedFrom(),
-                    productType, at,
-                    highLevel.movedVisible().get(view));
+        short ownerType = transaction.ownerType();
+        long userId = transaction.userId();
+        if (!transaction.isSessioned()) {
+            counterUpdater.countEntry(ownerType, userId, transaction.occurredAt(), (short) transaction.source().code(),
+                    transaction.productType(), transaction.isZeroAmount());
+            return;
         }
-        // After the move: a revived row is counted in cntAll already, at the current key.
-        for (ViewKind view : highLevel.revived()) {
-            counterUpdater.recountExclCancelled(
-                    transaction.ownerType(), transaction.userId(), view, PageUnit.HIGH_LEVEL, productType,
-                    wqs.domain.CounterSentinels.ALL_TYPES, false, at);
+        if (rollup.sessionStart() == null) {
+            return; // a zero-amount session member: "zeroTxCount" only
+        }
+        if (rollup.sessionIsNew()) {
+            counterUpdater.countEntry(ownerType, userId, rollup.sessionStart(), rollup.sessionFirstSource(),
+                    rollup.sessionProductType(), false);
+        } else if (rollup.sessionKeyChanged() || rollup.sessionRevived()) {
+            boolean moved = rollup.sessionKeyChanged();
+            counterUpdater.moveSession(ownerType, userId,
+                    moved ? rollup.previousSessionStart() : rollup.sessionStart(),
+                    moved ? rollup.previousSessionFirstSource() : rollup.sessionFirstSource(),
+                    moved ? rollup.previousSessionProductType() : rollup.sessionProductType(),
+                    !rollup.sessionRevived(),
+                    rollup.sessionStart(), rollup.sessionFirstSource(), rollup.sessionProductType(), true);
         }
     }
 }

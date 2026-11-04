@@ -72,6 +72,7 @@ class PendingCancelResolutionTest extends PostgresTestBase {
                 .contains("c-old").contains("TRANSACTION").contains("t-never").contains("PT168H").contains("parked PT19")
                 .doesNotContain("c-young")
                 .doesNotContain(Long.toString(USER));
+        assertThat(new ProjectionInvariants(jdbc()).drift()).as("a resolved cancel is no drift").isEmpty();
     }
 
     @Test
@@ -85,6 +86,22 @@ class PendingCancelResolutionTest extends PostgresTestBase {
         assertThat(db().value("select \"cancelled\" from \"wqPrjTransaction\" where \"sourceId\" = 't-late'",
                 Boolean.class)).isFalse();
         assertThat(pendingCancelStore.depth()).isZero();
+        assertThat(new ProjectionInvariants(jdbc()).drift())
+                .as("its target arrived after the resolution: legitimately uncancelled").isEmpty();
+    }
+
+    /** Control: a cancel that vanished from the parked cancels before the threshold is still drift. */
+    @Test
+    void a_young_cancel_removed_without_resolution_is_drift() {
+        writer.apply(new ProjectionBatch("s", List.of(cancel("c-lost", "t-lost")), 1L));
+        parkedDaysAgo("c-lost", 6);
+        db().execute("delete from \"wqPrjPendingCancel\"");
+
+        assertThat(new ProjectionInvariants(jdbc()).drift()).singleElement().asString()
+                .startsWith("missing pending cancel").contains("cancelSourceId=c-lost");
+        writer.apply(new ProjectionBatch("s", List.of(original("t-lost")), 2L));
+        assertThat(new ProjectionInvariants(jdbc()).drift()).singleElement().asString()
+                .startsWith("cancel not applied").contains("sourceId=t-lost");
     }
 
     @Test
@@ -101,9 +118,15 @@ class PendingCancelResolutionTest extends PostgresTestBase {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /**
+     * The cancel arrived {@code days} ago: it is parked in its own insert's transaction, so its
+     * "parkedAt" and its row's "ingestedAt" age together.
+     */
     private void parkedDaysAgo(String cancelSourceId, int days) {
         db().execute("update \"wqPrjPendingCancel\" set \"parkedAt\" = now() - make_interval(days => ?)"
                 + " where \"cancelSourceId\" = ?", days, cancelSourceId);
+        db().execute("update \"wqPrjTransaction\" set \"ingestedAt\" = now() - make_interval(days => ?)"
+                + " where \"sourceId\" = ?", days, cancelSourceId);
     }
 
     private static ProjectionTransaction cancel(String id, String target) {

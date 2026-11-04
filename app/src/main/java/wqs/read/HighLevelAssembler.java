@@ -19,7 +19,7 @@ import wqs.domain.AggregationLevel;
 
 /**
  * Level-1/2 page assembly (spec 7.3, 7.4): turns a page's high-level keys into entries, in the
- * keys' (page-index) order. At most four queries whatever the page size -- the page's sessions, their plays (level 2 only), the view's transactions of
+ * keys' (entry) order. At most four queries whatever the page size -- the page's sessions, their plays (level 2 only), the view's transactions of
  * those sessions, and its unsessioned transactions -- each an array-bound join on the page's keys, so none
  * grows in binds or round trips with the page; each member probe is per session or per key, so
  * none reads rows outside the page's own (final review F1). A session's rows include its
@@ -36,7 +36,7 @@ import wqs.domain.AggregationLevel;
 @Component
 public class HighLevelAssembler {
 
-    /** What the nested transactions are filtered by; the page index has been filtered already. */
+    /** What the nested transactions are filtered by; the entries have been filtered already. */
     public record Nesting(AggregationLevel level, Set<String> transactionTypes, boolean excludeCancelled, Instant to) {
 
         public Nesting {

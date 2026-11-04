@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -27,51 +28,59 @@ class RangeDecompositionTest {
         return new Segment(t(from), t(to), tier);
     }
 
-    /** Plan D3, final-review I1: the full clamped domain [1970, 2200) is ONE DAY run, no live end. */
+    /** Plan D5, final-review I1: the full clamped domain [1970, 2200) is ONE MONTH run, no live end. */
     @Test
-    void full_clamped_domain_is_one_day_run() {
+    void full_clamped_domain_is_one_month_run() {
         assertThat(RangeDecomposition.newestFirst(wqs.domain.DataDomain.START, wqs.domain.DataDomain.END))
-                .containsExactly(new Segment(wqs.domain.DataDomain.START, wqs.domain.DataDomain.END, Tier.DAY));
+                .containsExactly(new Segment(wqs.domain.DataDomain.START, wqs.domain.DataDomain.END, Tier.MONTH));
     }
 
     @Test
-    void same_day_is_one_live_segment() {
-        assertThat(RangeDecomposition.newestFirst(t("2034-03-05T10:00:00Z"), t("2034-03-05T18:00:00Z")))
-                .containsExactly(seg("2034-03-05T10:00:00Z", "2034-03-05T18:00:00Z", Tier.LIVE));
+    void same_month_is_one_live_segment() {
+        assertThat(RangeDecomposition.newestFirst(t("2034-03-05T10:00:00Z"), t("2034-03-25T18:00:00Z")))
+                .containsExactly(seg("2034-03-05T10:00:00Z", "2034-03-25T18:00:00Z", Tier.LIVE));
     }
 
     @Test
-    void partial_days_are_live_and_whole_days_are_days() {
-        assertThat(RangeDecomposition.newestFirst(t("2034-03-05T10:00:00Z"), t("2034-03-09T06:00:00Z")))
+    void partial_months_are_live_and_whole_months_are_months() {
+        assertThat(RangeDecomposition.newestFirst(t("2034-03-05T10:00:00Z"), t("2034-06-09T06:00:00Z")))
                 .containsExactly(
-                        seg("2034-03-09T00:00:00Z", "2034-03-09T06:00:00Z", Tier.LIVE),
-                        seg("2034-03-06T00:00:00Z", "2034-03-09T00:00:00Z", Tier.DAY),
-                        seg("2034-03-05T10:00:00Z", "2034-03-06T00:00:00Z", Tier.LIVE));
+                        seg("2034-06-01T00:00:00Z", "2034-06-09T06:00:00Z", Tier.LIVE),
+                        seg("2034-04-01T00:00:00Z", "2034-06-01T00:00:00Z", Tier.MONTH),
+                        seg("2034-03-05T10:00:00Z", "2034-04-01T00:00:00Z", Tier.LIVE));
+    }
+
+    @Test
+    void adjacent_partial_months_have_no_month_run() {
+        assertThat(RangeDecomposition.newestFirst(t("2034-01-30T12:00:00Z"), t("2034-02-02T00:00:00Z")))
+                .containsExactly(
+                        seg("2034-02-01T00:00:00Z", "2034-02-02T00:00:00Z", Tier.LIVE),
+                        seg("2034-01-30T12:00:00Z", "2034-02-01T00:00:00Z", Tier.LIVE));
     }
 
     @Test
     void exact_boundaries_produce_no_live_segment() {
-        assertThat(RangeDecomposition.newestFirst(t("2034-01-01T00:00:00Z"), t("2034-01-04T00:00:00Z")))
+        assertThat(RangeDecomposition.newestFirst(t("2034-01-01T00:00:00Z"), t("2034-04-01T00:00:00Z")))
                 .containsExactly(
-                        seg("2034-01-01T00:00:00Z", "2034-01-04T00:00:00Z", Tier.DAY));
+                        seg("2034-01-01T00:00:00Z", "2034-04-01T00:00:00Z", Tier.MONTH));
     }
 
     @Test
-    void to_on_a_day_boundary_has_no_trailing_live() {
-        assertThat(RangeDecomposition.newestFirst(t("2034-01-30T12:00:00Z"), t("2034-02-02T00:00:00Z")))
+    void to_on_a_month_boundary_has_no_trailing_live() {
+        assertThat(RangeDecomposition.newestFirst(t("2034-01-30T12:00:00Z"), t("2034-03-01T00:00:00Z")))
                 .containsExactly(
-                        seg("2034-01-31T00:00:00Z", "2034-02-02T00:00:00Z", Tier.DAY),
-                        seg("2034-01-30T12:00:00Z", "2034-01-31T00:00:00Z", Tier.LIVE));
+                        seg("2034-02-01T00:00:00Z", "2034-03-01T00:00:00Z", Tier.MONTH),
+                        seg("2034-01-30T12:00:00Z", "2034-02-01T00:00:00Z", Tier.LIVE));
     }
 
     @Test
     void five_year_range_counts() {
         List<Segment> s = RangeDecomposition.newestFirst(t("2030-01-15T13:00:00Z"), t("2035-01-15T09:00:00Z"));
-        // Five years: the two partial days and ONE run of whole days, 2030-01-16 .. 2035-01-14.
+        // Five years: the two partial months and ONE run of whole months, 2030-02 .. 2034-12.
         assertThat(s).containsExactly(
-                seg("2035-01-15T00:00:00Z", "2035-01-15T09:00:00Z", Tier.LIVE),
-                seg("2030-01-16T00:00:00Z", "2035-01-15T00:00:00Z", Tier.DAY),
-                seg("2030-01-15T13:00:00Z", "2030-01-16T00:00:00Z", Tier.LIVE));
+                seg("2035-01-01T00:00:00Z", "2035-01-15T09:00:00Z", Tier.LIVE),
+                seg("2030-02-01T00:00:00Z", "2035-01-01T00:00:00Z", Tier.MONTH),
+                seg("2030-01-15T13:00:00Z", "2030-02-01T00:00:00Z", Tier.LIVE));
     }
 
     @Test
@@ -114,20 +123,23 @@ class RangeDecompositionTest {
         long live = 0;
         for (Segment s : segs) {
             assertThat(s.start()).isBefore(s.end());
-            LocalDate d = LocalDate.ofInstant(s.start(), ZoneOffset.UTC);
             switch (s.tier()) {
-                case DAY -> {
-                    assertThat(s.start()).isEqualTo(d.atStartOfDay(ZoneOffset.UTC).toInstant());
-                    assertThat(s.end().getEpochSecond() % 86_400).isZero();
+                case MONTH -> {
+                    assertThat(s.start()).isEqualTo(monthStart(s.start()));
+                    assertThat(s.end()).isEqualTo(monthStart(s.end()));
                 }
                 case LIVE -> {
                     live++;
-                    assertThat(LocalDate.ofInstant(s.start(), ZoneOffset.UTC))
-                            .isEqualTo(LocalDate.ofInstant(s.end().minusNanos(1), ZoneOffset.UTC));
+                    assertThat(YearMonth.from(s.start().atZone(ZoneOffset.UTC)))
+                            .isEqualTo(YearMonth.from(s.end().minusNanos(1).atZone(ZoneOffset.UTC)));
                 }
             }
         }
         assertThat(live).isLessThanOrEqualTo(2);
         assertThat(segs).hasSizeLessThanOrEqualTo(3);
+    }
+
+    private static Instant monthStart(Instant i) {
+        return YearMonth.from(i.atZone(ZoneOffset.UTC)).atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 }

@@ -151,7 +151,7 @@ class StreamAndDeltaConcurrencyTest extends PostgresTestBase {
         assertThat(db().count("\"wqDeadLetter\"")).isZero();
         assertThat(db().count("\"wqPrjSession\"")).isEqualTo(ITERATIONS);
         assertThat(db().count("\"wqPrjPlay\"")).isEqualTo(2 * ITERATIONS);
-        assertThat(db().count("\"wqPrjWebTransaction\"")).isEqualTo(3 * ITERATIONS);
+        assertThat(db().count("(select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w")).isEqualTo(3 * ITERATIONS);
         ProjectionInvariants invariants = new ProjectionInvariants(jdbc());
         assertThat(invariants.aggregationDrift()).as("P-4").isEmpty();
         assertThat(invariants.highLevelDrift()).as("P-8").isEmpty();

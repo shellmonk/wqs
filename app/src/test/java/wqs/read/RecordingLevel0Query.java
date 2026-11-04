@@ -4,7 +4,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import wqs.domain.ViewKind;
 
 /** Test-only delegate that records every {@link #keys} call, to observe where the offset walk lands. */
 final class RecordingLevel0Query implements Level0Query {

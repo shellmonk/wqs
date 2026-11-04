@@ -88,7 +88,7 @@ class ProjectionWriterTest extends PostgresTestBase {
                 .isInstanceOf(RuntimeException.class);
 
         // tx-3 must not survive, and the offset must still be the previous one.
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(1);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(1);
         assertThat(offsetStore.read(STREAM)).contains(10L);
     }
 
@@ -106,7 +106,7 @@ class ProjectionWriterTest extends PostgresTestBase {
                 tx("tx-past", past.atDay(15).atStartOfDay(ZoneOffset.UTC).toInstant()),
                 tx("tx-future", future.atDay(15).atStartOfDay(ZoneOffset.UTC).toInstant())), 5L));
 
-        assertThat(count("wqPrjWebTransaction")).isEqualTo(2);
+        assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).isEqualTo(2);
         assertThat(count("wqPrjSession")).isEqualTo(2);
         assertThat(partitionManager.runwayMonths(past)).isPositive();
         assertThat(partitionManager.runwayMonths(future)).isPositive();
@@ -128,6 +128,46 @@ class ProjectionWriterTest extends PostgresTestBase {
      * no session or play sum: a session's "zeroTxCount" counts it, and a session needs a non-zero row
      * to exist at all.
      */
+    /**
+     * Plan D6: a standalone zero-amount row is a level-1/2 entry counted apart -- an ENTRY row with
+     * "zeroAmount" = true -- next to its zero-amount TX row; never shown (both policies hide zero
+     * amounts), and its cancel takes it out of that entry's excl-cancelled tally too.
+     */
+    @Test
+    void a_standalone_zero_amount_row_is_a_zero_amount_entry() {
+        ProjectionTransaction standaloneZero = new ProjectionTransaction(
+                7L, SourceKind.TRANSACTION, "z-s", WHEN, "P11", "keno", null, null,
+                TxTypes.WIN, new BigDecimal("0.0000"), "EUR", null, null, null);
+
+        writer.apply(new ProjectionBatch(STREAM, List.of(standaloneZero), 1L));
+
+        assertThat(db().lines("""
+                select "unit", "source", "productType", "type", "zeroAmount", "cnt", "cntExclCancelled"
+                from "wqOwnerMonth" order by "unit"
+                """)).hasSize(2)
+                .anySatisfy(r -> assertThat(r).startsWith("unit=0,").contains("type=" + TxTypes.WIN + ",")
+                        .contains("zeroAmount=true"))
+                .anySatisfy(r -> assertThat(r).startsWith("unit=1,").contains("productType=keno, type=,")
+                        .contains("zeroAmount=true"));
+        assertThat(db().value("""
+                select count(*)::int from "wqOwnerMonth" where "unit" = 1 and "zeroAmount" and "type" = ''
+                  and "cnt" = 1 and "cntExclCancelled" = 1""", Integer.class)).isEqualTo(1);
+        assertThat(count(ProjectionInvariants.CC_TIMELINE)).as("shown on no endpoint").isZero();
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+
+        writer.apply(new ProjectionBatch(STREAM, List.of(new ProjectionTransaction(
+                7L, SourceKind.TRANSACTION, "z-s-x", WHEN.plusSeconds(5), "P11", "keno", null, null,
+                TxTypes.CANCEL, new BigDecimal("0.0000"), "EUR", null, "z-s", null)), 2L));
+
+        assertThat(db().value("""
+                select "cntExclCancelled" from "wqOwnerMonth" where "unit" = 1 and "zeroAmount"
+                """, Long.class))
+                .as("the cancelled zero-amount entry").isZero();
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"unit\" = 1", Integer.class))
+                .as("a cancellation is no entry").isEqualTo(1);
+        assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
+    }
+
     @Test
     void zero_amount_transaction_is_stored_deduplicated_and_counted_apart() {
         WriteResult first = writer.apply(new ProjectionBatch(STREAM, List.of(zero("z-1")), 1L));
@@ -135,13 +175,15 @@ class ProjectionWriterTest extends PostgresTestBase {
         assertThat(first.projected()).isEqualTo(1);
         assertThat(count("wqPrjTransaction")).isEqualTo(1);
         assertThat(db().value("select \"zeroAmount\" from \"wqPrjTransaction\"", Boolean.class)).isTrue();
-        assertThat(count("wqPrjTimeline")).as("no page unit").isZero();
+        assertThat(count(ProjectionInvariants.CC_TIMELINE)).as("no entry").isZero();
         assertThat(count("wqPrjSession")).as("a zero-amount row opens no session").isZero();
         assertThat(count("wqPrjPlay")).isZero();
-        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where not \"zeroAmount\"", Integer.class))
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where not \"zeroAmount\"", Integer.class))
                 .as("counted apart").isZero();
-        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where \"zeroAmount\" and \"pageUnit\" = 0",
-                Integer.class)).as("TRANSACTION, (pt, t) x (ALL) per view").isEqualTo(8);
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"zeroAmount\" and \"unit\" = 0",
+                Integer.class)).as("TX, its one exact combination").isEqualTo(1);
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"unit\" = 1", Integer.class))
+                .as("a session member is no entry").isZero();
         assertThat(offsetStore.read(STREAM)).contains(1L);
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
 
@@ -201,9 +243,9 @@ class ProjectionWriterTest extends PostgresTestBase {
             assertThat(count("wqPrjPendingCancel")).as("cancelFirst=" + cancelFirst).isZero();
             assertThat(db().value("select \"cancelled\" from \"wqPrjTransaction\" where \"sourceId\" = 'z-1'",
                     Boolean.class)).as("cancelFirst=" + cancelFirst).isTrue();
-            assertThat(db().value("select count(*)::int from \"wqPrjWebTransaction\" where not \"zeroAmount\"",
+            assertThat(db().value("select count(*)::int from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where not \"zeroAmount\"",
                     Integer.class)).isEqualTo(1);
-            assertThat(db().value("select \"sourceId\" from \"wqPrjWebTransaction\" where not \"zeroAmount\"",
+            assertThat(db().value("select \"sourceId\" from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where not \"zeroAmount\"",
                     String.class)).isEqualTo("c-1");
             assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
         }
@@ -221,8 +263,8 @@ class ProjectionWriterTest extends PostgresTestBase {
             writer.apply(new ProjectionBatch(STREAM, List.of(order.get(1)), 2L));
 
             assertThat(count("wqPrjTransaction")).isEqualTo(2);
-            assertThat(count("wqPrjWebTransaction")).as("both stored").isEqualTo(2);
-            assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqPrjWebTransaction\" where \"sourceId\" = 't-1'")
+            assertThat(count(wqs.projection.ProjectionInvariants.WEB_TRANSACTIONS)).as("both stored").isEqualTo(2);
+            assertThat(db().row("select \"cancelled\", \"cancelledBy\" from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where \"sourceId\" = 't-1'")
                     .asMap().values().toArray())
                     .as("cancelFirst=" + cancelFirst).containsExactly(true, "c-1");
             assertThat(count("wqPrjPendingCancel")).isZero();
@@ -251,12 +293,12 @@ class ProjectionWriterTest extends PostgresTestBase {
     }
 
     /**
-     * Task 3 ruling, named: a sessioned transaction of a source that does not feed every view (a
-     * cc-only payment carrying a batch) is rejected as {@code sessioned-source-not-on-every-view}
-     * before anything of it is written; the rest of its batch applies.
+     * The sessioned-source rule is gone (plan Task 4): a session is shown by the read policies of its
+     * first transaction's source, so a payment carrying a batch is stored and sessioned like any other
+     * transaction -- never dead-lettered -- under "firstSource" 4.
      */
     @Test
-    void a_sessioned_cc_only_transaction_dead_letters_alone() {
+    void a_sessioned_payment_is_projected_as_a_session_of_its_own_source() {
         ProjectionTransaction sessionedPayment = new ProjectionTransaction(
                 7L, SourceKind.PAYMENT, "pay-s", WHEN, null, null, "b-pay", "p-pay",
                 TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
@@ -264,14 +306,13 @@ class ProjectionWriterTest extends PostgresTestBase {
         WriteResult result = writer.apply(new ProjectionBatch(STREAM,
                 List.of(tx("before"), sessionedPayment, tx("after")), 6L, List.of(4L, 5L, 6L)));
 
-        assertThat(result.deadLettered()).isEqualTo(1);
-        assertThat(result.projected()).isEqualTo(2);
-        assertThat(db().count("\"wqPrjTransaction\" where \"sourceId\" = 'pay-s'"))
-                .as("not even the transaction row").isZero();
-        assertThat(db().count("\"wqPrjSession\" where \"batchId\" = 'b-pay'")).isZero();
+        assertThat(result.deadLettered()).isZero();
+        assertThat(result.projected()).isEqualTo(3);
+        assertThat(db().value("select \"firstSource\" from \"wqPrjSession\" where \"batchId\" = 'b-pay'", Short.class))
+                .isEqualTo((short) SourceKind.PAYMENT.code());
         assertThat(db().column("select \"sourceId\" from \"wqPrjTransaction\" order by 1", String.class))
-                .containsExactly("after", "before");
-        assertThat(deadLetters()).containsExactly("pay-s|5|sessioned-source-not-on-every-view");
+                .containsExactly("after", "before", "pay-s");
+        assertThat(deadLetters()).isEmpty();
         assertThat(offsetStore.read(STREAM)).contains(6L);
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
@@ -307,7 +348,7 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.deadLettered()).isZero();
         assertThat(deadLetters()).isEmpty();
-        assertThat(db().row("select \"cancelled\", \"cancelledBy\" from \"wqPrjWebTransaction\" where \"sourceId\" = 'ei-t'").asMap().values().toArray()).containsExactly(true, "ei-c");
+        assertThat(db().row("select \"cancelled\", \"cancelledBy\" from (select * from \"wqPrjTransaction\" where \"source\" in (1, 3)) w where \"sourceId\" = 'ei-t'").asMap().values().toArray()).containsExactly(true, "ei-c");
         assertThat(new ProjectionInvariants(jdbc()).drift()).isEmpty();
     }
 
@@ -329,13 +370,13 @@ class ProjectionWriterTest extends PostgresTestBase {
 
         assertThat(result.projected()).isEqualTo(2);
         assertThat(deadLetters()).isEmpty();
-        for (String table : List.of("wqPrjWebTransaction", "wqPrjCcTransaction")) {
-            assertThat(db().value("select \"type\" from \"" + table + "\" where \"sourceId\" = 'tx-unknown'",
-                    String.class)).as(table).isEqualTo("TT_NEVER_SEEN_BEFORE");
+        for (String table : List.of(ProjectionInvariants.WEB_TRANSACTIONS, "wqPrjTransaction")) {
+            assertThat(db().value("select \"type\" from " + ProjectionInvariants.relation(table)
+                    + " where \"sourceId\" = 'tx-unknown'", String.class)).as(table).isEqualTo("TT_NEVER_SEEN_BEFORE");
         }
         assertThat(db().value("""
-                select count(*)::int from "wqPrjCount" where "type" = 'TT_NEVER_SEEN_BEFORE'""", Integer.class))
-                .as("counted under its own code: (instants, code) and (ALL, code), per view").isEqualTo(4);
+                select count(*)::int from "wqOwnerMonth" where "type" = 'TT_NEVER_SEEN_BEFORE'""", Integer.class))
+                .as("counted under its own code: one exact combination (instants, code)").isEqualTo(1);
         var session = db().row("""
                 select "txCount", "totalPlays", "totalWins" from "wqPrjSession" where "batchId" = 'b-u'""");
         assertThat(session.get("txCount", Integer.class)).isEqualTo(2);
@@ -391,6 +432,6 @@ class ProjectionWriterTest extends PostgresTestBase {
     }
 
     private int count(String table) {
-        return db().value("select count(*)::int from \"" + table + "\"", Integer.class);
+        return db().value("select count(*)::int from " + wqs.projection.ProjectionInvariants.relation(table), Integer.class);
     }
 }

@@ -15,7 +15,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
 import wqs.gen.TxTypes;
 import wqs.projection.ProjectionInvariants;
 import wqs.read.cc.CcProjectionService;

@@ -369,36 +369,24 @@ class RollupUpdaterTest extends PostgresTestBase {
     }
 
     /**
-     * A session never mixes sources: only sources feeding every view may carry a batch id. Any
-     * other is rejected before anything is written, and the non-transient exception dead-letters it.
+     * Any source may carry a batch id now: what an endpoint shows of a session is decided at read time
+     * by its first transaction's source ("firstSource", plan D1), not by rejecting it at ingest.
      */
     @ParameterizedTest
-    @EnumSource(value = SourceKind.class, names = {"PAYMENT", "MANUAL_ADJUSTMENT", "LIMIT"})
-    void a_sessioned_transaction_of_a_cc_only_source_is_rejected(SourceKind source) {
-        ProjectionTransaction sessioned = new ProjectionTransaction(
-                1L, source, "x1", T0, null, null, "b1", "p1",
-                TxTypes.NEUTRAL, new BigDecimal("5.0000"), "EUR", null, null, null);
-
-        Throwable failure = catchThrowable(() -> apply(sessioned));
-
-        assertThat(failure).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("batchId b1");
-        assertThat(TransientFailures.isTransient(failure)).as("dead-lettered, not retried").isFalse();
-        assertThat(db().count("\"wqPrjSession\"")).isZero();
-        assertThat(db().count("\"wqPrjPlay\"")).isZero();
-    }
-
-    @ParameterizedTest
-    @EnumSource(value = SourceKind.class, names = {"TRANSACTION", "CLAIMABLE_PRIZE"})
-    void a_sessioned_transaction_of_a_source_feeding_every_view_rolls_up(SourceKind source) {
-        apply(new ProjectionTransaction(
+    @EnumSource(SourceKind.class)
+    void a_sessioned_transaction_of_any_source_rolls_up_under_its_first_source(SourceKind source) {
+        RollupResult result = apply(new ProjectionTransaction(
                 1L, source, "x1", T0, null, null, "b1", "p1",
                 TxTypes.PLAY, new BigDecimal("5.0000"), "EUR", null, null, null));
 
         assertThat(session("b1").txCount()).isEqualTo(1);
+        assertThat(result.sessionFirstSource()).isEqualTo((short) source.code());
+        assertThat(db().value("select \"firstSource\" from \"wqPrjSession\" where \"batchId\" = 'b1'", Short.class))
+                .isEqualTo((short) source.code());
     }
 
     private RollupResult apply(ProjectionTransaction transaction) {
-        return inTx().execute(status -> new RollupUpdater(jdbc()).applyTransaction(transaction));
+        return inTx().execute(status -> new RollupUpdater(jdbc(), new OwnerMonths(jdbc())).applyTransaction(transaction));
     }
 
     private void clean() {
@@ -447,8 +435,9 @@ class RollupUpdaterTest extends PostgresTestBase {
                                    boolean keyChanged) {
         return new RollupResult(sessionIsNew, playIsNew, start,
                 product == null ? null : Products.id(product),
-                product == null ? null : Products.type(product), "EUR", previousStart,
-                previousProduct == null ? null : Products.type(previousProduct), keyChanged);
+                product == null ? null : Products.type(product), (short) SourceKind.TRANSACTION.code(), "EUR",
+                previousStart, previousProduct == null ? null : Products.type(previousProduct),
+                keyChanged ? (short) SourceKind.TRANSACTION.code() : 0, keyChanged, false);
     }
 
     private static OffsetDateTime utc(Instant instant) {

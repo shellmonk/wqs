@@ -34,7 +34,7 @@ import wqs.domain.SourceKind;
 public class PendingCancelStore {
 
     private static final String PARK = """
-            insert into "wqPrjPendingCancel" ("source", "cancelSourceId", "cancelsSourceId", "ownerType", "userId",
+            insert into "wqPrjPendingCancel" ("source", "cancelSourceId", "targetSourceId", "ownerType", "userId",
                     "occurredAt", "productId", "productType", "batchId", "subBatchId", "type", "amount",
                     "currency", "balanceAfter", "detail")
             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -43,16 +43,16 @@ public class PendingCancelStore {
     /** The targets arrive as four parallel arrays, so the statement is one whatever their number. */
     private static final String DRAIN = """
             delete from "wqPrjPendingCancel"
-            where ("source", "cancelsSourceId", "ownerType", "userId") in (
+            where ("source", "targetSourceId", "ownerType", "userId") in (
                 select * from unnest(cast(? as smallint[]), cast(? as text[]), cast(? as smallint[]), cast(? as bigint[])))
-            returning "source", "cancelSourceId", "cancelsSourceId", "ownerType", "userId", "occurredAt",
+            returning "source", "cancelSourceId", "targetSourceId", "ownerType", "userId", "occurredAt",
                       "productId", "productType", "batchId", "subBatchId", "type", "amount",
                       "currency", "balanceAfter", "detail"
             """;
     private static final String EXPIRE = """
             delete from "wqPrjPendingCancel"
             where "parkedAt" < ?
-            returning "source", "cancelSourceId", "cancelsSourceId", "parkedAt"
+            returning "source", "cancelSourceId", "targetSourceId", "parkedAt"
             """;
     private static final String DEPTH = """
             select count(*) from "wqPrjPendingCancel"
@@ -76,7 +76,7 @@ public class PendingCancelStore {
             rs.getBigDecimal("amount"),
             rs.getString("currency"),
             rs.getBigDecimal("balanceAfter"),
-            rs.getString("cancelsSourceId"),
+            rs.getString("targetSourceId"),
             rs.getString("detail"));
 
     private final JdbcClient jdbc;
@@ -132,7 +132,7 @@ public class PendingCancelStore {
     }
 
     /** A parked cancel removed unresolved: its identity and when it was parked, nothing more. */
-    public record Expired(SourceKind source, String cancelSourceId, String cancelsSourceId, Instant parkedAt) {}
+    public record Expired(SourceKind source, String cancelSourceId, String targetSourceId, Instant parkedAt) {}
 
     /**
      * Removes the cancels parked before {@code cutoff}, whose target never arrived (plan D3), and
@@ -144,7 +144,7 @@ public class PendingCancelStore {
         return jdbc.sql(EXPIRE)
                 .params(timestamptz(cutoff))
                 .query((rs, n) -> new Expired(SourceKind.ofCode(rs.getShort("source")), rs.getString("cancelSourceId"),
-                        rs.getString("cancelsSourceId"), rs.getObject("parkedAt", OffsetDateTime.class).toInstant()))
+                        rs.getString("targetSourceId"), rs.getObject("parkedAt", OffsetDateTime.class).toInstant()))
                 .list()
                 .stream()
                 .sorted(Comparator.comparing((Expired e) -> (short) e.source().code())

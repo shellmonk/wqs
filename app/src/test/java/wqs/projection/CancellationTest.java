@@ -266,6 +266,7 @@ class CancellationTest extends PostgresTestBase {
     void a_cancel_from_another_user_stays_parked_and_changes_nothing() {
         apply(tx("t1", "b1", "p1"));
         ProjectionSnapshot before = ProjectionSnapshot.of(jdbc());
+        List<String> before1Counts = ownerMonthRows(1L);
 
         apply(cancelOfUser(2L, "c1", "t1"));
 
@@ -273,10 +274,10 @@ class CancellationTest extends PostgresTestBase {
         assertThat(pendingCancelStore.oldestParkedAt()).isPresent();
         assertThat(cancelled(WEB, "t1")).isFalse();
         ProjectionSnapshot after = ProjectionSnapshot.of(jdbc());
-        // User 1's projection is untouched: rollups and page index are identical.
+        // User 1's projection is untouched: rollups and counts are identical.
         assertThat(after.sessions()).isEqualTo(before.sessions());
         assertThat(after.plays()).isEqualTo(before.plays());
-        assertThat(after.timeline()).isEqualTo(before.timeline());
+        assertThat(ownerMonthRows(1L)).isEqualTo(before1Counts);
         assertThat(cancelledBy("t1")).isNull();
         assertNoDrift();
     }
@@ -588,7 +589,7 @@ class CancellationTest extends PostgresTestBase {
     }
 
     private static String transactionTable(int view) {
-        return view == WEB ? "wqPrjWebTransaction" : "wqPrjCcTransaction";
+        return ProjectionInvariants.relation(view == WEB ? ProjectionInvariants.WEB_TRANSACTIONS : "wqPrjTransaction");
     }
 
     private static String pageTable(int view) {
@@ -601,20 +602,20 @@ class CancellationTest extends PostgresTestBase {
 
     private boolean cancelledOf(int view, SourceKind source, String sourceId) {
         return db().value(
-                "select \"cancelled\" from \"" + transactionTable(view)
-                        + "\" where \"source\" = ? and \"sourceId\" = ?", Boolean.class,
+                "select \"cancelled\" from " + transactionTable(view)
+                        + " where \"source\" = ? and \"sourceId\" = ?", Boolean.class,
                 (short) source.code(), sourceId);
     }
 
     private String cancelledBy(String sourceId) {
         return db().value(
-                "select \"cancelledBy\" from \"wqPrjCcTransaction\" where \"source\" = 1 and \"sourceId\" = ?", String.class,
+                "select \"cancelledBy\" from \"wqPrjTransaction\" where \"source\" = 1 and \"sourceId\" = ?", String.class,
                 sourceId);
     }
 
     private boolean exists(int view, String sourceId) {
-        return db().value("select count(*)::int from \"" + transactionTable(view)
-                + "\" where \"sourceId\" = ?", Integer.class, sourceId) > 0;
+        return db().value("select count(*)::int from " + transactionTable(view)
+                + " where \"sourceId\" = ?", Integer.class, sourceId) > 0;
     }
 
     private int sessionField(String field) {
@@ -637,6 +638,13 @@ class CancellationTest extends PostgresTestBase {
     private BigDecimal playMoney(String subBatchId, String field) {
         return db().value("select \"" + field + "\" from \"wqPrjPlay\" where \"subBatchId\" = ?", BigDecimal.class,
                 subBatchId);
+    }
+
+    private static List<String> ownerMonthRows(long userId) {
+        return db().lines("""
+                select * from "wqOwnerMonth" where "userId" = ?
+                order by "ownerType", "month", "source", "unit", "productType", "type", "zeroAmount"
+                """, userId);
     }
 
     private boolean sessionVisible(int view) {
@@ -662,10 +670,15 @@ class CancellationTest extends PostgresTestBase {
         return sentinel(view, 0, column);
     }
 
-    private int sentinel(int view, int pageUnit, String column) {
+    /**
+     * The view's total of one unit (TX 0, ENTRY 1) over every product type and type: the sum of its
+     * policy's sources' "wqOwnerMonth" rows. {@code column}: "cntAll" (read as "cnt") or "cntExclCancelled".
+     */
+    private int sentinel(int view, int unit, String column) {
         return db().value("""
-                select coalesce(sum("%s"),0)::int from "wqPrjCount"
-                where "viewKind" = ? and "pageUnit" = ? and "productType" = '' and "type" = ''
-                """.formatted(column), Integer.class, (short) view, (short) pageUnit);
+                select coalesce(sum("%s"),0)::int from "wqOwnerMonth"
+                where "unit" = ? and "source" = any(?) and not "zeroAmount"
+                """.formatted(column.equals("cntAll") ? "cnt" : column), Integer.class, (short) unit,
+                view == WEB ? new Integer[] {1, 3} : new Integer[] {1, 2, 3, 4, 5});
     }
 }

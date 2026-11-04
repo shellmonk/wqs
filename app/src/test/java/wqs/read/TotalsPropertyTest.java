@@ -17,7 +17,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import wqs.domain.AggregationLevel;
 import wqs.domain.ProjectionTransaction;
 import wqs.domain.SourceKind;
-import wqs.domain.ViewKind;
 import wqs.gen.ReadGenerators;
 import wqs.gen.ReadGenerators.ReadQuery;
 import wqs.gen.TxTypes;
@@ -108,9 +107,9 @@ class TotalsPropertyTest extends ReadPropertyBase {
         SegmentCounts sc = readerTx.execute(status ->
                 reader.segmentCounts(readerJdbc, queryFor(ViewKind.WEB), f, from, to));
 
-        assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.DAY);
-        // One day row each for Jan 1, Jan 17 and Feb 28.
-        assertThat(sc.counterRows()).isEqualTo(3);
+        assertThat(sc.segments()).extracting(Segment::tier).containsOnly(Tier.MONTH);
+        // One month row each for Jan and Feb.
+        assertThat(sc.counterRows()).isEqualTo(2);
         assertThat(sc.total()).isEqualTo(3).isEqualTo(oracle.count(ViewKind.WEB, f, from, to));
         assertThat(reader.total(queryFor(ViewKind.WEB), f, from, to)).isEqualTo(3);
     }

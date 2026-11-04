@@ -80,7 +80,7 @@ class StoreEverythingApiTest extends ApiTestBase {
                 .as("another owner type's cancel never resolves against the player's row").isFalse();
         assertThat(db().value("select count(*)::int from \"wqPrjPendingCancel\" where \"ownerType\" = 2", Integer.class))
                 .as("it parks under its own owner").isEqualTo(1);
-        assertThat(db().value("select count(*)::int from \"wqPrjCount\" where \"zeroAmount\"", Integer.class))
+        assertThat(db().value("select count(*)::int from \"wqOwnerMonth\" where \"zeroAmount\"", Integer.class))
                 .as("zero-amount rows are counted apart").isPositive();
         assertThat(db().value("""
                 select "zeroTxCount" from "wqPrjSession" where "ownerType" = 1 and "batchId" = 's1'""", Integer.class))
