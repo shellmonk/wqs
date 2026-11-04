@@ -3,14 +3,19 @@ package wqs.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import wqs.dto.IngestResult;
+import wqs.dto.StreamBatchItem;
+import wqs.dto.StreamBatchResult;
 import wqs.dto.StreamMessage;
 import wqs.entity.DeadLetterEntity;
 import wqs.entity.IngestCursorEntity;
+import wqs.exception.BatchItemRejectedException;
+import wqs.exception.RejectedException;
 import wqs.mapper.TransactionMapper;
 import wqs.repository.DeadLetterRepository;
 import wqs.repository.IngestCursorRepository;
@@ -48,6 +53,45 @@ public class StreamIngestService {
                 .map(IngestCursorEntity::getStreamOffset)
                 .map(OptionalLong::of)
                 .orElse(OptionalLong.empty());
+    }
+
+    /**
+     * Projects a batch of messages in ONE transaction and stores the last offset. A refused message
+     * throws {@link BatchItemRejectedException} naming its offset, and the whole batch rolls back;
+     * the caller retries it with that message as {@link StreamBatchItem.Refused}.
+     */
+    @Transactional
+    public StreamBatchResult ingestBatch(String feed, List<StreamBatchItem> items) {
+        int stored = 0, alreadyStored = 0, deadLettered = 0;
+        for (StreamBatchItem item : items) {
+            switch (item) {
+                case StreamBatchItem.Readable r -> {
+                    IngestResult result;
+                    try {
+                        result = ingest.ingest(mapper.fromStream(r.message()));
+                    } catch (RejectedException e) {
+                        throw new BatchItemRejectedException(r.offset(), e);
+                    }
+                    if (result == IngestResult.STORED) {
+                        stored++;
+                    } else {
+                        alreadyStored++;
+                    }
+                }
+                case StreamBatchItem.Unreadable u -> {
+                    deadLetters.save(DeadLetterEntity.unreadable(feed, u.offset(), Hashes.sha256(u.body()), "unreadable",
+                            u.error(), clock.instant()));
+                    deadLettered++;
+                }
+                case StreamBatchItem.Refused f -> {
+                    deadLetters.save(DeadLetterEntity.rejected(feed, f.offset(), f.message().id(), f.reason(), f.error(),
+                            objectMapper.convertValue(f.message(), MAP), clock.instant()));
+                    deadLettered++;
+                }
+            }
+        }
+        cursors.saveStreamOffset(feed, items.getLast().offset());
+        return new StreamBatchResult(stored, alreadyStored, deadLettered);
     }
 
     /** Projects the message. A {@link wqs.exception.RejectedException} rolls everything back, offset included. */

@@ -11,6 +11,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import wqs.IntegrationTest;
 import wqs.util.Hashes;
@@ -35,6 +37,7 @@ class StreamIngestTest extends IntegrationTest {
     @Autowired JdbcClient jdbc;
     @Autowired ObjectMapper mapper;
     @Autowired StreamConsumer consumer;
+    @Autowired MeterRegistry meters;
 
     private Producer producer;
 
@@ -168,6 +171,47 @@ class StreamIngestTest extends IntegrationTest {
     }
 
     @Test
+    void messages_published_together_are_committed_in_batches() throws Exception {
+        long batchesBefore = batches();
+        List<String> ids = new java.util.ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            String id = nextId();
+            ids.add(id);
+            send(message("transfer-out.json", id, "1-" + id, "2026-09-08T00:00:00Z"));
+        }
+        flush();
+        awaitRow(ids.getLast());
+
+        assertThat(ids).allMatch(id -> rows(id) == 1);
+        assertThat(batches() - batchesBefore).as("transactions for 200 messages").isLessThan(50);
+    }
+
+    @Test
+    void a_refused_message_inside_a_batch_is_dead_lettered_once_and_the_rest_stored_once() throws Exception {
+        String owner = nextId();
+        send(message("instants-prize.json", nextId(), "1-" + owner, "2026-09-09T00:00:00Z", "PRIZE", 5, "EUR"));
+        List<String> ids = new java.util.ArrayList<>();
+        String usd = null;
+        for (int i = 0; i < 40; i++) {
+            String id = nextId();
+            if (i == 20) {
+                usd = id;
+                send(message("instants-prize.json", id, "1-" + owner, "2026-09-09T00:00:01Z", "PRIZE", 5, "USD"));
+            } else {
+                ids.add(id);
+                send(message("transfer-out.json", id, "1-" + id, "2026-09-09T00:00:02Z"));
+            }
+        }
+        flush();
+        awaitRow(ids.getLast());
+
+        assertThat(ids).allMatch(id -> rows(id) == 1);
+        assertThat(rows(usd)).isZero();
+        assertThat(jdbc.sql("select count(*) from \"wqDeadLetter\" where \"sourceId\" = :id")
+                .param("id", usd).query(Long.class).single()).isEqualTo(1);
+    }
+
+    @Test
     void each_month_gets_its_own_partition() throws Exception {
         String id = nextId();
         publish(message("transfer-out.json", id, "1-" + id, "2025-03-31T23:59:59.999999Z"));
@@ -228,6 +272,31 @@ class StreamIngestTest extends IntegrationTest {
             }
         });
         assertThat(confirmed.await(10, TimeUnit.SECONDS)).as("broker confirmed").isTrue();
+    }
+
+    private final List<CountDownLatch> pending = new java.util.ArrayList<>();
+
+    /** Publishes without waiting, so messages arrive together; {@link #flush()} waits for the confirms. */
+    private void send(byte[] body) {
+        CountDownLatch confirmed = new CountDownLatch(1);
+        pending.add(confirmed);
+        producer.send(producer.messageBuilder().addData(body).build(), status -> {
+            if (status.isConfirmed()) {
+                confirmed.countDown();
+            }
+        });
+    }
+
+    private void flush() throws InterruptedException {
+        for (CountDownLatch latch : pending) {
+            assertThat(latch.await(10, TimeUnit.SECONDS)).as("broker confirmed").isTrue();
+        }
+        pending.clear();
+    }
+
+    private long batches() {
+        var summary = meters.find("wqs.ingest.stream.batch.size").summary();
+        return summary == null ? 0 : summary.count();
     }
 
     private void awaitRow(String sourceId) {

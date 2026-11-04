@@ -8,7 +8,12 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.OptionalLong;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -16,7 +21,10 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 import wqs.config.StreamProperties;
 import wqs.dto.IngestResult;
+import wqs.dto.StreamBatchItem;
+import wqs.dto.StreamBatchResult;
 import wqs.dto.StreamMessage;
+import wqs.exception.BatchItemRejectedException;
 import wqs.exception.DecodeException;
 import wqs.exception.RejectedException;
 import wqs.service.StreamIngestService;
@@ -27,7 +35,15 @@ import wqs.util.TransientFailures;
  * Consumes {@code walAccountTransactions} from the RabbitMQ stream. Transactions are the service
  * layer's: each {@link StreamIngestService} call is ONE database transaction that also stores the
  * message's offset in {@code "wqIngestCursor"}, so a crash replays from the last committed message
- * and never skips one. The broker's own offset tracking is not used. A redelivered message hits the unique key and
+ * and never skips one.
+ *
+ * <p>Messages are committed in batches. The client's dispatch thread only puts each message on a
+ * bounded queue (a full queue blocks it, so the broker slows down instead of memory filling up);
+ * one worker takes up to {@code batch-size} messages, or what arrived within {@code batch-max-wait},
+ * and commits them with the last offset in one transaction. A refused message rolls the batch back
+ * and the batch is retried with that message dead-lettered; a transient failure retries the batch;
+ * any other failure falls back to one message per transaction for that batch. Messages queued but
+ * not committed when stopping are read again from the stored offset on restart. The broker's own offset tracking is not used. A redelivered message hits the unique key and
  * is counted as a duplicate.
  *
  * <ul>
@@ -58,8 +74,13 @@ public class StreamConsumer implements SmartLifecycle {
     private volatile boolean running;
     private volatile Thread subscriber;
     private volatile Consumer consumer;
-    /** The last offset handled; touched by the subscriber before subscribing, then only by the client's dispatch thread. */
+    private volatile Thread worker;
+    private volatile BlockingQueue<Received> queue;
+    /** The last committed offset: set before subscribing, then advanced by the worker. */
     private volatile long lastOffset = -1;
+
+    /** A message as received, before decoding. */
+    record Received(long offset, byte[] body) {}
 
     public StreamConsumer(Environment environment, StreamProperties properties, StreamMessageDecoder decoder,
                           StreamIngestService ingest, MeterRegistry meters) {
@@ -76,25 +97,42 @@ public class StreamConsumer implements SmartLifecycle {
             return;
         }
         running = true;
+        queue = new ArrayBlockingQueue<>(2 * properties.batchSize());
+        worker = Thread.ofVirtual().name("wqs-stream-batches").start(this::work);
         subscriber = Thread.ofVirtual().name("wqs-stream-subscribe").start(this::subscribe);
     }
 
     @Override
     public synchronized void stop() {
         running = false;
-        Thread t = subscriber;
-        if (t != null) {
-            t.interrupt();
-            try {
-                t.join(Duration.ofSeconds(10));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        // The subscriber may be sleeping in its retry backoff: interrupt it.
+        join(subscriber, true);
+        // The worker finishes the batch it is committing (an interrupt during database I/O would
+        // break the connection) and then stops taking batches. Only after it has stopped is the
+        // queue cleared, so no batch is ever committed past a gap in the offsets.
+        join(worker, false);
         Consumer c = consumer;
         consumer = null;
         if (c != null) {
             c.close();
+        }
+        BlockingQueue<Received> q = queue;
+        if (q != null) {
+            q.clear(); // not committed: read again from the stored offset on restart
+        }
+    }
+
+    private static void join(Thread t, boolean interrupt) {
+        if (t == null) {
+            return;
+        }
+        if (interrupt) {
+            t.interrupt();
+        }
+        try {
+            t.join(Duration.ofSeconds(30));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -134,7 +172,118 @@ public class StreamConsumer implements SmartLifecycle {
         if (offset <= lastOffset) {
             return; // already committed; the broker can resend the start of a chunk
         }
-        byte[] body = bodyOf(message);
+        Received received = new Received(offset, bodyOf(message));
+        try {
+            // A full queue holds the broker back. Wait in short steps so stopping is never blocked;
+            // a message dropped while stopping is read again from the stored offset on restart.
+            while (running) {
+                if (queue.offer(received, 100, TimeUnit.MILLISECONDS)) {
+                    return;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** The single worker: takes batches off the queue, in offset order, and commits them. */
+    private void work() {
+        while (running) {
+            List<Received> batch;
+            try {
+                batch = nextBatch();
+            } catch (InterruptedException e) {
+                return;
+            }
+            if (!batch.isEmpty()) {
+                commit(batch);
+            }
+        }
+    }
+
+    /** Waits for a first message, then for more until the batch is full or batch-max-wait has passed. */
+    private List<Received> nextBatch() throws InterruptedException {
+        Received first = queue.poll(1, TimeUnit.SECONDS);
+        if (first == null) {
+            return List.of();
+        }
+        List<Received> batch = new ArrayList<>(properties.batchSize());
+        batch.add(first);
+        long deadline = System.nanoTime() + properties.batchMaxWait().toNanos();
+        while (batch.size() < properties.batchSize()) {
+            if (queue.drainTo(batch, properties.batchSize() - batch.size()) > 0) {
+                continue;
+            }
+            long left = deadline - System.nanoTime();
+            Received next = left > 0 ? queue.poll(left, TimeUnit.NANOSECONDS) : null;
+            if (next == null) {
+                break;
+            }
+            batch.add(next);
+        }
+        return batch;
+    }
+
+    private void commit(List<Received> batch) {
+        String feed = properties.name();
+        List<StreamBatchItem> items = new ArrayList<>(batch.size());
+        for (Received r : batch) {
+            try {
+                items.add(new StreamBatchItem.Readable(r.offset(), decoder.decode(r.body())));
+            } catch (DecodeException e) {
+                items.add(new StreamBatchItem.Unreadable(r.offset(), r.body(), e.getMessage()));
+            }
+        }
+        Duration backoff = Duration.ofMillis(100);
+        while (running) {
+            try {
+                StreamBatchResult result = ingest.ingestBatch(feed, items);
+                lastOffset = batch.getLast().offset();
+                meters.summary("wqs.ingest.stream.batch.size").record(batch.size());
+                count("stored", result.stored());
+                count("already_stored", result.alreadyStored());
+                count("dead_lettered", result.deadLettered());
+                return;
+            } catch (BatchItemRejectedException e) {
+                // Rolled back; retry with the refused message dead-lettered instead.
+                items = refuse(items, e);
+            } catch (RuntimeException e) {
+                if (!TransientFailures.isTransient(e)) {
+                    log.warn("Batch at stream offsets {}..{} failed ({}); handling its messages one by one",
+                            batch.getFirst().offset(), batch.getLast().offset(), e.getClass().getSimpleName());
+                    batch.forEach(r -> handleOne(r.offset(), r.body()));
+                    return;
+                }
+                log.warn("Transient failure on batch at stream offset {} ({}); retrying in {}",
+                        batch.getFirst().offset(), e.getClass().getSimpleName(), backoff);
+                if (!sleep(backoff)) {
+                    return; // stopping: nothing was committed, so the batch is read again on restart
+                }
+                backoff = min(backoff.multipliedBy(2), MAX_BACKOFF);
+            }
+        }
+    }
+
+    private static List<StreamBatchItem> refuse(List<StreamBatchItem> items, BatchItemRejectedException e) {
+        List<StreamBatchItem> next = new ArrayList<>(items.size());
+        for (StreamBatchItem item : items) {
+            if (item.offset() == e.offset() && item instanceof StreamBatchItem.Readable r) {
+                next.add(new StreamBatchItem.Refused(r.offset(), r.message(), e.rejection().reason(), e.rejection().getMessage()));
+            } else {
+                next.add(item);
+            }
+        }
+        return next;
+    }
+
+    private void count(String outcome, int n) {
+        if (n > 0) {
+            meters.counter("wqs.ingest.stream.messages", "outcome", outcome).increment(n);
+        }
+    }
+
+    /** The fallback: one message in its own transaction, with the per-message failure handling. */
+    private void handleOne(long offset, byte[] body) {
         Duration backoff = Duration.ofMillis(100);
         while (running) {
             try {
@@ -149,7 +298,7 @@ public class StreamConsumer implements SmartLifecycle {
                 }
                 log.warn("Transient failure at stream offset {} ({}); retrying in {}", offset, e.getClass().getSimpleName(), backoff);
                 if (!sleep(backoff)) {
-                    return; // stopping: nothing was committed, so the message is read again on restart
+                    return;
                 }
                 backoff = min(backoff.multipliedBy(2), MAX_BACKOFF);
             }
