@@ -3,53 +3,25 @@ package wqs.stream;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.rabbitmq.stream.Environment;
-import com.rabbitmq.stream.Producer;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import io.micrometer.core.instrument.MeterRegistry;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import wqs.IntegrationTest;
 import wqs.util.Hashes;
 
 /**
  * Messages published to the real stream end up in Postgres. Tests share one stream and one
  * consumer, so each uses its own ids and waits on its own rows.
  */
-class StreamIngestTest extends IntegrationTest {
+class StreamIngestTest extends StreamTestBase {
 
-    private static final AtomicLong IDS = new AtomicLong(System.nanoTime() % 1_000_000_000L * 1000);
-
-    @Autowired Environment streams;
-    @Autowired JdbcClient jdbc;
-    @Autowired ObjectMapper mapper;
     @Autowired StreamConsumer consumer;
     @Autowired MeterRegistry meters;
-
-    private Producer producer;
-
-    @BeforeEach
-    void producer() {
-        producer = streams.producerBuilder().stream(STREAM).build();
-    }
-
-    @AfterEach
-    void close() {
-        producer.close();
-    }
 
     @Test
     void the_captured_messages_are_stored() throws Exception {
@@ -261,69 +233,8 @@ class StreamIngestTest extends IntegrationTest {
         assertThat(stored).isNotNegative();
     }
 
-    // --- helpers ---
-
-    private byte[] message(String fixture, String id, String ownerId, String created,
-                           String type, int amount, String currency) throws Exception {
-        ObjectNode node = (ObjectNode) mapper.readTree(message(fixture, id, ownerId, created));
-        node.put("type", type);
-        ((ObjectNode) node.get("amount")).put("amount", amount).put("currency", currency);
-        return mapper.writeValueAsBytes(node);
-    }
-
-    private byte[] message(String fixture, String id, String ownerId, String created) throws Exception {
-        ObjectNode node = (ObjectNode) mapper.readTree(StreamMessageDecoderTest.fixture(fixture));
-        node.put("id", id);
-        ((ObjectNode) node.get("userContext")).put("ownerId", ownerId);
-        ((ObjectNode) node.get("createdContext")).put("created", Instant.parse(created).toString());
-        return mapper.writeValueAsBytes(node);
-    }
-
-    private void publish(byte[] body) throws InterruptedException {
-        CountDownLatch confirmed = new CountDownLatch(1);
-        producer.send(producer.messageBuilder().addData(body).build(), status -> {
-            if (status.isConfirmed()) {
-                confirmed.countDown();
-            }
-        });
-        assertThat(confirmed.await(10, TimeUnit.SECONDS)).as("broker confirmed").isTrue();
-    }
-
-    private final List<CountDownLatch> pending = new java.util.ArrayList<>();
-
-    /** Publishes without waiting, so messages arrive together; {@link #flush()} waits for the confirms. */
-    private void send(byte[] body) {
-        CountDownLatch confirmed = new CountDownLatch(1);
-        pending.add(confirmed);
-        producer.send(producer.messageBuilder().addData(body).build(), status -> {
-            if (status.isConfirmed()) {
-                confirmed.countDown();
-            }
-        });
-    }
-
-    private void flush() throws InterruptedException {
-        for (CountDownLatch latch : pending) {
-            assertThat(latch.await(10, TimeUnit.SECONDS)).as("broker confirmed").isTrue();
-        }
-        pending.clear();
-    }
-
     private long batches() {
         var summary = meters.find("wqs.ingest.stream.batch.size").summary();
         return summary == null ? 0 : summary.count();
-    }
-
-    private void awaitRow(String sourceId) {
-        await().atMost(Duration.ofSeconds(20)).until(() -> rows(sourceId) == 1);
-    }
-
-    private long rows(String sourceId) {
-        return jdbc.sql("select count(*) from \"wqPrjTransaction\" where \"sourceId\" = :id")
-                .param("id", sourceId).query(Long.class).single();
-    }
-
-    private static String nextId() {
-        return Long.toString(IDS.incrementAndGet());
     }
 }

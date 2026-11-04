@@ -13,8 +13,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.IntegrationTest;
+import wqs.TestTransactions;
 import wqs.dto.IngestResult;
-import wqs.dto.IncomingTransaction;
 import wqs.dto.Source;
 import wqs.exception.RejectedException;
 import wqs.dto.IngestResult;
@@ -71,8 +71,8 @@ class ProjectionWriterTest extends IntegrationTest {
 
     @Test
     void an_earlier_row_moves_the_start_and_takes_over_the_product() {
-        ingest(row("TT_BUY", "-1", "2026-10-26T12:00:00Z", "P1", "LATE_GAME"));
-        ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1", "FIRST_GAME"));
+        ingest(row("TT_BUY", "-1", "2026-10-26T12:00:00Z", "P1").productId("LATE_GAME"));
+        ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1").productId("FIRST_GAME"));
 
         Map<String, Object> s = session();
         assertThat(instant(s, "startedAt")).isEqualTo(Instant.parse("2026-10-26T11:00:00Z"));
@@ -82,7 +82,7 @@ class ProjectionWriterTest extends IntegrationTest {
 
     @Test
     void a_duplicate_is_not_counted_twice() {
-        IncomingTransaction bet = row("TT_BUY", "-2", "2026-10-26T11:00:00Z", "P1");
+        TestTransactions.Builder bet = row("TT_BUY", "-2", "2026-10-26T11:00:00Z", "P1");
         assertThat(ingest(bet)).isEqualTo(IngestResult.STORED);
         assertThat(ingest(bet)).isEqualTo(IngestResult.ALREADY_STORED);
 
@@ -112,7 +112,7 @@ class ProjectionWriterTest extends IntegrationTest {
     @Test
     void the_same_batch_id_under_two_owners_is_two_sessions() {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
-        ingest(withOwner(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"), "2-" + number));
+        ingest(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1").owner("2-" + number));
 
         assertThat(jdbc.sql("select count(*) from \"wqPrjSession\" where \"ownerId\" in (:a, :b) and \"batchId\" = :batch")
                 .param("a", owner).param("b", "2-" + number).param("batch", batch).query(Long.class).single()).isEqualTo(2);
@@ -121,7 +121,7 @@ class ProjectionWriterTest extends IntegrationTest {
     @Test
     void a_row_in_another_currency_is_rejected_and_leaves_nothing_behind() {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
-        IncomingTransaction usd = withCurrency(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1"), "USD");
+        TestTransactions.Builder usd = row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1").currency("USD");
 
         assertThatThrownBy(() -> ingest(usd))
                 .isInstanceOf(RejectedException.class)
@@ -132,7 +132,7 @@ class ProjectionWriterTest extends IntegrationTest {
 
     @Test
     void a_batch_id_on_a_source_that_cannot_carry_one_is_rejected() {
-        IncomingTransaction payment = withSource(row("PT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"), Source.PAYMENT);
+        TestTransactions.Builder payment = row("PT_BUY", "-1", "2026-10-26T11:00:00Z", "P1").source(Source.PAYMENT);
 
         assertThatThrownBy(() -> ingest(payment))
                 .isInstanceOf(RejectedException.class)
@@ -142,35 +142,13 @@ class ProjectionWriterTest extends IntegrationTest {
 
     // --- helpers ---
 
-    private IngestResult ingest(IncomingTransaction t) {
-        return tx.execute(status -> writer.write(t));
+    private IngestResult ingest(TestTransactions.Builder row) {
+        return tx.execute(status -> writer.write(row.build()));
     }
 
-    private IncomingTransaction row(String type, String amount, String at, String subBatch) {
-        return row(type, amount, at, subBatch, "GAME");
-    }
-
-    private IncomingTransaction row(String type, String amount, String at, String subBatch, String productId) {
-        return new IncomingTransaction(owner, Instant.parse(at), Source.TRANSACTION, UUID.randomUUID().toString(),
-                type, new BigDecimal(amount), "EUR", null, productId, "instants", batch, subBatch, null, Map.of());
-    }
-
-    private static IncomingTransaction withOwner(IncomingTransaction t, String ownerId) {
-        return new IncomingTransaction(ownerId, t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
-                t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
-                t.transactionReference(), t.detail());
-    }
-
-    private static IncomingTransaction withCurrency(IncomingTransaction t, String currency) {
-        return new IncomingTransaction(t.ownerId(), t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
-                currency, t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
-                t.transactionReference(), t.detail());
-    }
-
-    private static IncomingTransaction withSource(IncomingTransaction t, Source source) {
-        return new IncomingTransaction(t.ownerId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
-                t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
-                t.transactionReference(), t.detail());
+    /** A row of this test's owner in this test's session; {@code subBatch} null means in no play. */
+    private TestTransactions.Builder row(String type, String amount, String at, String subBatch) {
+        return TestTransactions.transaction(owner).type(type).amount(amount).at(at).session(batch, subBatch);
     }
 
     private Map<String, Object> session() {

@@ -4,11 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.math.BigDecimal;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
@@ -21,7 +18,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import wqs.IntegrationTest;
-import wqs.dto.IncomingTransaction;
+import wqs.TestTransactions;
 import wqs.dto.Source;
 import wqs.security.HeaderOwnerIdResolver;
 import wqs.service.ProjectionWriter;
@@ -84,9 +81,9 @@ class ProjectionApiTest extends IntegrationTest {
 
     @Test
     void level_0_filters_by_product_type_and_transaction_type() throws Exception {
-        String instantsBuy = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null, "instants"));
-        store(row("TT_BUY", "-1", "2026-10-03T10:00:00Z", null, null, "lotto"));
-        store(row("PRIZE", "3", "2026-10-04T10:00:00Z", null, null, "instants"));
+        String instantsBuy = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null).productType("instants"));
+        store(row("TT_BUY", "-1", "2026-10-03T10:00:00Z", null, null).productType("lotto"));
+        store(row("PRIZE", "3", "2026-10-04T10:00:00Z", null, null).productType("instants"));
 
         assertThat(txIds(cc(RANGE + "&productTypes=instants&transactionTypes=TT_BUY").get("data")))
                 .containsExactly(instantsBuy);
@@ -96,7 +93,7 @@ class ProjectionApiTest extends IntegrationTest {
     @Test
     void web_shows_only_transactions_and_claimable_prizes_and_cc_shows_every_source() throws Exception {
         String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
-        String payment = store(withSource(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null), Source.PAYMENT));
+        String payment = store(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null).source(Source.PAYMENT));
 
         assertThat(txIds(web(owner, RANGE).get("data"))).containsExactly(bet);
         assertThat(txIds(cc(RANGE).get("data"))).containsExactly(payment, bet);
@@ -104,7 +101,7 @@ class ProjectionApiTest extends IntegrationTest {
 
     @Test
     void another_owner_with_the_same_number_is_never_shown() throws Exception {
-        store(withOwner(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null), "2-" + number));
+        store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null).owner("2-" + number));
 
         assertThat(cc(RANGE).get("totalRowCount").asLong()).isZero();
         assertThat(web(owner, RANGE).get("totalRowCount").asLong()).isZero();
@@ -150,7 +147,7 @@ class ProjectionApiTest extends IntegrationTest {
     @Test
     void web_level_1_never_lists_a_payment() throws Exception {
         String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
-        store(withSource(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null), Source.PAYMENT));
+        store(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null).source(Source.PAYMENT));
 
         JsonNode page = web(owner, RANGE + "&aggregationLevel=1");
         assertThat(page.get("totalRowCount").asLong()).isEqualTo(1);
@@ -238,30 +235,14 @@ class ProjectionApiTest extends IntegrationTest {
 
     // --- helpers ---
 
-    private String store(IncomingTransaction t) {
-        tx.executeWithoutResult(status -> writer.write(t));
-        return t.sourceId();
+    private String store(TestTransactions.Builder row) {
+        tx.executeWithoutResult(status -> writer.write(row.build()));
+        return row.sourceId();
     }
 
-    private IncomingTransaction row(String type, String amount, String at, String batch, String subBatch) {
-        return row(type, amount, at, batch, subBatch, "instants");
-    }
-
-    private IncomingTransaction row(String type, String amount, String at, String batch, String subBatch, String productType) {
-        return new IncomingTransaction(owner, Instant.parse(at), Source.TRANSACTION, Long.toString(IDS.incrementAndGet()),
-                type, new BigDecimal(amount), "EUR", null, "GAME", productType, batch, subBatch, null, Map.of("channel", "WEB"));
-    }
-
-    private static IncomingTransaction withSource(IncomingTransaction t, Source source) {
-        return new IncomingTransaction(t.ownerId(), t.occurredAt(), source, t.sourceId(), t.type(), t.amount(),
-                t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
-                t.transactionReference(), t.detail());
-    }
-
-    private static IncomingTransaction withOwner(IncomingTransaction t, String ownerId) {
-        return new IncomingTransaction(ownerId, t.occurredAt(), t.source(), t.sourceId(), t.type(), t.amount(),
-                t.currency(), t.balanceAfter(), t.productId(), t.productType(), t.batchId(), t.subBatchId(),
-                t.transactionReference(), t.detail());
+    /** A row of this test's owner; {@code batch} null means in no session. */
+    private TestTransactions.Builder row(String type, String amount, String at, String batch, String subBatch) {
+        return TestTransactions.transaction(owner).type(type).amount(amount).at(at).session(batch, subBatch);
     }
 
     private String ccPath() {
