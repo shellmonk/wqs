@@ -1,6 +1,5 @@
 package wqs.repository;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -8,6 +7,7 @@ import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import wqs.dto.TotalsIncrement;
 import wqs.entity.PlayEntity;
 
 /** {@code "wqPrjPlay"}: totals per play, updated as each of its rows arrives. */
@@ -37,10 +37,10 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
                 "txCount", "totalPlays", "totalWins", "net",
                 "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
             values (
-                :sessionId, :ownerId, :batchId, :subBatchId, :at, :at,
-                :productId, :productType, :currency,
-                1, :plays, :wins, :net,
-                1, :plays, :wins, :net)
+                :#{#sessionId}, :#{#c.ownerId()}, :#{#c.batchId()}, :#{#c.subBatchId()}, :#{#c.occurredAt()}, :#{#c.occurredAt()},
+                :#{#c.productId()}, :#{#c.productType()}, :#{#c.currency()},
+                1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()},
+                1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()})
             on conflict ("ownerId", "batchId", "subBatchId") do update set
                 "startedAt"   = least(p."startedAt", excluded."startedAt"),
                 "endedAt"     = greatest(p."endedAt", excluded."endedAt"),
@@ -57,9 +57,5 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
             where p."currency" = excluded."currency"
             returning "playId" as "playId", (xmax = 0) as "created"
             """)
-    Optional<Added> addRow(@Param("sessionId") long sessionId, @Param("ownerId") String ownerId, @Param("batchId") String batchId,
-                           @Param("subBatchId") String subBatchId, @Param("at") Instant at,
-                           @Param("productId") String productId, @Param("productType") String productType,
-                           @Param("currency") String currency, @Param("plays") BigDecimal plays,
-                           @Param("wins") BigDecimal wins, @Param("net") BigDecimal net);
+    Optional<Added> addRow(@Param("sessionId") long sessionId, @Param("c") TotalsIncrement c);
 }

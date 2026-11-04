@@ -1,6 +1,5 @@
 package wqs.repository;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -8,6 +7,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import wqs.dto.TotalsIncrement;
 import wqs.entity.SessionEntity;
 
 /** {@code "wqPrjSession"}: totals per session, updated as each of its rows arrives. */
@@ -36,61 +36,53 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
         }
     }
 
+    /**
+     * What a level-1/2 page lists: the owner's entries in [from, to) that the policy's sources show.
+     * An empty {@code productTypes} or {@code transactionTypes} means any.
+     */
+    record EntryFilter(String ownerId, Instant from, Instant to, Integer[] sources, boolean excludeCancelled,
+                       String[] productTypes, String[] transactionTypes) {}
+
     String ENTRIES = """
             select 0 as "kind", s."sessionId" as "id", s."startedAt" as "at"
             from "wqPrjSession" s
-            where s."ownerId" = :ownerId
-              and s."startedAt" >= :from and s."startedAt" < :to
-              and (not :excludeCancelled or s."txCountExclCancelled" > 0)
-              and (:anyProductType or s."productType" = any(cast(:productTypes as text[])))
-              and (:anyType or s."batchId" in (
+            where s."ownerId" = :#{#f.ownerId()}
+              and s."startedAt" >= :#{#f.from()} and s."startedAt" < :#{#f.to()}
+              and (not :#{#f.excludeCancelled()} or s."txCountExclCancelled" > 0)
+              and (cardinality(cast(:#{#f.productTypes()} as text[])) = 0 or s."productType" = any(cast(:#{#f.productTypes()} as text[])))
+              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or s."batchId" in (
                     -- One pass over the owner's matching rows (a session's rows are never before its
                     -- start, so from bounds them), instead of one probe per session.
                     select m."batchId" from "wqPrjTransaction" m
-                    where m."ownerId" = :ownerId and m."batchId" is not null
-                      and m."occurredAt" >= :from
-                      and m."source" = any(cast(:sources as int[])) and not m."zeroAmount"
-                      and (not :excludeCancelled or not m."cancelled")
-                      and m."type" = any(cast(:transactionTypes as text[]))))
+                    where m."ownerId" = :#{#f.ownerId()} and m."batchId" is not null
+                      and m."occurredAt" >= :#{#f.from()}
+                      and m."source" = any(cast(:#{#f.sources()} as int[])) and not m."zeroAmount"
+                      and (not :#{#f.excludeCancelled()} or not m."cancelled")
+                      and m."type" = any(cast(:#{#f.transactionTypes()} as text[]))))
             union all
             select 1, t."transactionId", t."occurredAt"
             from "wqPrjTransaction" t
-            where t."ownerId" = :ownerId and t."batchId" is null
-              and t."occurredAt" >= :from and t."occurredAt" < :to
-              and t."source" = any(cast(:sources as int[])) and not t."zeroAmount"
-              and (not :excludeCancelled or not t."cancelled")
-              and (:anyProductType or t."productType" = any(cast(:productTypes as text[])))
-              and (:anyType or t."type" = any(cast(:transactionTypes as text[])))
+            where t."ownerId" = :#{#f.ownerId()} and t."batchId" is null
+              and t."occurredAt" >= :#{#f.from()} and t."occurredAt" < :#{#f.to()}
+              and t."source" = any(cast(:#{#f.sources()} as int[])) and not t."zeroAmount"
+              and (not :#{#f.excludeCancelled()} or not t."cancelled")
+              and (cardinality(cast(:#{#f.productTypes()} as text[])) = 0 or t."productType" = any(cast(:#{#f.productTypes()} as text[])))
+              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or t."type" = any(cast(:#{#f.transactionTypes()} as text[])))
             """;
 
     /**
      * One page of level-1/2 entries: the owner's sessions (by start) merged with their transactions
      * that have no session, newest first; at the same instant a transaction comes before a session.
      * A session's totals are stored, so a filter only decides whether it is listed: it must have a
-     * visible row of a requested type. Empty filter arrays mean "any" (the flags say so).
+     * visible row of a requested type.
      */
     @Query(nativeQuery = true, value = "select e.\"kind\", e.\"id\", e.\"at\" from (" + ENTRIES + ") e "
             + "order by e.\"at\" desc, e.\"kind\" desc, e.\"id\" desc limit :limit offset :offset")
-    List<PageEntry> findPageEntries(@Param("ownerId") String ownerId,
-                                    @Param("from") Instant from, @Param("to") Instant to,
-                                    @Param("sources") Integer[] sources,
-                                    @Param("excludeCancelled") boolean excludeCancelled,
-                                    @Param("anyProductType") boolean anyProductType,
-                                    @Param("productTypes") String[] productTypes,
-                                    @Param("anyType") boolean anyType,
-                                    @Param("transactionTypes") String[] transactionTypes,
-                                    @Param("limit") int limit, @Param("offset") long offset);
+    List<PageEntry> findPageEntries(@Param("f") EntryFilter filter, @Param("limit") int limit, @Param("offset") long offset);
 
     /** The number of entries {@link #findPageEntries} pages through: a plain COUNT(*). */
     @Query(nativeQuery = true, value = "select count(*) from (" + ENTRIES + ") e")
-    long countPageEntries(@Param("ownerId") String ownerId,
-                          @Param("from") Instant from, @Param("to") Instant to,
-                          @Param("sources") Integer[] sources,
-                          @Param("excludeCancelled") boolean excludeCancelled,
-                          @Param("anyProductType") boolean anyProductType,
-                          @Param("productTypes") String[] productTypes,
-                          @Param("anyType") boolean anyType,
-                          @Param("transactionTypes") String[] transactionTypes);
+    long countPageEntries(@Param("f") EntryFilter filter);
 
     /**
      * Adds one row to its session, creating the session on its first row, and returns the
@@ -107,9 +99,9 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
                 "txCount", "totalPlays", "totalWins", "net",
                 "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
             values (
-                :ownerId, :batchId, :at, :at, :productId, :productType, :currency,
-                1, :plays, :wins, :net,
-                1, :plays, :wins, :net)
+                :#{#c.ownerId()}, :#{#c.batchId()}, :#{#c.occurredAt()}, :#{#c.occurredAt()}, :#{#c.productId()}, :#{#c.productType()}, :#{#c.currency()},
+                1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()},
+                1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()})
             on conflict ("ownerId", "batchId") do update set
                 "startedAt"   = least(s."startedAt", excluded."startedAt"),
                 "endedAt"     = greatest(s."endedAt", excluded."endedAt"),
@@ -126,11 +118,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
             where s."currency" = excluded."currency"
             returning "sessionId"
             """)
-    Optional<Long> addRow(@Param("ownerId") String ownerId,
-                          @Param("batchId") String batchId, @Param("at") Instant at,
-                          @Param("productId") String productId, @Param("productType") String productType,
-                          @Param("currency") String currency, @Param("plays") BigDecimal plays,
-                          @Param("wins") BigDecimal wins, @Param("net") BigDecimal net);
+    Optional<Long> addRow(@Param("c") TotalsIncrement c);
 
     /** Counts a play that has just been created in this session. */
     @Modifying

@@ -1,6 +1,5 @@
 package wqs.repository;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -9,6 +8,7 @@ import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import wqs.dto.IncomingTransaction;
 import wqs.entity.TransactionEntity;
 import wqs.entity.TransactionKey;
 
@@ -31,20 +31,12 @@ public interface TransactionRepository
                 "amount", "currency", "balanceAfter", "productId", "productType", "batchId", "subBatchId",
                 "transactionReference", "detail")
             values (
-                :ownerId, :occurredAt, nextval('"wqTransactionIdSeq"'), :source, :sourceId, :type,
-                :amount, :currency, :balanceAfter, :productId, :productType, :batchId, :subBatchId,
-                :transactionReference, cast(:detail as jsonb))
+                :#{#t.ownerId()}, :#{#t.occurredAt()}, nextval('"wqTransactionIdSeq"'), :#{#t.source().code()}, :#{#t.sourceId()}, :#{#t.type()},
+                :#{#t.amount()}, :#{#t.currency()}, :#{#t.balanceAfter()}, :#{#t.productId()}, :#{#t.productType()}, :#{#t.batchId()}, :#{#t.subBatchId()},
+                :#{#t.transactionReference()}, cast(:#{#detail} as jsonb))
             on conflict ("source", "sourceId", "occurredAt") do nothing
             """)
-    int insertIfAbsent(@Param("ownerId") String ownerId,
-                       @Param("occurredAt") Instant occurredAt, @Param("source") short source,
-                       @Param("sourceId") String sourceId, @Param("type") String type,
-                       @Param("amount") BigDecimal amount, @Param("currency") String currency,
-                       @Param("balanceAfter") BigDecimal balanceAfter, @Param("productId") String productId,
-                       @Param("productType") String productType, @Param("batchId") String batchId,
-                       @Param("subBatchId") String subBatchId,
-                       @Param("transactionReference") String transactionReference,
-                       @Param("detail") String detailJson);
+    int insertIfAbsent(@Param("t") IncomingTransaction t, @Param("detail") String detailJson);
 
     /**
      * The visible rows of the given sessions. {@code from}/{@code to} span the sessions' start and

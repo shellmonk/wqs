@@ -239,15 +239,13 @@ class ReadBenchmark {
     private static String entries(Owner owner, List<String> types) {
         String typeArray = "'{" + String.join(",", types) + "}'";
         return SessionRepository.ENTRIES
-                .replace(":ownerId", "'" + owner.ownerId() + "'")
-                .replace(":from", "'" + START + "'")
-                .replace(":to", "'" + END + "'")
-                .replace(":sources", "'{1,2,3,4,5}'")
-                .replace(":excludeCancelled", "false")
-                .replace(":anyProductType", "true")
-                .replace(":productTypes", "'{}'")
-                .replace(":anyType", Boolean.toString(types.isEmpty()))
-                .replace(":transactionTypes", typeArray);
+                .replace(":#{#f.ownerId()}", "'" + owner.ownerId() + "'")
+                .replace(":#{#f.from()}", "'" + START + "'")
+                .replace(":#{#f.to()}", "'" + END + "'")
+                .replace(":#{#f.sources()}", "'{1,2,3,4,5}'")
+                .replace(":#{#f.excludeCancelled()}", "false")
+                .replace(":#{#f.productTypes()}", "'{}'")
+                .replace(":#{#f.transactionTypes()}", typeArray);
     }
 
     /** Where the time of one level-1 page (24 months, page 1 of 50) goes, step by step, warm. */
@@ -257,16 +255,17 @@ class ReadBenchmark {
         tx.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         String[] none = new String[0];
         Integer[] sources = ReadPolicy.CC.sourceCodeArray();
+        SessionRepository.EntryFilter filter = new SessionRepository.EntryFilter(owner.ownerId(), START, END, sources, false, none, none);
         report.append("\n## Level-1 page broken down (").append(owner.rows()).append("-row owner, 24 months, page 1 of 50), warm ms\n\n")
                 .append("| step | ms |\n|---|---:|\n");
         for (int warmup = 0; warmup < 3; warmup++) {
-            tx.executeWithoutResult(status -> sessions.countPageEntries(owner.ownerId(), START, END, sources, false, true, none, true, none));
+            tx.executeWithoutResult(status -> sessions.countPageEntries(filter));
         }
         tx.executeWithoutResult(status -> {
             long t0 = System.nanoTime();
-            sessions.countPageEntries(owner.ownerId(), START, END, sources, false, true, none, true, none);
+            sessions.countPageEntries(filter);
             long t1 = System.nanoTime();
-            var entries = sessions.findPageEntries(owner.ownerId(), START, END, sources, false, true, none, true, none, 50, 0);
+            var entries = sessions.findPageEntries(filter, 50, 0);
             long t2 = System.nanoTime();
             List<Long> ids = entries.stream().filter(e -> e.getKind() == 0).map(SessionRepository.PageEntry::getId).toList();
             List<SessionEntity> found = sessions.findAllById(ids);

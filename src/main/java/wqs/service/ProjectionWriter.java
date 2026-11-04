@@ -47,9 +47,7 @@ public class ProjectionWriter {
             throw new RejectedException("sub-batch-without-batch", "a sub-batch id needs a batch id");
         }
         partitions.ensure(TransactionRepository.TABLE, t.occurredAt());
-        int inserted = transactions.insertIfAbsent(t.ownerId(), t.occurredAt(), t.source().code(),
-                t.sourceId(), t.type(), t.amount(), t.currency(), t.balanceAfter(), t.productId(), t.productType(),
-                t.batchId(), t.subBatchId(), t.transactionReference(), json(t));
+        int inserted = transactions.insertIfAbsent(t, json(t));
         if (inserted == 0) {
             return IngestResult.ALREADY_STORED; // already projected, totals included
         }
@@ -60,15 +58,11 @@ public class ProjectionWriter {
     }
 
     private void addToSessionAndPlay(TotalsIncrement c) {
-        long sessionId = sessions.addRow(c.ownerId(), c.batchId(), c.occurredAt(), c.productId(),
-                        c.productType(), c.currency(), c.plays(), c.wins(), c.net())
-                .orElseThrow(() -> currencyMismatch("session"));
+        long sessionId = sessions.addRow(c).orElseThrow(() -> currencyMismatch("session"));
         if (c.subBatchId() == null) {
             return;
         }
-        PlayRepository.Added play = plays.addRow(sessionId, c.ownerId(), c.batchId(), c.subBatchId(),
-                        c.occurredAt(), c.productId(), c.productType(), c.currency(), c.plays(), c.wins(), c.net())
-                .orElseThrow(() -> currencyMismatch("play"));
+        PlayRepository.Added play = plays.addRow(sessionId, c).orElseThrow(() -> currencyMismatch("play"));
         if (play.getCreated()) {
             sessions.addPlay(sessionId);
         }

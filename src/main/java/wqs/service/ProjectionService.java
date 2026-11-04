@@ -30,6 +30,7 @@ import wqs.entity.TransactionEntity;
 import wqs.mapper.ProjectionMapper;
 import wqs.repository.PlayRepository;
 import wqs.repository.SessionRepository;
+import wqs.repository.SessionRepository.EntryFilter;
 import wqs.repository.SessionRepository.PageEntry;
 import wqs.repository.TransactionRepository;
 
@@ -91,14 +92,11 @@ public class ProjectionService {
     // --- levels 1 and 2 ---
 
     private ProjectionResponse<HighLevelEntry> sessionPage(ReadPolicy policy, String ownerId, ProjectionRequest request) {
-        String[] productTypes = request.productTypes().toArray(NONE);
-        String[] types = request.transactionTypes().toArray(NONE);
-        long total = sessions.countPageEntries(ownerId, request.from(), request.to(), policy.sourceCodeArray(),
-                request.excludeCancelled(), productTypes.length == 0, productTypes, types.length == 0, types);
+        EntryFilter filter = new EntryFilter(ownerId, request.from(), request.to(), policy.sourceCodeArray(),
+                request.excludeCancelled(), request.productTypes().toArray(NONE), request.transactionTypes().toArray(NONE));
+        long total = sessions.countPageEntries(filter);
         List<PageEntry> pageEntries = total <= request.offset() ? List.of()
-                : sessions.findPageEntries(ownerId, request.from(), request.to(), policy.sourceCodeArray(),
-                        request.excludeCancelled(), productTypes.length == 0, productTypes, types.length == 0, types,
-                        request.pageSize(), request.offset());
+                : sessions.findPageEntries(filter, request.pageSize(), request.offset());
 
         List<PageEntry> sessionEntries = pageEntries.stream().filter(PageEntry::isSession).toList();
         List<PageEntry> transactionEntries = pageEntries.stream().filter(e -> !e.isSession()).toList();
