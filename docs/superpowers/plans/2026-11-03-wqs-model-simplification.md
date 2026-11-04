@@ -90,4 +90,22 @@ Removed: `wqWebItem`, `wqCcItem`, `wqWebHighLevel`, `wqCcHighLevel`, `wqGroupLoc
 
 ## Execution notes
 
-(Rulings recorded during execution go here.)
+Executed 2026-11-03/04 with subagent-driven development on main; Tasks 4+5 merged and per-task reviews of 2–5 folded into the final review at the user's request for speed.
+
+As built, beyond the plan: the session reading index was dropped (nothing reads sessions by time); a batched row from a /cc-only source is rejected by name (`sessioned-source-not-on-every-view`); range decomposition is bounded by active days (one DAY run expanded per active day); the `counterRows` metric now counts active days.
+
+### Rulings and decisions
+
+- R1 Ruling: projection tables = item, item locator, pending cancel, session, play, timeline, count (+ views); wqIngestCursor and wqDeadLetter keep non-Prj names (ingestion state) — cost if wrong: two renames
+- R2 Ruling: the type sentinel becomes empty string (same as productType); Level0Filter/HighLevelFilter reject blank type codes — cost if wrong: none
+- USER DECISION: 'transaction' replaces 'item' everywhere (tables wqPrjTransaction/views wqPrjWebTransaction,wqPrjCcTransaction, wqPrjTransactionLocator, column transactionId, ProjectionTransaction, PageUnit.TRANSACTION); SourceKind.TRANSACTION, DB-transaction terms and API TxView/txs unchanged — sent to T1 mid-task
+- Task 1: Ruling: limit type BUY sharing the BUY code (PLAY) is harmless — direction only feeds session rollups and limits are never sessioned — cost if wrong: a sessioned limit would count as a play
+- USER asked to speed up. Ruling: T4+T5 merged into one dispatch; T3 starts as soon as T2 lands; per-task reviews for T2–T5 folded into the final whole-branch review (opus, task-gate depth); controller keeps docs/diagrams in parallel — cost if wrong: defects surface at the final review, bigger final fix round
+- Task 2: Ruling: mixed-source sessions cannot occur — only TRANSACTION and CLAIMABLE_PRIZE carry batchId (phase-6 D3), and both feed /web and /cc — so webVisibleExclCancelled is redundant; T3 removes it (and the cancel step's view-based liveness can use the base table) — cost if wrong: a future sessioned cc-only source would need the flag back
+- Task 3: Ruling: the session (userId, startedAt) reading index is dropped — no query reads sessions by time (paging uses the timeline) — YAGNI; done in T4+5 — cost if wrong: add it back when a query needs it
+
+### Deferred minors
+
+- Task 1: minor (deferred): "totalItems" wording left in ProjectionPage/ProjectionReader/ReadMetrics; no direct test of cursor greatest/MANDATORY; no guard against a stream named "wallet-delta" sharing the cursor row
+- Final: deferred-minor triage: totalItems wording dropped (wire/metric name); cursor greatest test deferred; wallet-delta row sharing dropped (harmless)
+

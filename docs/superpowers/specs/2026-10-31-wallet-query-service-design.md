@@ -340,7 +340,8 @@ Rules that follow from it:
 - **Only TRANSACTION and CLAIMABLE_PRIZE carry a batch**, and both feed both views, so a session
   is never mixed-visibility; the writer rejects a batched row from a `/cc`-only source.
 - **Totals** sum `"wqPrjCount"` over the whole UTC days in `[from, to)` plus a live COUNT for the
-  two partial boundary days. **The offset walk** walks days; the key query's lower bound is the
+  two partial boundary days; the request builds segments only for the user's active days (memory
+  follows activity, not range width). The `counterRows` metric counts active days. **The offset walk** walks days; the key query's lower bound is the
   start of the day where the page ends (or `from`), so only partitions holding the page are
   opened.
 - **`/web` isolation** is structural: `/web` code reads only the `"wqPrjWebTransaction"` view and
