@@ -79,7 +79,7 @@ public class PartitionService {
         }
         // DDL cannot take bind parameters. Every piece here is generated, never input: the table
         // name is a constant from the caller and the bounds are formatted from a YearMonth.
-        String sql = "create table if not exists \"%s\" partition of \"%s\" for values from ('%s') to ('%s')"
+        String sql = "create table if not exists %s partition of %s for values from ('%s') to ('%s')"
                 .formatted(partition, table, month.atDay(1) + "T00:00:00Z", month.plusMonths(1).atDay(1) + "T00:00:00Z");
         try {
             partitionDdlService.execute(sql);

@@ -4,8 +4,8 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * A transaction arriving from a feed, before it is stored in {@code "wqPrjTransactions"}; every feed
- * maps to it. {@code "userType"} and {@code "userId"} are not here: the table derives them from
+ * A transaction arriving from a feed, before it is stored in {@code wqPrjTransactions}; every feed
+ * maps to it. {@code userType} and {@code userId} are not here: the table derives them from
  * {@code ownerId}.
  */
 public record IncomingTransaction(
@@ -42,7 +42,7 @@ public record IncomingTransaction(
 
     /**
      * A zero-amount stream transaction: stored, never shown, and adds nothing to session or play
-     * totals. Mirrors the generated column {@code "zeroAmount"}.
+     * totals. Mirrors the generated column {@code zeroAmount}.
      */
     public boolean zeroAmount() {
         return source == Source.TRANSACTION && amount.signum() == 0;

@@ -25,7 +25,7 @@ import wqs.util.Backoff;
  *
  * <p>Every replica may enable this. Only the one holding the {@link StreamLeadership} lock
  * consumes; the others wait on standby and take over when it goes away. One "term" is the time a
- * replica holds the lock: it subscribes after the offset stored in {@code "wqIngestCursors"},
+ * replica holds the lock: it subscribes after the offset stored in {@code wqIngestCursors},
  * a {@link StreamBatcher} groups the messages, and a {@link BatchCommitter} commits each batch with
  * its last offset in one transaction. A crash or a lost lock replays from the last committed
  * offset and never skips a message; writes are idempotent, so a replay cannot double-count.

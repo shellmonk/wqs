@@ -54,9 +54,9 @@ class BootstrapTest extends IntegrationTest {
 
     @Test
     void writerPoolCanWrite() {
-        jdbcClient.sql("create table if not exists \"bootstrapProbe\" (\"id\" int)").update();
-        jdbcClient.sql("insert into \"bootstrapProbe\" values (:id)").param("id", 1).update();
-        jdbcClient.sql("drop table \"bootstrapProbe\"").update();
+        jdbcClient.sql("create table if not exists bootstrapProbe (id int)").update();
+        jdbcClient.sql("insert into bootstrapProbe values (:id)").param("id", 1).update();
+        jdbcClient.sql("drop table bootstrapProbe").update();
     }
 
     @Test
@@ -80,7 +80,7 @@ class BootstrapTest extends IntegrationTest {
     void theReaderPoolRefusesWrites() {
         TransactionTemplate tx = readOnlyRepeatableRead();
         assertThatThrownBy(() -> tx.executeWithoutResult(status ->
-                jdbcClient.sql("create table \"readerProbe\" (\"id\" int)").update()))
+                jdbcClient.sql("create table readerProbe (id int)").update()))
                 .isInstanceOf(DataAccessException.class)
                 .hasMessageContaining("read-only");
     }

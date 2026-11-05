@@ -111,7 +111,7 @@ class ProjectionApiTest extends IntegrationTest {
     void cancelledRowsAreLeftOutOnRequest() throws Exception {
         String kept = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         String cancelled = store(row("TT_BUY", "-1", "2026-10-03T10:00:00Z", null, null));
-        jdbcClient.sql("update \"wqPrjTransactions\" set \"cancelled\" = true where \"sourceId\" = :id").param("id", cancelled).update();
+        jdbcClient.sql("update wqPrjTransactions set cancelled = true where sourceId = :id").param("id", cancelled).update();
 
         assertThat(txIds(cc(RANGE).get("data"))).containsExactly(cancelled, kept);
         assertThat(txIds(cc(RANGE + "&excludeCancelledTransactions=true").get("data"))).containsExactly(kept);

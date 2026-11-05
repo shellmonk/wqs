@@ -103,13 +103,13 @@ abstract class StreamTestBase extends IntegrationTest {
     }
 
     long rows(String sourceId) {
-        return jdbcClient.sql("select count(*) from \"wqPrjTransactions\" where \"sourceId\" = :id")
+        return jdbcClient.sql("select count(*) from wqPrjTransactions where sourceId = :id")
                 .param("id", sourceId).query(Long.class).single();
     }
 
     /** Dead letters of an unreadable message, found by its body's hash. */
     long deadLettersFor(byte[] body) {
-        return jdbcClient.sql("select count(*) from \"wqDeadLetters\" where \"bodySha256\" = :sha")
+        return jdbcClient.sql("select count(*) from wqDeadLetters where bodySha256 = :sha")
                 .param("sha", Hashes.sha256(body)).query(Long.class).single();
     }
 }

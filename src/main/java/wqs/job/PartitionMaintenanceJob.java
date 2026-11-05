@@ -9,7 +9,7 @@ import wqs.repository.TransactionRepository;
 import wqs.service.PartitionService;
 
 /**
- * Keeps the current and the next few monthly partitions of {@code "wqPrjTransactions"} created, so
+ * Keeps the current and the next few monthly partitions of {@code wqPrjTransactions} created, so
  * ingest rarely runs partition DDL itself. Quartz is clustered: one replica runs it at a time.
  */
 @DisallowConcurrentExecution

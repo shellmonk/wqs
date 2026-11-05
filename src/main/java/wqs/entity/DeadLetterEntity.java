@@ -14,7 +14,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 /**
- * A row of {@code "wqDeadLetters"}: input that could not be projected. Never holds a raw message:
+ * A row of {@code wqDeadLetters}: input that could not be projected. Never holds a raw message:
  * an unreadable one is identified by offset and {@code bodySha256}, a rejected one keeps only its
  * decoded, allowlisted fields in {@code payload}.
  */

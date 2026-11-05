@@ -36,7 +36,7 @@ public class PartitionDdlService {
     /** Runs in the caller's transaction. */
     public boolean exists(String partition) {
         return jdbcClient.sql("select to_regclass(:name) is not null")
-                .param("name", "\"" + partition + "\"")
+                .param("name", partition)
                 .query(Boolean.class).single();
     }
 }

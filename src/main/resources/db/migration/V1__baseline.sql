@@ -5,66 +5,66 @@
 -- Transactions
 -- ---------------------------------------------------------------------------------------------
 
--- Every projected row, from every source, stored once. Partitioned by month on "created";
--- partitions are created on demand (wqs.service.PartitionService). The owner is "ownerId", the
+-- Every projected row, from every source, stored once. Partitioned by month on created;
+-- partitions are created on demand (wqs.service.PartitionService). The owner is ownerId, the
 -- wallet's "{type}-{id}" (e.g. '1-1717') in one canonical spelling; '1-1717' and '2-1717' are
 -- simply different owners.
--- "source": 1 TRANSACTION (stream), 2 MANUAL_ADJUSTMENT, 3 CLAIMABLE_PRIZE, 4 PAYMENT, 5 LIMIT.
--- "transactionId" is the row's synthetic id, from "wqTransactionIdSeq". Postgres requires every key
+-- source: 1 TRANSACTION (stream), 2 MANUAL_ADJUSTMENT, 3 CLAIMABLE_PRIZE, 4 PAYMENT, 5 LIMIT.
+-- transactionId is the row's synthetic id, from wqTransactionIdSeq. Postgres requires every key
 -- of a partitioned table to include the partition column, so it cannot be the primary key alone;
 -- the sequence keeps it unique. The primary key doubles as the index pages read by.
 -- The unique key catches a redelivered row.
-create table "wqPrjTransactions" (
-    "ownerId"               text          not null,
-    "created"               timestamptz   not null,
-    "transactionId"         bigint        not null,
-    "source"                smallint      not null,
-    "sourceId"              text          not null,
-    -- The two halves of "ownerId" ("{type}-{id}"), derived so they can never disagree with it.
-    "userType"              integer       not null generated always as (split_part("ownerId", '-', 1)::integer) stored,
-    "userId"                varchar(64)   not null generated always as (split_part("ownerId", '-', 2)) stored,
-    "accountType"           varchar(32)   not null,
-    "accountNumber"         varchar(32)   not null,
-    "accountId"             varchar(64)   not null,
-    "batchId"               text,
-    "subBatchId"            text,
-    "transactionType"       text          not null,
-    "transactionSubtype"    varchar(32),
-    "productId"             text,
-    "productType"           text,
-    "currency"              char(3)       not null,
-    "amount"                numeric(15,3) not null,
-    "totalPostBalance"      numeric(15,3),
-    "reservedAmount"        numeric(15,3),
-    "nonWithdrawableAmount" numeric(15,3),
-    "monetary"              boolean       not null default true,
-    "description"           varchar(128),
-    "fromDescription"       varchar(128),
-    "toDescription"         varchar(128),
-    "paymentId"             bigint,
-    "claimId"               bigint,
-    "extTrxId"              varchar(128),
-    "extSystemId"           varchar(32),
-    "transactionReference"  text,
-    "channel"               varchar(32),
-    "issued"                timestamptz   not null,
-    "batchEnded"            boolean,
-    "cancelled"             boolean       not null default false,
-    "ingestedAt"            timestamptz   not null default now(),
+create table wqPrjTransactions (
+    ownerId               text          not null,
+    created               timestamptz   not null,
+    transactionId         bigint        not null,
+    source                smallint      not null,
+    sourceId              text          not null,
+    -- The two halves of ownerId ("{type}-{id}"), derived so they can never disagree with it.
+    userType              integer       not null generated always as (split_part(ownerId, '-', 1)::integer) stored,
+    userId                varchar(64)   not null generated always as (split_part(ownerId, '-', 2)) stored,
+    accountType           varchar(32)   not null,
+    accountNumber         varchar(32)   not null,
+    accountId             varchar(64)   not null,
+    batchId               text,
+    subBatchId            text,
+    transactionType       text          not null,
+    transactionSubtype    varchar(32),
+    productId             text,
+    productType           text,
+    currency              char(3)       not null,
+    amount                numeric(15,3) not null,
+    totalPostBalance      numeric(15,3),
+    reservedAmount        numeric(15,3),
+    nonWithdrawableAmount numeric(15,3),
+    monetary              boolean       not null default true,
+    description           varchar(128),
+    fromDescription       varchar(128),
+    toDescription         varchar(128),
+    paymentId             bigint,
+    claimId               bigint,
+    extTrxId              varchar(128),
+    extSystemId           varchar(32),
+    transactionReference  text,
+    channel               varchar(32),
+    issued                timestamptz   not null,
+    batchEnded            boolean,
+    cancelled             boolean       not null default false,
+    ingestedAt            timestamptz   not null default now(),
     -- A zero-amount stream transaction: stored, never shown, not counted in session or play totals.
-    "zeroAmount"            boolean       not null generated always as ("amount" = 0 and "source" = 1) stored,
-    primary key ("ownerId", "created", "transactionId"),
-    constraint "wqPrjTransactions_sourceKey" unique ("source", "sourceId", "created")
-) partition by range ("created");
+    zeroAmount            boolean       not null generated always as (amount = 0 and source = 1) stored,
+    primary key (ownerId, created, transactionId),
+    constraint wqPrjTransactions_sourceKey unique (source, sourceId, created)
+) partition by range (created);
 
-create sequence "wqTransactionIdSeq" as bigint;
+create sequence wqTransactionIdSeq as bigint;
 
 -- Levels 1-2 page through sessions merged with the rows that have no session; this index serves
 -- the second half. A session's own rows are found by batch, bounded by the session's time span.
-create index "wqPrjTransactions_unsessioned" on "wqPrjTransactions" ("ownerId", "created" desc, "transactionId" desc)
-    where "batchId" is null;
-create index "wqPrjTransactions_session" on "wqPrjTransactions" ("ownerId", "batchId", "created")
-    where "batchId" is not null;
+create index wqPrjTransactions_unsessioned on wqPrjTransactions (ownerId, created desc, transactionId desc)
+    where batchId is null;
+create index wqPrjTransactions_session on wqPrjTransactions (ownerId, batchId, created)
+    where batchId is not null;
 
 -- ---------------------------------------------------------------------------------------------
 -- Sessions and plays
@@ -72,86 +72,86 @@ create index "wqPrjTransactions_session" on "wqPrjTransactions" ("ownerId", "bat
 
 -- Totals per session (a batch id) and per play (a sub-batch id), updated in the same transaction
 -- as each row that joins them, so pages read finished numbers. Not partitioned: found by key.
--- "totalPlays" and "totalWins" are absolute amounts; "net" = "totalWins" - "totalPlays".
+-- totalPlays and totalWins are absolute amounts; net = totalWins - totalPlays.
 -- Each total is kept twice: over all rows, and over rows not cancelled ("...ExclCancelled").
 -- Zero-amount stream rows add nothing. A session has one currency: a row in another currency is
--- dead-lettered. "productId"/"productType" are those of the earliest row.
-create table "wqPrjSessions" (
-    "sessionId"                bigint        generated always as identity primary key,
-    "ownerId"                  text          not null,
-    "batchId"                  text          not null,
-    "startedAt"                timestamptz   not null,
-    "endedAt"                  timestamptz   not null,
-    "productId"                text,
-    "productType"              text,
-    "currency"                 char(3)       not null,
-    "txCount"                  int           not null default 0,
-    "playCount"                int           not null default 0,
-    "totalPlays"               numeric(15,3) not null default 0,
-    "totalWins"                numeric(15,3) not null default 0,
-    "net"                      numeric(15,3) not null default 0,
-    "txCountExclCancelled"     int           not null default 0,
-    "playCountExclCancelled"   int           not null default 0,
-    "totalPlaysExclCancelled"  numeric(15,3) not null default 0,
-    "totalWinsExclCancelled"   numeric(15,3) not null default 0,
-    "netExclCancelled"         numeric(15,3) not null default 0,
-    constraint "wqPrjSessions_batchKey" unique ("ownerId", "batchId")
+-- dead-lettered. productId/productType are those of the earliest row.
+create table wqPrjSessions (
+    sessionId                bigint        generated always as identity primary key,
+    ownerId                  text          not null,
+    batchId                  text          not null,
+    startedAt                timestamptz   not null,
+    endedAt                  timestamptz   not null,
+    productId                text,
+    productType              text,
+    currency                 char(3)       not null,
+    txCount                  int           not null default 0,
+    playCount                int           not null default 0,
+    totalPlays               numeric(15,3) not null default 0,
+    totalWins                numeric(15,3) not null default 0,
+    net                      numeric(15,3) not null default 0,
+    txCountExclCancelled     int           not null default 0,
+    playCountExclCancelled   int           not null default 0,
+    totalPlaysExclCancelled  numeric(15,3) not null default 0,
+    totalWinsExclCancelled   numeric(15,3) not null default 0,
+    netExclCancelled         numeric(15,3) not null default 0,
+    constraint wqPrjSessions_batchKey unique (ownerId, batchId)
 );
 
-create index "wqPrjSessions_byStart" on "wqPrjSessions" ("ownerId", "startedAt" desc, "sessionId" desc);
+create index wqPrjSessions_byStart on wqPrjSessions (ownerId, startedAt desc, sessionId desc);
 
-create table "wqPrjPlays" (
-    "playId"                   bigint        generated always as identity primary key,
-    "sessionId"                bigint        not null references "wqPrjSessions" ("sessionId"),
-    "ownerId"                  text          not null,
-    "batchId"                  text          not null,
-    "subBatchId"               text          not null,
-    "startedAt"                timestamptz   not null,
-    "endedAt"                  timestamptz   not null,
-    "productId"                text,
-    "productType"              text,
-    "currency"                 char(3)       not null,
-    "txCount"                  int           not null default 0,
-    "totalPlays"               numeric(15,3) not null default 0,
-    "totalWins"                numeric(15,3) not null default 0,
-    "net"                      numeric(15,3) not null default 0,
-    "txCountExclCancelled"     int           not null default 0,
-    "totalPlaysExclCancelled"  numeric(15,3) not null default 0,
-    "totalWinsExclCancelled"   numeric(15,3) not null default 0,
-    "netExclCancelled"         numeric(15,3) not null default 0,
-    constraint "wqPrjPlays_subBatchKey" unique ("ownerId", "batchId", "subBatchId")
+create table wqPrjPlays (
+    playId                   bigint        generated always as identity primary key,
+    sessionId                bigint        not null references wqPrjSessions (sessionId),
+    ownerId                  text          not null,
+    batchId                  text          not null,
+    subBatchId               text          not null,
+    startedAt                timestamptz   not null,
+    endedAt                  timestamptz   not null,
+    productId                text,
+    productType              text,
+    currency                 char(3)       not null,
+    txCount                  int           not null default 0,
+    totalPlays               numeric(15,3) not null default 0,
+    totalWins                numeric(15,3) not null default 0,
+    net                      numeric(15,3) not null default 0,
+    txCountExclCancelled     int           not null default 0,
+    totalPlaysExclCancelled  numeric(15,3) not null default 0,
+    totalWinsExclCancelled   numeric(15,3) not null default 0,
+    netExclCancelled         numeric(15,3) not null default 0,
+    constraint wqPrjPlays_subBatchKey unique (ownerId, batchId, subBatchId)
 );
 
-create index "wqPrjPlays_session" on "wqPrjPlays" ("sessionId");
+create index wqPrjPlays_session on wqPrjPlays (sessionId);
 
 -- ---------------------------------------------------------------------------------------------
 -- Ingest state
 -- ---------------------------------------------------------------------------------------------
 
--- One row per feed: the stream's last processed offset ("feed" = the stream name). Kept here,
+-- One row per feed: the stream's last processed offset (feed = the stream name). Kept here,
 -- not in the broker, so a row and the offset that produced it commit or roll back together.
-create table "wqIngestCursors" (
-    "cursorId"     bigint      generated always as identity primary key,
-    "feed"         text        not null,
-    "streamOffset" bigint,
-    "updatedAt"    timestamptz not null default now(),
-    constraint "wqIngestCursors_feedKey" unique ("feed")
+create table wqIngestCursors (
+    cursorId     bigint      generated always as identity primary key,
+    feed         text        not null,
+    streamOffset bigint,
+    updatedAt    timestamptz not null default now(),
+    constraint wqIngestCursors_feedKey unique (feed)
 );
 
 -- Input that could not be projected. Never the raw message: wallet messages can carry card data
--- (e.g. "toDescription"). A message that could not be read is identified by its offset and the
+-- (e.g. toDescription). A message that could not be read is identified by its offset and the
 -- SHA-256 of its body (the message itself stays in the stream); a readable but rejected one keeps
--- only its decoded, allowlisted fields in "payload".
-create table "wqDeadLetters" (
-    "deadLetterId" bigint      generated always as identity primary key,
-    "feed"         text        not null,
-    "streamOffset" bigint,
-    "sourceId"     text,
-    "reason"       text        not null,
-    "error"        text        not null,
-    "bodySha256"   text,
-    "payload"      jsonb,
-    "failedAt"     timestamptz not null default now()
+-- only its decoded, allowlisted fields in payload.
+create table wqDeadLetters (
+    deadLetterId bigint      generated always as identity primary key,
+    feed         text        not null,
+    streamOffset bigint,
+    sourceId     text,
+    reason       text        not null,
+    error        text        not null,
+    bodySha256   text,
+    payload      jsonb,
+    failedAt     timestamptz not null default now()
 );
 
 -- ---------------------------------------------------------------------------------------------

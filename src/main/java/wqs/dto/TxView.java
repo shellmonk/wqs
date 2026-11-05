@@ -6,7 +6,7 @@ import java.time.Instant;
 
 /**
  * One transaction as the contract returns it, in the contract's order. {@code accountTransactionId}
- * is the source's own id ({@code "sourceId"}), so it is a string: other sources will come.
+ * is the source's own id ({@code sourceId}), so it is a string: other sources will come.
  * {@code kind} is the source ({@code TRANSACTION}, {@code PAYMENT}, ...) and tells a transaction
  * from a session at levels 1-2; {@code cancelled} shows a cancellation when cancelled rows are
  * included. Null fields are omitted.

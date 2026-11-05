@@ -16,7 +16,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 /**
- * A row of {@code "wqPrjPlays"}: one play's totals. Kept up to date by the native upserts in
+ * A row of {@code wqPrjPlays}: one play's totals. Kept up to date by the native upserts in
  * {@link wqs.repository.PlayRepository}; read through JPA.
  */
 @Entity

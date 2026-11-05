@@ -16,11 +16,10 @@ spring:
       # Flyway owns the schema; Hibernate only checks that the entities match it.
       ddl-auto: validate
       naming:
-        # Column and table names are the entity's own camelCase names, quoted.
+        # Names are the entity's own camelCase names, unquoted: Postgres folds them to lower case.
         physical-strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
     properties:
       hibernate:
-        globally_quoted_identifiers: true
         jdbc.time_zone: UTC
   flyway:
     enabled: true

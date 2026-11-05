@@ -10,7 +10,7 @@ import org.springframework.data.repository.query.Param;
 import wqs.dto.TotalsIncrement;
 import wqs.entity.SessionEntity;
 
-/** {@code "wqPrjSessions"}: totals per session, updated as each of its rows arrives. */
+/** {@code wqPrjSessions}: totals per session, updated as each of its rows arrives. */
 public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
 
     Optional<SessionEntity> findByOwnerIdAndBatchId(String ownerId, String batchId);
@@ -44,30 +44,30 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
                        String[] productTypes, String[] transactionTypes) {}
 
     String ENTRIES = """
-            select 0 as "kind", s."sessionId" as "id", s."startedAt" as "at"
-            from "wqPrjSessions" s
-            where s."ownerId" = :#{#f.ownerId()}
-              and s."startedAt" >= :#{#f.from()} and s."startedAt" < :#{#f.to()}
-              and (not :#{#f.excludeCancelled()} or s."txCountExclCancelled" > 0)
-              and (cardinality(cast(:#{#f.productTypes()} as text[])) = 0 or s."productType" = any(cast(:#{#f.productTypes()} as text[])))
-              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or s."batchId" in (
+            select 0 as kind, s.sessionId as id, s.startedAt as at
+            from wqPrjSessions s
+            where s.ownerId = :#{#f.ownerId()}
+              and s.startedAt >= :#{#f.from()} and s.startedAt < :#{#f.to()}
+              and (not :#{#f.excludeCancelled()} or s.txCountExclCancelled > 0)
+              and (cardinality(cast(:#{#f.productTypes()} as text[])) = 0 or s.productType = any(cast(:#{#f.productTypes()} as text[])))
+              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or s.batchId in (
                     -- One pass over the owner's matching rows (a session's rows are never before its
                     -- start, so from bounds them), instead of one probe per session.
-                    select m."batchId" from "wqPrjTransactions" m
-                    where m."ownerId" = :#{#f.ownerId()} and m."batchId" is not null
-                      and m."created" >= :#{#f.from()}
-                      and m."source" = any(cast(:#{#f.sources()} as int[])) and not m."zeroAmount"
-                      and (not :#{#f.excludeCancelled()} or not m."cancelled")
-                      and m."transactionType" = any(cast(:#{#f.transactionTypes()} as text[]))))
+                    select m.batchId from wqPrjTransactions m
+                    where m.ownerId = :#{#f.ownerId()} and m.batchId is not null
+                      and m.created >= :#{#f.from()}
+                      and m.source = any(cast(:#{#f.sources()} as int[])) and not m.zeroAmount
+                      and (not :#{#f.excludeCancelled()} or not m.cancelled)
+                      and m.transactionType = any(cast(:#{#f.transactionTypes()} as text[]))))
             union all
-            select 1, t."transactionId", t."created"
-            from "wqPrjTransactions" t
-            where t."ownerId" = :#{#f.ownerId()} and t."batchId" is null
-              and t."created" >= :#{#f.from()} and t."created" < :#{#f.to()}
-              and t."source" = any(cast(:#{#f.sources()} as int[])) and not t."zeroAmount"
-              and (not :#{#f.excludeCancelled()} or not t."cancelled")
-              and (cardinality(cast(:#{#f.productTypes()} as text[])) = 0 or t."productType" = any(cast(:#{#f.productTypes()} as text[])))
-              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or t."transactionType" = any(cast(:#{#f.transactionTypes()} as text[])))
+            select 1, t.transactionId, t.created
+            from wqPrjTransactions t
+            where t.ownerId = :#{#f.ownerId()} and t.batchId is null
+              and t.created >= :#{#f.from()} and t.created < :#{#f.to()}
+              and t.source = any(cast(:#{#f.sources()} as int[])) and not t.zeroAmount
+              and (not :#{#f.excludeCancelled()} or not t.cancelled)
+              and (cardinality(cast(:#{#f.productTypes()} as text[])) = 0 or t.productType = any(cast(:#{#f.productTypes()} as text[])))
+              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or t.transactionType = any(cast(:#{#f.transactionTypes()} as text[])))
             """;
 
     /**
@@ -76,7 +76,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
      * A session's totals are stored, so a filter only decides whether it is listed: it must have a
      * visible row of a requested type.
      */
-    @Query(nativeQuery = true, value = "select e.\"kind\", e.\"id\", e.\"at\" from (" + ENTRIES + ") e "
+    @Query(nativeQuery = true, value = "select e.kind, e.id, e.at from (" + ENTRIES + ") e "
             + "order by e.\"at\" desc, e.\"kind\" desc, e.\"id\" desc limit :limit offset :offset")
     List<PageEntry> findPageEntries(@Param("f") EntryFilter filter, @Param("limit") int limit, @Param("offset") long offset);
 
@@ -94,38 +94,38 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
      * modifying query cannot; it runs as a query inside the caller's transaction.
      */
     @Query(nativeQuery = true, value = """
-            insert into "wqPrjSessions" as s (
-                "ownerId", "batchId", "startedAt", "endedAt", "productId", "productType", "currency",
-                "txCount", "totalPlays", "totalWins", "net",
-                "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
+            insert into wqPrjSessions as s (
+                ownerId, batchId, startedAt, endedAt, productId, productType, currency,
+                txCount, totalPlays, totalWins, net,
+                txCountExclCancelled, totalPlaysExclCancelled, totalWinsExclCancelled, netExclCancelled)
             values (
                 :#{#c.ownerId()}, :#{#c.batchId()}, :#{#c.created()}, :#{#c.created()}, :#{#c.productId()}, :#{#c.productType()}, :#{#c.currency()},
                 1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()},
                 1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()})
-            on conflict ("ownerId", "batchId") do update set
-                "startedAt"   = least(s."startedAt", excluded."startedAt"),
-                "endedAt"     = greatest(s."endedAt", excluded."endedAt"),
-                "productId"   = case when excluded."startedAt" < s."startedAt" then excluded."productId" else s."productId" end,
-                "productType" = case when excluded."startedAt" < s."startedAt" then excluded."productType" else s."productType" end,
-                "txCount"     = s."txCount" + 1,
-                "totalPlays"  = s."totalPlays" + excluded."totalPlays",
-                "totalWins"   = s."totalWins" + excluded."totalWins",
-                "net"         = s."net" + excluded."net",
-                "txCountExclCancelled"    = s."txCountExclCancelled" + 1,
-                "totalPlaysExclCancelled" = s."totalPlaysExclCancelled" + excluded."totalPlays",
-                "totalWinsExclCancelled"  = s."totalWinsExclCancelled" + excluded."totalWins",
-                "netExclCancelled"        = s."netExclCancelled" + excluded."net"
-            where s."currency" = excluded."currency"
-            returning "sessionId"
+            on conflict (ownerId, batchId) do update set
+                startedAt   = least(s.startedAt, excluded.startedAt),
+                endedAt     = greatest(s.endedAt, excluded.endedAt),
+                productId   = case when excluded.startedAt < s.startedAt then excluded.productId else s.productId end,
+                productType = case when excluded.startedAt < s.startedAt then excluded.productType else s.productType end,
+                txCount     = s.txCount + 1,
+                totalPlays  = s.totalPlays + excluded.totalPlays,
+                totalWins   = s.totalWins + excluded.totalWins,
+                net         = s.net + excluded.net,
+                txCountExclCancelled    = s.txCountExclCancelled + 1,
+                totalPlaysExclCancelled = s.totalPlaysExclCancelled + excluded.totalPlays,
+                totalWinsExclCancelled  = s.totalWinsExclCancelled + excluded.totalWins,
+                netExclCancelled        = s.netExclCancelled + excluded.net
+            where s.currency = excluded.currency
+            returning sessionId
             """)
     Optional<Long> addRow(@Param("c") TotalsIncrement c);
 
     /** Counts a play that has just been created in this session. */
     @Modifying
     @Query(nativeQuery = true, value = """
-            update "wqPrjSessions"
-            set "playCount" = "playCount" + 1, "playCountExclCancelled" = "playCountExclCancelled" + 1
-            where "sessionId" = :sessionId
+            update wqPrjSessions
+            set playCount = playCount + 1, playCountExclCancelled = playCountExclCancelled + 1
+            where sessionId = :sessionId
             """)
     int addPlay(@Param("sessionId") long sessionId);
 }

@@ -64,7 +64,8 @@ The test broker binds a free host port picked per run, so it never clashes with 
 
 ## Conventions
 
-- Database identifiers are camelCase and always double-quoted in SQL (`"ownerId"`).
+- Database identifiers are written camelCase and unquoted in SQL (`ownerId`); Postgres folds them to
+  lower case (`ownerid`). Quote an identifier only when it must be (a reserved word).
 - An owner is identified by the wallet's `ownerId`, `"{type}-{id}"` (e.g. `1-1717`), everywhere: in
   storage, in `/cc/.../projection/{ownerId}` and in the `/web` identity. The type has no meaning of
   its own; `wqs.util.OwnerIds` gives each owner one canonical spelling.
