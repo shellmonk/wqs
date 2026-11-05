@@ -110,9 +110,9 @@ class StreamMessageDecoderTest {
     }
 
     @Test
-    void rejects_an_amount_with_more_than_four_decimals() {
-        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n.get("amount")).put("amount", new BigDecimal("1.23456"))))
-                .isInstanceOf(DecodeException.class).hasMessage("amount.amount does not fit numeric(20,4)");
+    void rejects_an_amount_with_more_than_three_decimals() {
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n.get("amount")).put("amount", new BigDecimal("1.2345"))))
+                .isInstanceOf(DecodeException.class).hasMessage("amount.amount does not fit numeric(15,3)");
     }
 
     @Test
@@ -120,7 +120,7 @@ class StreamMessageDecoderTest {
         byte[] body = new String(fixture("transfer-out.json"), java.nio.charset.StandardCharsets.UTF_8).replace("\"amount\": -12", "\"amount\": 1E+2147483647")
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
         assertThatThrownBy(() -> decoder.decode(body))
-                .isInstanceOf(DecodeException.class).hasMessage("amount.amount does not fit numeric(20,4)");
+                .isInstanceOf(DecodeException.class).hasMessage("amount.amount does not fit numeric(15,3)");
     }
 
     @Test

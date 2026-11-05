@@ -40,7 +40,7 @@ class StreamIngestTest extends StreamTestBase {
                 .containsEntry("source", 1)
                 .containsEntry("type", "PRIZE")
                 .containsEntry("currency", "EUR")
-                .containsEntry("balanceAfter", new BigDecimal("1156.0000"))
+                .containsEntry("balanceAfter", new BigDecimal("1156.000"))
                 .containsEntry("productId", "TIKIKALACABANA")
                 .containsEntry("productType", "instants")
                 .containsEntry("batchId", "GS-ur5z5sgfr5de5flhjd6ycryf6u")

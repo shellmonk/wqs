@@ -35,9 +35,9 @@ public class StreamMessageDecoder {
             "amount.reservedAmount", "amount.nonWithdrawableAmount");
 
     private static final Pattern CURRENCY = Pattern.compile("[A-Z]{3}");
-    /** Matches the column type numeric(20,4). */
-    private static final int MONEY_SCALE = 4;
-    private static final int MONEY_INTEGER_DIGITS = 16;
+    /** Matches the column type numeric(15,3). */
+    private static final int MONEY_SCALE = 3;
+    private static final int MONEY_INTEGER_DIGITS = 12;
 
     private final ObjectReader objectReader;
 
@@ -155,7 +155,7 @@ public class StreamMessageDecoder {
         BigDecimal value = node.decimalValue().stripTrailingZeros();
         // long arithmetic: an exponent like 1E+2147483647 has scale -2147483647 and would overflow int.
         if (value.scale() > MONEY_SCALE || (long) value.precision() - value.scale() > MONEY_INTEGER_DIGITS) {
-            throw new DecodeException(path + " does not fit numeric(20,4)");
+            throw new DecodeException(path + " does not fit numeric(15,3)");
         }
         return value.setScale(Math.max(0, value.scale()));
     }
