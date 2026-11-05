@@ -23,10 +23,10 @@ public final class TestTransactions {
     public static final class Builder {
 
         private String ownerId;
-        private Instant occurredAt = Instant.parse("2026-10-01T00:00:00Z");
+        private Instant created = Instant.parse("2026-10-01T00:00:00Z");
         private Source source = Source.TRANSACTION;
         private final String sourceId = UUID.randomUUID().toString();
-        private String type = "TT_BUY";
+        private String transactionType = "TT_BUY";
         private BigDecimal amount = new BigDecimal("-1");
         private String currency = "EUR";
         private String productId = "GAME";
@@ -44,7 +44,7 @@ public final class TestTransactions {
         }
 
         public Builder at(String instant) {
-            this.occurredAt = Instant.parse(instant);
+            this.created = Instant.parse(instant);
             return this;
         }
 
@@ -53,8 +53,8 @@ public final class TestTransactions {
             return this;
         }
 
-        public Builder type(String type) {
-            this.type = type;
+        public Builder transactionType(String transactionType) {
+            this.transactionType = transactionType;
             return this;
         }
 
@@ -90,7 +90,7 @@ public final class TestTransactions {
         }
 
         public IncomingTransaction build() {
-            return new IncomingTransaction(ownerId, occurredAt, source, sourceId, type, amount, currency, null,
+            return new IncomingTransaction(ownerId, created, source, sourceId, transactionType, amount, currency, null,
                     productId, productType, batchId, subBatchId, null, Map.of("channel", "WEB"));
         }
     }

@@ -31,16 +31,16 @@ class StreamIngestTest extends StreamTestBase {
 
         awaitRow(id2);
         Map<String, Object> row = jdbcClient.sql("""
-                select "ownerId", "occurredAt", "source", "type", "amount", "currency", "balanceAfter",
+                select "ownerId", "created", "source", "transactionType", "amount", "currency", "totalPostBalance",
                        "productId", "productType", "batchId", "subBatchId", "transactionReference", "detail"::text as "detail"
                 from "wqPrjTransactions" where "sourceId" = :id
                 """).param("id", id2).query().singleRow();
         // JDBC returns smallint as Integer.
         assertThat(row).containsEntry("ownerId", "1-" + id2)
                 .containsEntry("source", 1)
-                .containsEntry("type", "PRIZE")
+                .containsEntry("transactionType", "PRIZE")
                 .containsEntry("currency", "EUR")
-                .containsEntry("balanceAfter", new BigDecimal("1156.000"))
+                .containsEntry("totalPostBalance", new BigDecimal("1156.000"))
                 .containsEntry("productId", "TIKIKALACABANA")
                 .containsEntry("productType", "instants")
                 .containsEntry("batchId", "GS-ur5z5sgfr5de5flhjd6ycryf6u")
@@ -194,7 +194,7 @@ class StreamIngestTest extends StreamTestBase {
         }
         flush();
         await().atMost(Duration.ofSeconds(20)).until(() -> ids.stream().allMatch(id -> rows(id) == 1));
-        assertThat(jdbcClient.sql("select count(*) from \"wqPrjTransactions\" where \"occurredAt\" < '2023-04-01'")
+        assertThat(jdbcClient.sql("select count(*) from \"wqPrjTransactions\" where \"created\" < '2023-04-01'")
                 .query(Long.class).single()).isGreaterThanOrEqualTo(30);
     }
 

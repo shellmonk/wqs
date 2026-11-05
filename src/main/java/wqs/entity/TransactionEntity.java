@@ -26,17 +26,17 @@ import org.hibernate.type.SqlTypes;
 public class TransactionEntity {
 
     @Id private String ownerId;
-    @Id private Instant occurredAt;
+    @Id private Instant created;
     @Id private Long transactionId;
 
     private short source;
     private String sourceId;
-    private String type;
+    private String transactionType;
     private BigDecimal amount;
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(length = 3)
     private String currency;
-    private BigDecimal balanceAfter;
+    private BigDecimal totalPostBalance;
     private String productId;
     private String productType;
     private String batchId;

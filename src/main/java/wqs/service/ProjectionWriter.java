@@ -49,7 +49,7 @@ public class ProjectionWriter {
         if (t.batchId() == null && t.subBatchId() != null) {
             throw new RejectedException("sub-batch-without-batch", "a sub-batch id needs a batch id");
         }
-        partitionService.ensure(TransactionRepository.TABLE, t.occurredAt());
+        partitionService.ensure(TransactionRepository.TABLE, t.created());
         int inserted = transactionRepository.insertIfAbsent(t, json(t));
         if (inserted == 0) {
             return IngestResult.ALREADY_STORED; // already projected, totals included

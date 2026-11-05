@@ -147,8 +147,8 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     /** A row of this test's owner in this test's session; {@code subBatch} null means in no play. */
-    private TestTransactions.Builder row(String type, String amount, String at, String subBatch) {
-        return TestTransactions.transaction(owner).type(type).amount(amount).at(at).session(batch, subBatch);
+    private TestTransactions.Builder row(String transactionType, String amount, String at, String subBatch) {
+        return TestTransactions.transaction(owner).transactionType(transactionType).amount(amount).at(at).session(batch, subBatch);
     }
 
     private Map<String, Object> session() {

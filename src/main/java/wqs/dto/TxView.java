@@ -20,7 +20,7 @@ public record TxView(
         String transactionType,
         BigDecimal amount,
         String currency,
-        BigDecimal balanceAfter,
+        BigDecimal totalPostBalance,
         boolean cancelled,
         String batchId,
         String subBatchId,

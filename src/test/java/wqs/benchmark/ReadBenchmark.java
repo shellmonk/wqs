@@ -117,14 +117,14 @@ class ReadBenchmark {
         report.append("\n## Query plans for the ").append(busiest.rows()).append("-row owner, 24 months\n");
         explain("Level 0 total", """
                 select count(*) from "wqPrjTransactions"
-                where "ownerId" = '%s' and "occurredAt" >= '%s' and "occurredAt" < '%s'
+                where "ownerId" = '%s' and "created" >= '%s' and "created" < '%s'
                   and "source" in (1, 2, 3, 4, 5) and not "zeroAmount"
                 """.formatted(busiest.ownerId(), START, END));
         explain("Level 0 page 1", """
                 select * from "wqPrjTransactions"
-                where "ownerId" = '%s' and "occurredAt" >= '%s' and "occurredAt" < '%s'
+                where "ownerId" = '%s' and "created" >= '%s' and "created" < '%s'
                   and "source" in (1, 2, 3, 4, 5) and not "zeroAmount"
-                order by "occurredAt" desc, "transactionId" desc limit 50
+                order by "created" desc, "transactionId" desc limit 50
                 """.formatted(busiest.ownerId(), START, END));
         explain("Levels 1-2 total", "select count(*) from (" + entries(busiest, List.of()) + ") e");
         explain("Levels 1-2 page 1", "select e.\"kind\", e.\"id\" from (" + entries(busiest, List.of())
@@ -154,8 +154,8 @@ class ReadBenchmark {
         // i counts an owner's rows oldest first; 10 consecutive rows form a group. 7 groups in 10 are
         // sessions (5 plays of a bet and a prize), the rest are rows without a session.
         jdbcClient.sql("""
-                insert into "wqPrjTransactions" ("ownerId", "occurredAt", "transactionId", "source", "sourceId",
-                    "type", "amount", "currency", "productId", "productType", "batchId", "subBatchId", "detail")
+                insert into "wqPrjTransactions" ("ownerId", "created", "transactionId", "source", "sourceId",
+                    "transactionType", "amount", "currency", "productId", "productType", "batchId", "subBatchId", "detail")
                 select o."ownerId",
                        timestamptz '2024-11-01 00:00:00+00' + interval '730 days' * ((i + 0.5) / o."rows"),
                        nextval('"wqTransactionIdSeq"'),
@@ -178,11 +178,11 @@ class ReadBenchmark {
                     "txCountExclCancelled", "playCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
                 select "ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",
                        'EUR', n, plays, p, w, w - p, n, plays, p, w, w - p
-                from (select "ownerId", "batchId", min("occurredAt") as "startedAt", max("occurredAt") as "endedAt",
+                from (select "ownerId", "batchId", min("created") as "startedAt", max("created") as "endedAt",
                              min("productId") as "productId", min("productType") as "productType", count(*) as n,
                              count(distinct "subBatchId") as plays,
-                             sum(case when "type" = 'TT_BUY' then abs("amount") else 0 end) as p,
-                             sum(case when "type" = 'PRIZE' then abs("amount") else 0 end) as w
+                             sum(case when "transactionType" = 'TT_BUY' then abs("amount") else 0 end) as p,
+                             sum(case when "transactionType" = 'PRIZE' then abs("amount") else 0 end) as w
                       from "wqPrjTransactions" where "batchId" is not null and not "zeroAmount"
                       group by "ownerId", "batchId") g
                 """).update();
@@ -190,15 +190,15 @@ class ReadBenchmark {
                 insert into "wqPrjPlays" ("sessionId", "ownerId", "batchId", "subBatchId", "startedAt", "endedAt",
                     "productId", "productType", "currency", "txCount", "totalPlays", "totalWins", "net",
                     "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
-                select s."sessionId", t."ownerId", t."batchId", t."subBatchId", min(t."occurredAt"), max(t."occurredAt"),
+                select s."sessionId", t."ownerId", t."batchId", t."subBatchId", min(t."created"), max(t."created"),
                        min(t."productId"), min(t."productType"), 'EUR', count(*),
-                       sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end),
-                       sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end),
-                       sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end) - sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end),
+                       sum(case when t."transactionType" = 'TT_BUY' then abs(t."amount") else 0 end),
+                       sum(case when t."transactionType" = 'PRIZE' then abs(t."amount") else 0 end),
+                       sum(case when t."transactionType" = 'PRIZE' then abs(t."amount") else 0 end) - sum(case when t."transactionType" = 'TT_BUY' then abs(t."amount") else 0 end),
                        count(*),
-                       sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end),
-                       sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end),
-                       sum(case when t."type" = 'PRIZE' then abs(t."amount") else 0 end) - sum(case when t."type" = 'TT_BUY' then abs(t."amount") else 0 end)
+                       sum(case when t."transactionType" = 'TT_BUY' then abs(t."amount") else 0 end),
+                       sum(case when t."transactionType" = 'PRIZE' then abs(t."amount") else 0 end),
+                       sum(case when t."transactionType" = 'PRIZE' then abs(t."amount") else 0 end) - sum(case when t."transactionType" = 'TT_BUY' then abs(t."amount") else 0 end)
                 from "wqPrjTransactions" t
                 join "wqPrjSessions" s on s."ownerId" = t."ownerId" and s."batchId" = t."batchId"
                 where t."batchId" is not null and not t."zeroAmount"

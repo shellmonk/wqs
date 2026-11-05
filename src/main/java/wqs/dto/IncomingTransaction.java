@@ -7,13 +7,13 @@ import java.util.Map;
 /** A transaction arriving from a feed, before it is stored in {@code "wqPrjTransactions"}; either feed maps to it. */
 public record IncomingTransaction(
         String ownerId,
-        Instant occurredAt,
+        Instant created,
         Source source,
         String sourceId,
-        String type,
+        String transactionType,
         BigDecimal amount,
         String currency,
-        BigDecimal balanceAfter,
+        BigDecimal totalPostBalance,
         String productId,
         String productType,
         String batchId,

@@ -21,8 +21,6 @@ public interface ProjectionMapper {
 
     @Mapping(target = "txId", source = "sourceId")
     @Mapping(target = "kind", source = "source")
-    @Mapping(target = "created", source = "occurredAt")
-    @Mapping(target = "transactionType", source = "type")
     TxView toView(TransactionEntity transaction);
 
     @Mapping(target = "kind", constant = SessionView.KIND)

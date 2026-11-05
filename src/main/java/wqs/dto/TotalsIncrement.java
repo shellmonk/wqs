@@ -11,7 +11,7 @@ public record TotalsIncrement(
         String ownerId,
         String batchId,
         String subBatchId,
-        Instant occurredAt,
+        Instant created,
         String productId,
         String productType,
         String currency,
@@ -23,9 +23,9 @@ public record TotalsIncrement(
     }
 
     public static TotalsIncrement of(IncomingTransaction t) {
-        MoneyDirection direction = TransactionType.directionOf(t.type());
+        MoneyDirection direction = TransactionType.directionOf(t.transactionType());
         BigDecimal amount = t.amount().abs();
-        return new TotalsIncrement(t.ownerId(), t.batchId(), t.subBatchId(), t.occurredAt(),
+        return new TotalsIncrement(t.ownerId(), t.batchId(), t.subBatchId(), t.created(),
                 t.productId(), t.productType(), t.currency(),
                 direction == MoneyDirection.PLAY ? amount : BigDecimal.ZERO,
                 direction == MoneyDirection.WIN ? amount : BigDecimal.ZERO);

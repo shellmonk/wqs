@@ -11,7 +11,5 @@ public interface TransactionMapper {
 
     @Mapping(target = "source", constant = "TRANSACTION")
     @Mapping(target = "sourceId", source = "id")
-    @Mapping(target = "occurredAt", source = "created")
-    @Mapping(target = "balanceAfter", source = "totalPostBalance")
     IncomingTransaction fromStream(StreamMessage message);
 }

@@ -20,21 +20,21 @@ public interface TransactionRepository
 
     /**
      * Inserts a row; returns 0 when it already exists. A redelivered row hits the unique key
-     * ("source", "sourceId", "occurredAt") and changes nothing. Native because JPA has no
+     * ("source", "sourceId", "created") and changes nothing. Native because JPA has no
      * "insert unless present": its save() would throw and mark the transaction rollback-only.
      * The row's month partition must exist.
      */
     @Modifying
     @Query(nativeQuery = true, value = """
             insert into "wqPrjTransactions" (
-                "ownerId", "occurredAt", "transactionId", "source", "sourceId", "type",
-                "amount", "currency", "balanceAfter", "productId", "productType", "batchId", "subBatchId",
+                "ownerId", "created", "transactionId", "source", "sourceId", "transactionType",
+                "amount", "currency", "totalPostBalance", "productId", "productType", "batchId", "subBatchId",
                 "transactionReference", "detail")
             values (
-                :#{#t.ownerId()}, :#{#t.occurredAt()}, nextval('"wqTransactionIdSeq"'), :#{#t.source().code()}, :#{#t.sourceId()}, :#{#t.type()},
-                :#{#t.amount()}, :#{#t.currency()}, :#{#t.balanceAfter()}, :#{#t.productId()}, :#{#t.productType()}, :#{#t.batchId()}, :#{#t.subBatchId()},
+                :#{#t.ownerId()}, :#{#t.created()}, nextval('"wqTransactionIdSeq"'), :#{#t.source().code()}, :#{#t.sourceId()}, :#{#t.transactionType()},
+                :#{#t.amount()}, :#{#t.currency()}, :#{#t.totalPostBalance()}, :#{#t.productId()}, :#{#t.productType()}, :#{#t.batchId()}, :#{#t.subBatchId()},
                 :#{#t.transactionReference()}, cast(:#{#detail} as jsonb))
-            on conflict ("source", "sourceId", "occurredAt") do nothing
+            on conflict ("source", "sourceId", "created") do nothing
             """)
     int insertIfAbsent(@Param("t") IncomingTransaction t, @Param("detail") String detailJson);
 
@@ -45,10 +45,10 @@ public interface TransactionRepository
     @Query("""
             select t from TransactionEntity t
             where t.ownerId = :ownerId and t.batchId in :batchIds
-              and t.occurredAt >= :from and t.occurredAt <= :to
+              and t.created >= :from and t.created <= :to
               and t.source in :sources and t.zeroAmount = false
               and (:includeCancelled = true or t.cancelled = false)
-            order by t.occurredAt desc, t.transactionId desc
+            order by t.created desc, t.transactionId desc
             """)
     List<TransactionEntity> findSessionRows(@Param("ownerId") String ownerId,
                                             @Param("batchIds") Collection<String> batchIds,
@@ -58,11 +58,11 @@ public interface TransactionRepository
 
     /**
      * Rows by id. {@code from}/{@code to} (inclusive) must span the rows' own times: the primary key
-     * leads with ("ownerId", "occurredAt"), so a tight span reads only those rows, not the owner's history.
+     * leads with ("ownerId", "created"), so a tight span reads only those rows, not the owner's history.
      */
     @Query("""
             select t from TransactionEntity t
-            where t.ownerId = :ownerId and t.transactionId in :ids and t.occurredAt >= :from and t.occurredAt <= :to
+            where t.ownerId = :ownerId and t.transactionId in :ids and t.created >= :from and t.created <= :to
             """)
     List<TransactionEntity> findByIds(@Param("ownerId") String ownerId, @Param("ids") Collection<Long> ids,
                                       @Param("from") Instant from, @Param("to") Instant to);

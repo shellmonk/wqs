@@ -15,8 +15,8 @@ final class TransactionSpecifications {
     static Specification<TransactionEntity> visibleTo(ReadPolicy policy, String ownerId, Instant from, Instant to) {
         return (root, query, cb) -> cb.and(
                 cb.equal(root.get("ownerId"), ownerId),
-                cb.greaterThanOrEqualTo(root.get("occurredAt"), from),
-                cb.lessThan(root.get("occurredAt"), to),
+                cb.greaterThanOrEqualTo(root.get("created"), from),
+                cb.lessThan(root.get("created"), to),
                 root.get("source").in(policy.sourceCodes()),
                 cb.isFalse(root.get("zeroAmount")));
     }
@@ -30,6 +30,6 @@ final class TransactionSpecifications {
     }
 
     static Specification<TransactionEntity> typeIn(Set<String> types) {
-        return (root, query, cb) -> root.get("type").in(types);
+        return (root, query, cb) -> root.get("transactionType").in(types);
     }
 }

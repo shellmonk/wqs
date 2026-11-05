@@ -18,7 +18,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
     /**
      * A top-level entry of a level-1/2 page: a session, or a transaction without one. {@code id} is
      * the session's or the transaction's id, {@code at} its time (the session's start, or the
-     * transaction's occurredAt). {@code kind} is {@link #SESSION} or {@link #TRANSACTION}, as the
+     * transaction's created). {@code kind} is {@link #SESSION} or {@link #TRANSACTION}, as the
      * {@link #ENTRIES} query writes it.
      */
     interface PageEntry {
@@ -55,19 +55,19 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
                     -- start, so from bounds them), instead of one probe per session.
                     select m."batchId" from "wqPrjTransactions" m
                     where m."ownerId" = :#{#f.ownerId()} and m."batchId" is not null
-                      and m."occurredAt" >= :#{#f.from()}
+                      and m."created" >= :#{#f.from()}
                       and m."source" = any(cast(:#{#f.sources()} as int[])) and not m."zeroAmount"
                       and (not :#{#f.excludeCancelled()} or not m."cancelled")
-                      and m."type" = any(cast(:#{#f.transactionTypes()} as text[]))))
+                      and m."transactionType" = any(cast(:#{#f.transactionTypes()} as text[]))))
             union all
-            select 1, t."transactionId", t."occurredAt"
+            select 1, t."transactionId", t."created"
             from "wqPrjTransactions" t
             where t."ownerId" = :#{#f.ownerId()} and t."batchId" is null
-              and t."occurredAt" >= :#{#f.from()} and t."occurredAt" < :#{#f.to()}
+              and t."created" >= :#{#f.from()} and t."created" < :#{#f.to()}
               and t."source" = any(cast(:#{#f.sources()} as int[])) and not t."zeroAmount"
               and (not :#{#f.excludeCancelled()} or not t."cancelled")
               and (cardinality(cast(:#{#f.productTypes()} as text[])) = 0 or t."productType" = any(cast(:#{#f.productTypes()} as text[])))
-              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or t."type" = any(cast(:#{#f.transactionTypes()} as text[])))
+              and (cardinality(cast(:#{#f.transactionTypes()} as text[])) = 0 or t."transactionType" = any(cast(:#{#f.transactionTypes()} as text[])))
             """;
 
     /**
@@ -99,7 +99,7 @@ public interface SessionRepository extends JpaRepository<SessionEntity, Long> {
                 "txCount", "totalPlays", "totalWins", "net",
                 "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
             values (
-                :#{#c.ownerId()}, :#{#c.batchId()}, :#{#c.occurredAt()}, :#{#c.occurredAt()}, :#{#c.productId()}, :#{#c.productType()}, :#{#c.currency()},
+                :#{#c.ownerId()}, :#{#c.batchId()}, :#{#c.created()}, :#{#c.created()}, :#{#c.productId()}, :#{#c.productType()}, :#{#c.currency()},
                 1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()},
                 1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()})
             on conflict ("ownerId", "batchId") do update set

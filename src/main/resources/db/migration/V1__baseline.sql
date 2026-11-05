@@ -5,7 +5,7 @@
 -- Transactions
 -- ---------------------------------------------------------------------------------------------
 
--- Every projected row, from every source, stored once. Partitioned by month on "occurredAt";
+-- Every projected row, from every source, stored once. Partitioned by month on "created";
 -- partitions are created on demand (wqs.service.PartitionService). The owner is "ownerId", the
 -- wallet's "{type}-{id}" (e.g. '1-1717') in one canonical spelling; '1-1717' and '2-1717' are
 -- simply different owners.
@@ -16,14 +16,14 @@
 -- The unique key catches a redelivered row.
 create table "wqPrjTransactions" (
     "ownerId"              text          not null,
-    "occurredAt"           timestamptz   not null,
+    "created"              timestamptz   not null,
     "transactionId"        bigint        not null,
     "source"               smallint      not null,
     "sourceId"             text          not null,
-    "type"                 text          not null,
+    "transactionType"      text          not null,
     "amount"               numeric(15,3) not null,
     "currency"             char(3)       not null,
-    "balanceAfter"         numeric(15,3),
+    "totalPostBalance"     numeric(15,3),
     "productId"            text,
     "productType"          text,
     "batchId"              text,
@@ -34,17 +34,17 @@ create table "wqPrjTransactions" (
     "ingestedAt"           timestamptz   not null default now(),
     -- A zero-amount stream transaction: stored, never shown, not counted in session or play totals.
     "zeroAmount"           boolean       not null generated always as ("amount" = 0 and "source" = 1) stored,
-    primary key ("ownerId", "occurredAt", "transactionId"),
-    constraint "wqPrjTransactions_sourceKey" unique ("source", "sourceId", "occurredAt")
-) partition by range ("occurredAt");
+    primary key ("ownerId", "created", "transactionId"),
+    constraint "wqPrjTransactions_sourceKey" unique ("source", "sourceId", "created")
+) partition by range ("created");
 
 create sequence "wqTransactionIdSeq" as bigint;
 
 -- Levels 1-2 page through sessions merged with the rows that have no session; this index serves
 -- the second half. A session's own rows are found by batch, bounded by the session's time span.
-create index "wqPrjTransactions_unsessioned" on "wqPrjTransactions" ("ownerId", "occurredAt" desc, "transactionId" desc)
+create index "wqPrjTransactions_unsessioned" on "wqPrjTransactions" ("ownerId", "created" desc, "transactionId" desc)
     where "batchId" is null;
-create index "wqPrjTransactions_session" on "wqPrjTransactions" ("ownerId", "batchId", "occurredAt")
+create index "wqPrjTransactions_session" on "wqPrjTransactions" ("ownerId", "batchId", "created")
     where "batchId" is not null;
 
 -- ---------------------------------------------------------------------------------------------

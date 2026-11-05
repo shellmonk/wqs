@@ -30,7 +30,7 @@ class StreamMessageDecoderTest {
         assertThat(m.id()).isEqualTo("5962");
         assertThat(m.ownerId()).isEqualTo("1-1717");
         assertThat(m.created()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
-        assertThat(m.type()).isEqualTo("TT_TRANSFER_OUT");
+        assertThat(m.transactionType()).isEqualTo("TT_TRANSFER_OUT");
         assertThat(m.amount()).isEqualByComparingTo("-12");
         assertThat(m.currency()).isEqualTo("EUR");
         assertThat(m.totalPostBalance()).isEqualByComparingTo("178");
@@ -52,7 +52,7 @@ class StreamMessageDecoderTest {
 
         assertThat(m.id()).isEqualTo("5922");
         assertThat(m.ownerId()).isEqualTo("1-1945");
-        assertThat(m.type()).isEqualTo("PRIZE");
+        assertThat(m.transactionType()).isEqualTo("PRIZE");
         assertThat(m.amount()).isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(m.productId()).isEqualTo("TIKIKALACABANA");
         assertThat(m.productType()).isEqualTo("instants");

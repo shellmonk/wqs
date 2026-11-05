@@ -37,7 +37,7 @@ public interface PlayRepository extends JpaRepository<PlayEntity, Long> {
                 "txCount", "totalPlays", "totalWins", "net",
                 "txCountExclCancelled", "totalPlaysExclCancelled", "totalWinsExclCancelled", "netExclCancelled")
             values (
-                :#{#sessionId}, :#{#c.ownerId()}, :#{#c.batchId()}, :#{#c.subBatchId()}, :#{#c.occurredAt()}, :#{#c.occurredAt()},
+                :#{#sessionId}, :#{#c.ownerId()}, :#{#c.batchId()}, :#{#c.subBatchId()}, :#{#c.created()}, :#{#c.created()},
                 :#{#c.productId()}, :#{#c.productType()}, :#{#c.currency()},
                 1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()},
                 1, :#{#c.plays()}, :#{#c.wins()}, :#{#c.net()})

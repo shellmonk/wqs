@@ -9,7 +9,7 @@ import lombok.NoArgsConstructor;
 
 /**
  * The primary key of {@code "wqPrjTransactions"}. {@code transactionId} alone is the row's synthetic
- * id; Postgres requires the partition column ({@code occurredAt}) in every key of a partitioned table.
+ * id; Postgres requires the partition column ({@code created}) in every key of a partitioned table.
  */
 @Getter
 @NoArgsConstructor
@@ -18,6 +18,6 @@ import lombok.NoArgsConstructor;
 public class TransactionKey implements Serializable {
 
     private String ownerId;
-    private Instant occurredAt;
+    private Instant created;
     private Long transactionId;
 }

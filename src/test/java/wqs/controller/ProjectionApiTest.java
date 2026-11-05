@@ -241,8 +241,8 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     /** A row of this test's owner; {@code batch} null means in no session. */
-    private TestTransactions.Builder row(String type, String amount, String at, String batch, String subBatch) {
-        return TestTransactions.transaction(owner).type(type).amount(amount).at(at).session(batch, subBatch);
+    private TestTransactions.Builder row(String transactionType, String amount, String at, String batch, String subBatch) {
+        return TestTransactions.transaction(owner).transactionType(transactionType).amount(amount).at(at).session(batch, subBatch);
     }
 
     private String ccPath() {

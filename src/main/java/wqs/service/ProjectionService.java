@@ -48,7 +48,7 @@ import wqs.repository.TransactionRepository;
 @Service
 public class ProjectionService {
 
-    private static final Sort NEWEST_FIRST = Sort.by(Sort.Order.desc("occurredAt"), Sort.Order.desc("transactionId"));
+    private static final Sort NEWEST_FIRST = Sort.by(Sort.Order.desc("created"), Sort.Order.desc("transactionId"));
     private static final String[] NONE = new String[0];
 
     private final TransactionRepository transactionRepository;
@@ -159,7 +159,7 @@ public class ProjectionService {
                         earliest(pageSessions, SessionEntity::getStartedAt), latest(pageSessions, SessionEntity::getEndedAt),
                         policy.sourceCodes(), !request.excludeCancelled())
                 .stream()
-                .filter(t -> request.transactionTypes().isEmpty() || request.transactionTypes().contains(t.getType()))
+                .filter(t -> request.transactionTypes().isEmpty() || request.transactionTypes().contains(t.getTransactionType()))
                 .map(projectionMapper::toView)
                 .collect(Collectors.groupingBy(TxView::batchId, LinkedHashMap::new, Collectors.toList()));
     }

@@ -16,7 +16,7 @@ public record StreamMessage(
         String id,
         String ownerId,
         Instant created,
-        String type,
+        String transactionType,
         BigDecimal amount,
         String currency,
         BigDecimal totalPostBalance,
