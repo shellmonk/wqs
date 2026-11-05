@@ -5,8 +5,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import wqs.dto.IngestResult;
 import wqs.dto.StreamBatchItem;
 import wqs.dto.StreamMessage;
@@ -35,9 +34,9 @@ import wqs.util.TransientFailures;
  * <p>Every loop stops when the leadership term ends ({@code active} turns false): nothing
  * uncommitted is lost, it is read again from the stored offset by the next leader.
  */
+@Slf4j
 final class BatchCommitter {
 
-    private static final Logger log = LoggerFactory.getLogger(BatchCommitter.class);
     private static final Duration FIRST_RETRY = Duration.ofMillis(100);
     private static final Duration MAX_RETRY = Duration.ofSeconds(30);
 

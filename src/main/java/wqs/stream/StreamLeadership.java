@@ -5,8 +5,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import javax.sql.DataSource;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -19,11 +18,10 @@ import wqs.config.StreamProperties;
  *
  * <p>Not thread-safe: used only by the consumer's supervisor thread.
  */
+@Slf4j
 @Component
 @ConditionalOnProperty(name = "wqs.stream.enabled", havingValue = "true")
 public class StreamLeadership {
-
-    private static final Logger log = LoggerFactory.getLogger(StreamLeadership.class);
 
     private final DataSource writerDataSource;
     private final String lockName;

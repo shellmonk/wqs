@@ -11,8 +11,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
@@ -33,11 +32,11 @@ import wqs.util.Backoff;
  * <p>If the broker is unreachable, subscribing is retried in the background with backoff; the
  * application stays up for reads.
  */
+@Slf4j
 @Component
 @ConditionalOnProperty(name = "wqs.stream.enabled", havingValue = "true")
 public class StreamConsumer implements SmartLifecycle, BatchCommitter.Progress {
 
-    private static final Logger log = LoggerFactory.getLogger(StreamConsumer.class);
     private static final Duration STANDBY_POLL = Duration.ofSeconds(5);
     private static final Duration LEADERSHIP_CHECK = Duration.ofSeconds(5);
     private static final Duration FIRST_SUBSCRIBE_RETRY = Duration.ofSeconds(1);
