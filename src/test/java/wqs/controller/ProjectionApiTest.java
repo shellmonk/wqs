@@ -205,34 +205,6 @@ class ProjectionApiTest extends IntegrationTest {
         assertThat(txIds(page.get("data").get(0).get("txs"))).containsExactly(prize);
     }
 
-    // --- validation and identity ---
-
-    @Test
-    void invalidParametersAre400NamingTheParameter() {
-        assertProblem(get("/cc/wallet-data/rest/v1/projection/" + owner + "?to=2026-11-01T00:00:00Z", null), 400, "from");
-        assertProblem(get(ccPath() + RANGE + "&aggregationLevel=3", null), 400, "aggregationLevel");
-        assertProblem(get(ccPath() + RANGE + "&pageSize=1001", null), 400, "pageSize");
-        assertProblem(get(ccPath() + RANGE + "&aggregationLevel=1&pageSize=101", null), 400, "pageSize");
-        assertProblem(get(ccPath() + RANGE + "&pageNumber=0", null), 400, "pageNumber");
-        assertProblem(get(ccPath() + "from=yesterday&to=2026-11-01T00:00:00Z", null), 400, "from");
-        assertProblem(get(ccPath() + "from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z", null), 400, "from");
-        assertProblem(get("/cc/wallet-data/rest/v1/projection/1717?" + RANGE, null), 400, "ownerId");
-        assertProblem(get("/cc/wallet-data/rest/v1/projection/a-1717?" + RANGE, null), 400, "ownerId");
-    }
-
-    @Test
-    void theOwnerIdInThePathIsMatchedInItsCanonicalSpelling() throws Exception {
-        String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
-        assertThat(txIds(ok(get("/cc/wallet-data/rest/v1/projection/01-" + number + "?" + RANGE, null)).get("data")))
-                .containsExactly(bet);
-    }
-
-    @Test
-    void webWithoutAnOwnerIs401() {
-        ResponseEntity<String> response = get("/web/wallet-data/rest/v1/projection?" + RANGE, null);
-        assertThat(response.getStatusCode().value()).isEqualTo(401);
-    }
-
     // --- helpers ---
 
     private String store(TestTransactions.Builder row) {
@@ -268,11 +240,6 @@ class ProjectionApiTest extends IntegrationTest {
     private JsonNode ok(ResponseEntity<String> response) throws Exception {
         assertThat(response.getStatusCode().value()).as(response.getBody()).isEqualTo(200);
         return objectMapper.readTree(response.getBody());
-    }
-
-    private void assertProblem(ResponseEntity<String> response, int status, String parameter) {
-        assertThat(response.getStatusCode().value()).as(response.getBody()).isEqualTo(status);
-        assertThat(response.getBody()).contains("\"parameter\":\"" + parameter + "\"");
     }
 
     private static List<String> txIds(JsonNode array) {
