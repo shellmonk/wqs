@@ -40,13 +40,27 @@ class StreamLeadershipTest extends StreamTestBase {
                 new SimpleMeterRegistry());
     }
 
+    /**
+     * Leaves the leader consuming for the next test. Its state alone is not enough: after its lock
+     * connection dies it reports CONSUMING until its next leadership check, while the lock is
+     * free. With the replica stopped, a granted lock can only be the leader's.
+     */
     @AfterEach
     void tearDown() {
         replicaConsumer.stop();
         if (!leaderConsumer.isRunning()) {
             leaderConsumer.start();
         }
-        await().atMost(Duration.ofSeconds(30)).until(() -> leaderConsumer.state() == StreamConsumer.State.CONSUMING);
+        await().atMost(Duration.ofSeconds(30)).until(() ->
+                leaderConsumer.state() == StreamConsumer.State.CONSUMING && lockHolders() == 1);
+    }
+
+    private int lockHolders() {
+        return jdbcClient.sql("""
+                select count(*) from pg_locks
+                where locktype = 'advisory' and granted
+                  and objid = (hashtextextended(:name, 0) & 4294967295)::oid
+                """).param("name", "wqs-stream:" + streamProperties.name()).query(Integer.class).single();
     }
 
     @Test
