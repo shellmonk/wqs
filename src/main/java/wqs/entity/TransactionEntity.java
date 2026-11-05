@@ -7,7 +7,6 @@ import jakarta.persistence.IdClass;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.Map;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -31,20 +30,39 @@ public class TransactionEntity {
 
     private short source;
     private String sourceId;
+    @Column(insertable = false, updatable = false)
+    private int userType;
+    @Column(insertable = false, updatable = false)
+    private String userId;
+    private String accountType;
+    private String accountNumber;
+    private String accountId;
+    private String batchId;
+    private String subBatchId;
+    private Boolean batchEnded;
     private String transactionType;
-    private BigDecimal amount;
+    private String transactionSubtype;
+    private String productId;
+    private String productType;
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(length = 3)
     private String currency;
+    private BigDecimal amount;
     private BigDecimal totalPostBalance;
-    private String productId;
-    private String productType;
-    private String batchId;
-    private String subBatchId;
+    private BigDecimal reservedAmount;
+    private BigDecimal nonWithdrawableAmount;
+    private boolean monetary;
+    private String description;
+    private String fromDescription;
+    private String toDescription;
+    private Long paymentId;
+    private Long claimId;
+    private String extTrxId;
+    private String extSystemId;
     private String transactionReference;
+    private String channel;
+    private Instant issued;
     private boolean cancelled;
-    @JdbcTypeCode(SqlTypes.JSON)
-    private Map<String, String> detail;
     private Instant ingestedAt;
     @Column(insertable = false, updatable = false)
     private boolean zeroAmount;

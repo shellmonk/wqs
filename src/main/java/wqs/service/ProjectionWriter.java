@@ -1,7 +1,5 @@
 package wqs.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,18 +25,15 @@ public class ProjectionWriter {
     private final TransactionRepository transactionRepository;
     private final SessionRepository sessionRepository;
     private final PlayRepository playRepository;
-    private final ObjectMapper objectMapper;
 
     public ProjectionWriter(PartitionService partitionService,
                             TransactionRepository transactionRepository,
                             SessionRepository sessionRepository,
-                            PlayRepository playRepository,
-                            ObjectMapper objectMapper) {
+                            PlayRepository playRepository) {
         this.partitionService = partitionService;
         this.transactionRepository = transactionRepository;
         this.sessionRepository = sessionRepository;
         this.playRepository = playRepository;
-        this.objectMapper = objectMapper;
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
@@ -50,7 +45,7 @@ public class ProjectionWriter {
             throw new RejectedException("sub-batch-without-batch", "a sub-batch id needs a batch id");
         }
         partitionService.ensure(TransactionRepository.TABLE, t.created());
-        int inserted = transactionRepository.insertIfAbsent(t, json(t));
+        int inserted = transactionRepository.insertIfAbsent(t);
         if (inserted == 0) {
             return IngestResult.ALREADY_STORED; // already projected, totals included
         }
@@ -73,13 +68,5 @@ public class ProjectionWriter {
 
     private static RejectedException currencyMismatch(String group) {
         return new RejectedException("currency-mismatch", "currency differs from the " + group + "'s currency");
-    }
-
-    private String json(IncomingTransaction t) {
-        try {
-            return objectMapper.writeValueAsString(t.detail());
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("detail is a flat map of strings and always serialises", e);
-        }
     }
 }

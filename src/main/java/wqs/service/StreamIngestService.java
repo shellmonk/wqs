@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.OptionalLong;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +32,15 @@ import wqs.util.Hashes;
 public class StreamIngestService {
 
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
+    /**
+     * The decoded fields a rejected message's dead letter keeps: enough to find and replay it.
+     * Free text ({@code description}, {@code fromDescription}, {@code toDescription}, which can hold
+     * masked card digits) and external references stay out.
+     */
+    static final Set<String> DEAD_LETTER_FIELDS = Set.of(
+            "id", "ownerId", "created", "issued", "transactionType", "transactionSubtype",
+            "amount", "currency", "totalPostBalance", "accountType", "accountNumber", "accountId",
+            "productId", "productType", "batchId", "subBatchId", "batchEnded", "monetary", "channel");
 
     private final ProjectionWriter projectionWriter;
     private final PartitionService partitionService;
@@ -143,6 +153,12 @@ public class StreamIngestService {
 
     private void saveRejected(String feed, long offset, StreamMessage message, String reason, String error) {
         deadLetterRepository.save(DeadLetterEntity.rejected(feed, offset, message.id(), reason, error,
-                objectMapper.convertValue(message, MAP), clock.instant()));
+                deadLetterPayload(message), clock.instant()));
+    }
+
+    private Map<String, Object> deadLetterPayload(StreamMessage message) {
+        Map<String, Object> payload = objectMapper.convertValue(message, MAP);
+        payload.keySet().retainAll(DEAD_LETTER_FIELDS);
+        return payload;
     }
 }

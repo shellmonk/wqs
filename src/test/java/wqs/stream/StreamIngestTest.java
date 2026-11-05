@@ -32,7 +32,8 @@ class StreamIngestTest extends StreamTestBase {
         awaitRow(id2);
         Map<String, Object> row = jdbcClient.sql("""
                 select "ownerId", "created", "source", "transactionType", "amount", "currency", "totalPostBalance",
-                       "productId", "productType", "batchId", "subBatchId", "transactionReference", "detail"::text as "detail"
+                       "productId", "productType", "batchId", "subBatchId", "transactionReference",
+                       "userType", "userId", "accountId", "extSystemId", "batchEnded", "issued"
                 from "wqPrjTransactions" where "sourceId" = :id
                 """).param("id", id2).query().singleRow();
         // JDBC returns smallint as Integer.
@@ -46,7 +47,12 @@ class StreamIngestTest extends StreamTestBase {
                 .containsEntry("batchId", "GS-ur5z5sgfr5de5flhjd6ycryf6u")
                 .containsEntry("subBatchId", "PS-62pflumf4bcz7jdtfc3wl5yqfm");
         assertThat((BigDecimal) row.get("amount")).isEqualByComparingTo("0"); // zero amounts are stored
-        assertThat(row.get("detail").toString()).contains("\"references.extSystemId\": \"PDS\"");
+        assertThat(row).containsEntry("userType", 1)
+                .containsEntry("userId", id2) // the halves of ownerId, derived by the table
+                .containsEntry("accountId", "AT_MAIN-0")
+                .containsEntry("extSystemId", "PDS")
+                .containsEntry("batchEnded", true);
+        assertThat(row.get("issued")).isNotNull();
         assertThat(rows(id1)).isEqualTo(1);
     }
 
@@ -121,7 +127,7 @@ class StreamIngestTest extends StreamTestBase {
         Map<String, Object> dead = jdbcClient.sql("select \"reason\", \"payload\"::text as \"payload\" from \"wqDeadLetters\" where \"sourceId\" = :id")
                 .param("id", id).query().singleRow();
         assertThat(dead.get("reason")).isEqualTo("occurred-at-out-of-range");
-        assertThat(dead.get("payload").toString()).contains("\"id\": \"" + id + "\"").doesNotContain("5208");
+        assertThat(dead.get("payload").toString()).contains("\"id\": \"" + id + "\"").doesNotContain("5208").doesNotContain("toDescription");
         assertThat(rows(id)).isZero();
         assertThat(jdbcClient.sql("select to_regclass('\"wqPrjTransactions_2199_01\"') is null").query(Boolean.class).single()).isTrue();
     }

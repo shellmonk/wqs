@@ -19,7 +19,7 @@ import wqs.entity.TransactionEntity;
 @Mapper(componentModel = "spring")
 public interface ProjectionMapper {
 
-    @Mapping(target = "txId", source = "sourceId")
+    @Mapping(target = "accountTransactionId", source = "sourceId")
     @Mapping(target = "kind", source = "source")
     TxView toView(TransactionEntity transaction);
 

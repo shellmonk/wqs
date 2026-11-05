@@ -131,7 +131,7 @@ class ProjectionApiTest extends IntegrationTest {
         JsonNode page = cc(RANGE + "&aggregationLevel=1");
         assertThat(page.get("totalRowCount").asLong()).isEqualTo(3); // one session + two rows without one
         JsonNode data = page.get("data");
-        assertThat(data.get(0).get("txId").asText()).isEqualTo(transfer);
+        assertThat(data.get(0).get("accountTransactionId").asText()).isEqualTo(transfer);
         JsonNode session = data.get(1);
         assertThat(session.get("kind").asText()).isEqualTo("SESSION");
         assertThat(session.get("batchId").asText()).isEqualTo(batch);
@@ -141,7 +141,7 @@ class ProjectionApiTest extends IntegrationTest {
         assertThat(session.get("amount").decimalValue()).isEqualByComparingTo("3");
         assertThat(txIds(session.get("txs"))).containsExactly(prize, bet);
         assertThat(session.has("subitems")).isFalse();
-        assertThat(data.get(2).get("txId").asText()).isEqualTo(early);
+        assertThat(data.get(2).get("accountTransactionId").asText()).isEqualTo(early);
     }
 
     @Test
@@ -277,7 +277,7 @@ class ProjectionApiTest extends IntegrationTest {
 
     private static List<String> txIds(JsonNode array) {
         List<String> ids = new ArrayList<>();
-        array.forEach(n -> ids.add(n.get("txId").asText()));
+        array.forEach(n -> ids.add(n.get("accountTransactionId").asText()));
         return ids;
     }
 }

@@ -2,32 +2,43 @@ package wqs.dto;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.Map;
 
 /**
- * A decoded {@code walAccountTransactions} message. Only the fields WQS uses are kept; the rest of
+ * A decoded {@code walAccountTransactions} message. Only the fields WQS stores are kept; the rest of
  * the wire message is dropped. Empty strings on the wire are {@code null} here.
  *
  * <p>{@code ownerId} is {@code userContext.ownerId} ({@code "{type}-{id}"}) in its canonical spelling.
- * {@code detail} holds only allowlisted fields, under dotted keys such as
- * {@code accountContext.accountType}.
+ * The names are the columns', not the wire's: {@code transactionSubtype} is {@code subtype},
+ * {@code accountId} is {@code account}, and nested fields lose their parent
+ * ({@code accountContext.accountType} is {@code accountType}).
  */
 public record StreamMessage(
         String id,
         String ownerId,
         Instant created,
-        String transactionType,
-        BigDecimal amount,
-        String currency,
-        BigDecimal totalPostBalance,
-        String productId,
-        String productType,
+        String accountType,
+        String accountNumber,
+        String accountId,
         String batchId,
         String subBatchId,
+        Boolean batchEnded,
+        String transactionType,
+        String transactionSubtype,
+        String productId,
+        String productType,
+        String currency,
+        BigDecimal amount,
+        BigDecimal totalPostBalance,
+        BigDecimal reservedAmount,
+        BigDecimal nonWithdrawableAmount,
+        boolean monetary,
+        String description,
+        String fromDescription,
+        String toDescription,
+        Long paymentId,
+        Long claimId,
+        String extTrxId,
+        String extSystemId,
         String transactionReference,
-        Map<String, String> detail) {
-
-    public StreamMessage {
-        detail = Map.copyOf(detail);
-    }
-}
+        String channel,
+        Instant issued) {}

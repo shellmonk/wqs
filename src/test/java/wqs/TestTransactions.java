@@ -2,7 +2,6 @@ package wqs;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.Map;
 import java.util.UUID;
 import wqs.dto.IncomingTransaction;
 import wqs.dto.Source;
@@ -90,8 +89,10 @@ public final class TestTransactions {
         }
 
         public IncomingTransaction build() {
-            return new IncomingTransaction(ownerId, created, source, sourceId, transactionType, amount, currency, null,
-                    productId, productType, batchId, subBatchId, null, Map.of("channel", "WEB"));
+            return new IncomingTransaction(ownerId, created, source, sourceId,
+                    "AT_MAIN", "0", "AT_MAIN-0", batchId, subBatchId, null,
+                    transactionType, null, productId, productType, currency, amount, null, null, null,
+                    true, null, null, null, null, null, null, null, null, "WEB", created);
         }
     }
 }

@@ -155,9 +155,10 @@ class ReadBenchmark {
         // sessions (5 plays of a bet and a prize), the rest are rows without a session.
         jdbcClient.sql("""
                 insert into "wqPrjTransactions" ("ownerId", "created", "transactionId", "source", "sourceId",
-                    "transactionType", "amount", "currency", "productId", "productType", "batchId", "subBatchId", "detail")
+                    "transactionType", "amount", "currency", "productId", "productType", "batchId", "subBatchId",
+                    "accountType", "accountNumber", "accountId", "issued")
                 select o."ownerId",
-                       timestamptz '2024-11-01 00:00:00+00' + interval '730 days' * ((i + 0.5) / o."rows"),
+                       k.at,
                        nextval('"wqTransactionIdSeq"'),
                        case when s then 1 when i % 3 = 0 then 4 else 1 end,
                        o."n" || '-' || i,
@@ -167,10 +168,11 @@ class ReadBenchmark {
                        'EUR', 'GAME', case when (i / 10) % 2 = 0 then 'instants' else 'lotto' end,
                        case when s then 'S-' || o."n" || '-' || (i / 10) end,
                        case when s then 'P-' || o."n" || '-' || (i / 2) end,
-                       '{}'
+                       'AT_MAIN', '0', 'AT_MAIN-0', k.at
                 from "benchOwner" o
                 cross join lateral generate_series(0, o."rows" - 1) i
-                cross join lateral (select (i / 10) % 10 < 7 as s) k
+                cross join lateral (select (i / 10) % 10 < 7 as s,
+                        timestamptz '2024-11-01 00:00:00+00' + interval '730 days' * ((i + 0.5) / o."rows") as at) k
                 """).update();
         jdbcClient.sql("""
                 insert into "wqPrjSessions" ("ownerId", "batchId", "startedAt", "endedAt", "productId", "productType",

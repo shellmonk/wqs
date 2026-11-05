@@ -40,10 +40,23 @@ class StreamMessageDecoderTest {
         assertThat(m.productType()).isNull();
         assertThat(m.batchId()).isNull();
         assertThat(m.subBatchId()).isNull();
-        assertThat(m.detail()).containsEntry("references.paymentId", "6429")
-                .containsEntry("createdContext.channel", "WEB")
-                .containsEntry("monetary", "true")
-                .doesNotContainKey("subtype");
+        assertThat(m.transactionSubtype()).isNull();
+        assertThat(m.description()).isNull();
+        assertThat(m.claimId()).isNull();
+        assertThat(m.extTrxId()).isNull();
+        // Every other stored field, under its column's name.
+        assertThat(m.accountType()).isEqualTo("AT_MAIN");
+        assertThat(m.accountNumber()).isEqualTo("0");
+        assertThat(m.accountId()).isEqualTo("AT_MAIN-0");
+        assertThat(m.batchEnded()).isFalse();
+        assertThat(m.reservedAmount()).isEqualByComparingTo("0");
+        assertThat(m.nonWithdrawableAmount()).isEqualByComparingTo("0");
+        assertThat(m.monetary()).isTrue();
+        assertThat(m.fromDescription()).isEqualTo("AT_MAIN");
+        assertThat(m.toDescription()).isEqualTo("WITHDRAWAL*5208");
+        assertThat(m.paymentId()).isEqualTo(6429L);
+        assertThat(m.channel()).isEqualTo("WEB");
+        assertThat(m.issued()).isEqualTo(Instant.parse("2026-10-29T11:22:04.465648Z"));
     }
 
     @Test
@@ -58,16 +71,53 @@ class StreamMessageDecoderTest {
         assertThat(m.productType()).isEqualTo("instants");
         assertThat(m.batchId()).isEqualTo("GS-ur5z5sgfr5de5flhjd6ycryf6u");
         assertThat(m.subBatchId()).isEqualTo("PS-62pflumf4bcz7jdtfc3wl5yqfm");
-        assertThat(m.detail()).containsEntry("batchContext.batchEnded", "true")
-                .containsEntry("references.extSystemId", "PDS");
+        assertThat(m.batchEnded()).isTrue();
+        assertThat(m.description()).isEqualTo("Payout Play Step");
+        assertThat(m.extTrxId()).isEqualTo("PS-62pflumf4bcz7jdtfc3wl5yqfm-1-prize");
+        assertThat(m.extSystemId()).isEqualTo("PDS");
+        assertThat(m.paymentId()).isNull();
     }
 
     @Test
-    void detail_never_carries_fields_outside_the_allowlist() throws IOException {
-        StreamMessage m = decoder.decode(fixture("transfer-out.json"));
-        // toDescription carries masked card digits ("WITHDRAWAL*5208").
-        assertThat(m.detail().keySet()).allMatch(StreamMessageDecoder.DETAIL_ALLOWLIST::contains);
-        assertThat(m.detail().values()).noneMatch(v -> v.contains("5208"));
+    void monetary_defaults_to_true_when_absent() throws IOException {
+        assertThat(decode(n -> ((ObjectNode) n).remove("monetary")).monetary()).isTrue();
+        assertThat(decode(n -> ((ObjectNode) n).put("monetary", false)).monetary()).isFalse();
+    }
+
+    @Test
+    void reads_a_wallet_id_sent_as_a_number() throws IOException {
+        assertThat(decode(n -> ((ObjectNode) n.get("references")).put("claimId", 77)).claimId()).isEqualTo(77L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"12a", "-5", "1.5", "99999999999999999999"})
+    void rejects_a_wallet_id_that_is_not_a_whole_number(String paymentId) {
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n.get("references")).put("paymentId", paymentId)))
+                .isInstanceOf(DecodeException.class).hasMessage("references.paymentId must be a whole number");
+    }
+
+    @Test
+    void rejects_a_value_longer_than_its_column() {
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n).put("toDescription", "x".repeat(129))))
+                .isInstanceOf(DecodeException.class).hasMessage("toDescription is longer than 128 characters");
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n.get("accountContext")).put("accountType", "x".repeat(33))))
+                .isInstanceOf(DecodeException.class).hasMessage("accountContext.accountType is longer than 32 characters");
+    }
+
+    @Test
+    void rejects_a_message_without_account_or_issue_time() {
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n).remove("accountContext")))
+                .isInstanceOf(DecodeException.class).hasMessage("accountContext is missing");
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n).put("account", "")))
+                .isInstanceOf(DecodeException.class).hasMessage("account is missing or blank");
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n.get("createdContext")).remove("issued")))
+                .isInstanceOf(DecodeException.class).hasMessage("createdContext.issued is missing or blank");
+    }
+
+    @Test
+    void rejects_a_non_boolean_flag() {
+        assertThatThrownBy(() -> decode(n -> ((ObjectNode) n.get("batchContext")).put("batchEnded", "yes")))
+                .isInstanceOf(DecodeException.class).hasMessage("batchContext.batchEnded must be true or false");
     }
 
     @Test
@@ -156,7 +206,7 @@ class StreamMessageDecoderTest {
     }
 
     @Test
-    void rejects_a_nul_character_in_a_detail_field() {
+    void rejects_a_nul_character_in_a_text_field() {
         assertThatThrownBy(() -> decode(n -> ((ObjectNode) n).put("description", "A\u0000B")))
                 .isInstanceOf(DecodeException.class).hasMessage("description contains a NUL character");
     }

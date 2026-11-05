@@ -27,16 +27,24 @@ public interface TransactionRepository
     @Modifying
     @Query(nativeQuery = true, value = """
             insert into "wqPrjTransactions" (
-                "ownerId", "created", "transactionId", "source", "sourceId", "transactionType",
-                "amount", "currency", "totalPostBalance", "productId", "productType", "batchId", "subBatchId",
-                "transactionReference", "detail")
+                "ownerId", "created", "transactionId", "source", "sourceId", "accountType",
+                "accountNumber", "accountId", "batchId", "subBatchId", "batchEnded", "transactionType",
+                "transactionSubtype", "productId", "productType", "currency", "amount", "totalPostBalance",
+                "reservedAmount", "nonWithdrawableAmount", "monetary", "description", "fromDescription", "toDescription",
+                "paymentId", "claimId", "extTrxId", "extSystemId", "transactionReference", "channel",
+                "issued")
             values (
-                :#{#t.ownerId()}, :#{#t.created()}, nextval('"wqTransactionIdSeq"'), :#{#t.source().code()}, :#{#t.sourceId()}, :#{#t.transactionType()},
-                :#{#t.amount()}, :#{#t.currency()}, :#{#t.totalPostBalance()}, :#{#t.productId()}, :#{#t.productType()}, :#{#t.batchId()}, :#{#t.subBatchId()},
-                :#{#t.transactionReference()}, cast(:#{#detail} as jsonb))
+                :#{#t.ownerId()}, :#{#t.created()}, nextval('"wqTransactionIdSeq"'), :#{#t.source().code()},
+                :#{#t.sourceId()}, :#{#t.accountType()}, :#{#t.accountNumber()}, :#{#t.accountId()},
+                :#{#t.batchId()}, :#{#t.subBatchId()}, :#{#t.batchEnded()}, :#{#t.transactionType()},
+                :#{#t.transactionSubtype()}, :#{#t.productId()}, :#{#t.productType()}, :#{#t.currency()},
+                :#{#t.amount()}, :#{#t.totalPostBalance()}, :#{#t.reservedAmount()}, :#{#t.nonWithdrawableAmount()},
+                :#{#t.monetary()}, :#{#t.description()}, :#{#t.fromDescription()}, :#{#t.toDescription()},
+                :#{#t.paymentId()}, :#{#t.claimId()}, :#{#t.extTrxId()}, :#{#t.extSystemId()},
+                :#{#t.transactionReference()}, :#{#t.channel()}, :#{#t.issued()})
             on conflict ("source", "sourceId", "created") do nothing
             """)
-    int insertIfAbsent(@Param("t") IncomingTransaction t, @Param("detail") String detailJson);
+    int insertIfAbsent(@Param("t") IncomingTransaction t);
 
     /**
      * The visible rows of the given sessions. {@code from}/{@code to} span the sessions' start and

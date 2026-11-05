@@ -10,9 +10,6 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 import wqs.dto.StreamMessage;
@@ -26,13 +23,10 @@ import wqs.util.OwnerIds;
 @Component
 public class StreamMessageDecoder {
 
-    /** The only wire fields copied into "detail". Never "the rest of the message". */
-    static final List<String> DETAIL_ALLOWLIST = List.of(
-            "subtype", "description", "account", "monetary",
-            "accountContext.accountType", "accountContext.accountNumber",
-            "references.paymentId", "references.claimId", "references.extTrxId", "references.extSystemId",
-            "createdContext.issued", "createdContext.channel", "batchContext.batchEnded",
-            "amount.reservedAmount", "amount.nonWithdrawableAmount");
+    /** Lengths of the varchar columns; a longer value is rejected here, not by the insert. */
+    private static final int SHORT = 32;
+    private static final int ACCOUNT_ID = 64;
+    private static final int LONG = 128;
 
     private static final Pattern CURRENCY = Pattern.compile("[A-Z]{3}");
     /** Matches the column type numeric(15,3). */
@@ -61,6 +55,7 @@ public class StreamMessageDecoder {
 
         JsonNode amount = object(root, "amount", true);
         JsonNode userContext = object(root, "userContext", true);
+        JsonNode accountContext = object(root, "accountContext", true);
         JsonNode createdContext = object(root, "createdContext", true);
         JsonNode batchContext = object(root, "batchContext", false);
         JsonNode references = object(root, "references", false);
@@ -77,16 +72,32 @@ public class StreamMessageDecoder {
                 requiredText(root, "id"),
                 ownerId,
                 instant(createdContext, "createdContext.created"),
+                limited(requiredText(accountContext, "accountContext.accountType"), SHORT, "accountContext.accountType"),
+                limited(requiredText(accountContext, "accountContext.accountNumber"), SHORT, "accountContext.accountNumber"),
+                limited(requiredText(root, "account"), ACCOUNT_ID, "account"),
+                optionalText(batchContext, "batchContext.batchId"),
+                optionalText(batchContext, "batchContext.subBatchId"),
+                bool(batchContext, "batchContext.batchEnded"),
                 requiredText(root, "type"),
-                money(amount.get("amount"), "amount.amount", true),
-                currency,
-                money(root.get("totalPostBalance"), "totalPostBalance", false),
+                limited(optionalText(root, "subtype"), SHORT, "subtype"),
                 optionalText(root, "productId"),
                 optionalText(root, "productType"),
-                batchContext == null ? null : optionalText(batchContext, "batchContext.batchId"),
-                batchContext == null ? null : optionalText(batchContext, "batchContext.subBatchId"),
-                references == null ? null : optionalText(references, "references.transactionReference"),
-                detail(root));
+                currency,
+                money(amount.get("amount"), "amount.amount", true),
+                money(root.get("totalPostBalance"), "totalPostBalance", false),
+                money(amount.get("reservedAmount"), "amount.reservedAmount", false),
+                money(amount.get("nonWithdrawableAmount"), "amount.nonWithdrawableAmount", false),
+                !Boolean.FALSE.equals(bool(root, "monetary")), // absent: monetary, as the column's default
+                limited(optionalText(root, "description"), LONG, "description"),
+                limited(optionalText(root, "fromDescription"), LONG, "fromDescription"),
+                limited(optionalText(root, "toDescription"), LONG, "toDescription"),
+                id(references, "references.paymentId"),
+                id(references, "references.claimId"),
+                limited(optionalText(references, "references.extTrxId"), LONG, "references.extTrxId"),
+                limited(optionalText(references, "references.extSystemId"), SHORT, "references.extSystemId"),
+                optionalText(references, "references.transactionReference"),
+                limited(optionalText(createdContext, "createdContext.channel"), SHORT, "createdContext.channel"),
+                instant(createdContext, "createdContext.issued"));
     }
 
     private static JsonNode object(JsonNode parent, String field, boolean required) {
@@ -105,7 +116,7 @@ public class StreamMessageDecoder {
 
     /** {@code path} is the dotted wire path; its last step is the field inside {@code parent}. */
     private static String optionalText(JsonNode parent, String path) {
-        JsonNode node = parent.get(lastStep(path));
+        JsonNode node = parent == null ? null : parent.get(lastStep(path));
         if (node == null || node.isNull()) {
             return null;
         }
@@ -160,22 +171,49 @@ public class StreamMessageDecoder {
         return value.setScale(Math.max(0, value.scale()));
     }
 
-    private static Map<String, String> detail(JsonNode root) {
-        Map<String, String> detail = new LinkedHashMap<>();
-        for (String path : DETAIL_ALLOWLIST) {
-            JsonNode node = root;
-            for (String step : path.split("\\.")) {
-                node = node == null || !node.isObject() ? null : node.get(step);
-            }
-            if (node == null || node.isNull() || node.isContainerNode()) {
-                continue;
-            }
-            String value = node.isTextual() ? noNul(node.textValue(), path).strip() : node.asText();
-            if (!value.isEmpty()) {
-                detail.put(path, value);
-            }
+    /** {@code value} unless it is longer than its column allows. */
+    private static String limited(String value, int maxLength, String path) {
+        if (value != null && value.length() > maxLength) {
+            throw new DecodeException(path + " is longer than " + maxLength + " characters");
         }
-        return detail;
+        return value;
+    }
+
+    private static Boolean bool(JsonNode parent, String path) {
+        JsonNode node = parent == null ? null : parent.get(lastStep(path));
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isBoolean()) {
+            throw new DecodeException(path + " must be true or false");
+        }
+        return node.booleanValue();
+    }
+
+    /**
+     * A wallet id such as {@code references.paymentId}. The wire sends it as a string ("" when
+     * there is none); a whole number is accepted too.
+     */
+    private static Long id(JsonNode parent, String path) {
+        JsonNode node = parent == null ? null : parent.get(lastStep(path));
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isIntegralNumber() && node.canConvertToLong()) {
+            return node.longValue();
+        }
+        String text = optionalText(parent, path); // rejects any other non-string
+        if (text == null) {
+            return null;
+        }
+        if (text.length() > 19 || !text.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            throw new DecodeException(path + " must be a whole number");
+        }
+        try {
+            return Long.parseLong(text);
+        } catch (NumberFormatException e) {
+            throw new DecodeException(path + " must be a whole number");
+        }
     }
 
     private static String lastStep(String path) {
