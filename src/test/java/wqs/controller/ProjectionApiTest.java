@@ -41,7 +41,7 @@ class ProjectionApiTest extends IntegrationTest {
     // --- level 0 ---
 
     @Test
-    void level_0_lists_visible_rows_newest_first() throws Exception {
+    void level0ListsVisibleRowsNewestFirst() throws Exception {
         String older = store(row("TT_TRANSFER_OUT", "-12", "2026-10-02T10:00:00Z", null, null));
         String newer = store(row("TT_BUY", "-2", "2026-10-03T10:00:00Z", null, null));
         store(row("PRIZE", "0", "2026-10-04T10:00:00Z", null, null)); // zero amount: stored, never shown
@@ -59,7 +59,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void level_0_pages_with_a_plain_count() throws Exception {
+    void level0PagesWithAPlainCount() throws Exception {
         for (int day = 1; day <= 5; day++) {
             store(row("TT_BUY", "-1", "2026-10-0" + day + "T10:00:00Z", null, null));
         }
@@ -72,7 +72,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void level_0_range_is_from_inclusive_to_exclusive() throws Exception {
+    void level0RangeIsFromInclusiveToExclusive() throws Exception {
         String atFrom = store(row("TT_BUY", "-1", "2026-10-01T00:00:00Z", null, null));
         store(row("TT_BUY", "-1", "2026-11-01T00:00:00Z", null, null));
 
@@ -80,7 +80,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void level_0_filters_by_product_type_and_transaction_type() throws Exception {
+    void level0FiltersByProductTypeAndTransactionType() throws Exception {
         String instantsBuy = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null).productType("instants"));
         store(row("TT_BUY", "-1", "2026-10-03T10:00:00Z", null, null).productType("lotto"));
         store(row("PRIZE", "3", "2026-10-04T10:00:00Z", null, null).productType("instants"));
@@ -91,7 +91,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void web_shows_only_transactions_and_claimable_prizes_and_cc_shows_every_source() throws Exception {
+    void webShowsOnlyTransactionsAndClaimablePrizesAndCcShowsEverySource() throws Exception {
         String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         String payment = store(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null).source(Source.PAYMENT));
 
@@ -100,7 +100,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void another_owner_with_the_same_number_is_never_shown() throws Exception {
+    void anotherOwnerWithTheSameNumberIsNeverShown() throws Exception {
         store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null).owner("2-" + number));
 
         assertThat(cc(RANGE).get("totalRowCount").asLong()).isZero();
@@ -108,7 +108,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void cancelled_rows_are_left_out_on_request() throws Exception {
+    void cancelledRowsAreLeftOutOnRequest() throws Exception {
         String kept = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         String cancelled = store(row("TT_BUY", "-1", "2026-10-03T10:00:00Z", null, null));
         jdbcClient.sql("update \"wqPrjTransactions\" set \"cancelled\" = true where \"sourceId\" = :id").param("id", cancelled).update();
@@ -120,7 +120,7 @@ class ProjectionApiTest extends IntegrationTest {
     // --- levels 1 and 2 ---
 
     @Test
-    void level_1_merges_sessions_with_rows_that_have_none() throws Exception {
+    void level1MergesSessionsWithRowsThatHaveNone() throws Exception {
         String batch = "GS-" + UUID.randomUUID();
         String transfer = store(row("TT_TRANSFER_OUT", "-12", "2026-10-29T11:22:04Z", null, null));
         String bet = store(row("TT_BUY", "-2", "2026-10-26T11:36:17Z", batch, "P1"));
@@ -145,7 +145,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void web_level_1_never_lists_a_payment() throws Exception {
+    void webLevel1NeverListsAPayment() throws Exception {
         String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         store(row("PT_BUY", "-5", "2026-10-03T10:00:00Z", null, null).source(Source.PAYMENT));
 
@@ -156,7 +156,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void level_1_pages_count_top_level_entries() throws Exception {
+    void level1PagesCountTopLevelEntries() throws Exception {
         for (int day = 1; day <= 3; day++) {
             String batch = "GS-" + UUID.randomUUID();
             store(row("TT_BUY", "-1", "2026-10-0" + day + "T10:00:00Z", batch, "P1"));
@@ -172,7 +172,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void level_2_nests_plays_under_their_session() throws Exception {
+    void level2NestsPlaysUnderTheirSession() throws Exception {
         String batch = "GS-" + UUID.randomUUID();
         String bet1 = store(row("TT_BUY", "-2", "2026-10-26T11:36:17Z", batch, "P1"));
         String win1 = store(row("PRIZE", "5", "2026-10-26T11:36:23Z", batch, "P1"));
@@ -193,7 +193,7 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void level_1_type_filter_lists_only_sessions_with_a_matching_row() throws Exception {
+    void level1TypeFilterListsOnlySessionsWithAMatchingRow() throws Exception {
         String withPrize = "GS-" + UUID.randomUUID();
         store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", withPrize, "P1"));
         String prize = store(row("PRIZE", "4", "2026-10-02T10:01:00Z", withPrize, "P1"));
@@ -208,7 +208,7 @@ class ProjectionApiTest extends IntegrationTest {
     // --- validation and identity ---
 
     @Test
-    void invalid_parameters_are_400_naming_the_parameter() {
+    void invalidParametersAre400NamingTheParameter() {
         assertProblem(get("/cc/wallet-data/rest/v1/projection/" + owner + "?to=2026-11-01T00:00:00Z", null), 400, "from");
         assertProblem(get(ccPath() + RANGE + "&aggregationLevel=3", null), 400, "aggregationLevel");
         assertProblem(get(ccPath() + RANGE + "&pageSize=1001", null), 400, "pageSize");
@@ -221,14 +221,14 @@ class ProjectionApiTest extends IntegrationTest {
     }
 
     @Test
-    void the_owner_id_in_the_path_is_matched_in_its_canonical_spelling() throws Exception {
+    void theOwnerIdInThePathIsMatchedInItsCanonicalSpelling() throws Exception {
         String bet = store(row("TT_BUY", "-1", "2026-10-02T10:00:00Z", null, null));
         assertThat(txIds(ok(get("/cc/wallet-data/rest/v1/projection/01-" + number + "?" + RANGE, null)).get("data")))
                 .containsExactly(bet);
     }
 
     @Test
-    void web_without_an_owner_is_401() {
+    void webWithoutAnOwnerIs401() {
         ResponseEntity<String> response = get("/web/wallet-data/rest/v1/projection?" + RANGE, null);
         assertThat(response.getStatusCode().value()).isEqualTo(401);
     }

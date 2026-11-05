@@ -33,7 +33,7 @@ class ProjectionWriterTest extends IntegrationTest {
     private final String batch = "GS-" + UUID.randomUUID();
 
     @Test
-    void a_session_with_two_plays_adds_up() {
+    void aSessionWithTwoPlaysAddsUp() {
         ingest(row("TT_BUY", "-2", "2026-10-26T11:36:17Z", "P1"));
         ingest(row("PRIZE", "5", "2026-10-26T11:36:23Z", "P1"));
         ingest(row("TT_BUY", "-2", "2026-10-26T11:38:02Z", "P2"));
@@ -57,7 +57,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void a_zero_amount_row_is_stored_but_adds_nothing() {
+    void aZeroAmountRowIsStoredButAddsNothing() {
         ingest(row("PRIZE", "0", "2026-10-26T11:00:00Z", "P1"));
         assertThat(count("select count(*) from \"wqPrjSessions\" where \"ownerId\" = :owner")).isZero();
         assertThat(count("select count(*) from \"wqPrjTransactions\" where \"ownerId\" = :owner and \"zeroAmount\"")).isEqualTo(1);
@@ -70,7 +70,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void an_earlier_row_moves_the_start_and_takes_over_the_product() {
+    void anEarlierRowMovesTheStartAndTakesOverTheProduct() {
         ingest(row("TT_BUY", "-1", "2026-10-26T12:00:00Z", "P1").productId("LATE_GAME"));
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1").productId("FIRST_GAME"));
 
@@ -81,7 +81,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void a_duplicate_is_not_counted_twice() {
+    void aDuplicateIsNotCountedTwice() {
         TestTransactions.Builder bet = row("TT_BUY", "-2", "2026-10-26T11:00:00Z", "P1");
         assertThat(ingest(bet)).isEqualTo(IngestResult.STORED);
         assertThat(ingest(bet)).isEqualTo(IngestResult.ALREADY_STORED);
@@ -91,7 +91,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void a_neutral_or_unknown_type_counts_but_moves_no_money() {
+    void aNeutralOrUnknownTypeCountsButMovesNoMoney() {
         ingest(row("TT_BUY_UNDO", "2", "2026-10-26T11:00:00Z", "P1"));
         ingest(row("SOMETHING_NEW", "7", "2026-10-26T11:00:01Z", "P1"));
 
@@ -102,7 +102,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void a_row_without_a_play_counts_only_in_its_session() {
+    void aRowWithoutAPlayCountsOnlyInItsSession() {
         ingest(row("TT_BUY", "-3", "2026-10-26T11:00:00Z", null));
 
         assertThat(session()).containsEntry("txCount", 1).containsEntry("playCount", 0);
@@ -110,7 +110,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void the_same_batch_id_under_two_owners_is_two_sessions() {
+    void theSameBatchIdUnderTwoOwnersIsTwoSessions() {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1").owner("2-" + number));
 
@@ -119,7 +119,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void a_row_in_another_currency_is_rejected_and_leaves_nothing_behind() {
+    void aRowInAnotherCurrencyIsRejectedAndLeavesNothingBehind() {
         ingest(row("TT_BUY", "-1", "2026-10-26T11:00:00Z", "P1"));
         TestTransactions.Builder usd = row("TT_BUY", "-1", "2026-10-26T11:00:01Z", "P1").currency("USD");
 
@@ -131,7 +131,7 @@ class ProjectionWriterTest extends IntegrationTest {
     }
 
     @Test
-    void a_batch_id_on_a_source_that_cannot_carry_one_is_rejected() {
+    void aBatchIdOnASourceThatCannotCarryOneIsRejected() {
         TestTransactions.Builder payment = row("PT_BUY", "-1", "2026-10-26T11:00:00Z", "P1").source(Source.PAYMENT);
 
         assertThatThrownBy(() -> ingest(payment))

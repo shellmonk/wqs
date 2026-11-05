@@ -64,7 +64,7 @@ class StreamLeadershipTest extends StreamTestBase {
     }
 
     @Test
-    void a_second_replica_stands_by_while_the_leader_consumes() throws Exception {
+    void aSecondReplicaStandsByWhileTheLeaderConsumes() throws Exception {
         replicaConsumer.start();
         await().atMost(Duration.ofSeconds(10)).until(() -> replicaConsumer.state() == StreamConsumer.State.STANDBY);
 
@@ -80,7 +80,7 @@ class StreamLeadershipTest extends StreamTestBase {
     }
 
     @Test
-    void the_standby_takes_over_from_the_stored_offset_when_the_leader_stops() throws Exception {
+    void theStandbyTakesOverFromTheStoredOffsetWhenTheLeaderStops() throws Exception {
         replicaConsumer.start();
         await().atMost(Duration.ofSeconds(10)).until(() -> replicaConsumer.state() == StreamConsumer.State.STANDBY);
         byte[] poison = ("handover " + nextId()).getBytes(StandardCharsets.UTF_8);
@@ -99,7 +99,7 @@ class StreamLeadershipTest extends StreamTestBase {
     }
 
     @Test
-    void when_the_leaders_connection_dies_exactly_one_replica_consumes_again() throws Exception {
+    void whenTheLeadersConnectionDiesExactlyOneReplicaConsumesAgain() throws Exception {
         replicaConsumer.start();
         await().atMost(Duration.ofSeconds(10)).until(() -> replicaConsumer.state() == StreamConsumer.State.STANDBY);
 
@@ -118,7 +118,7 @@ class StreamLeadershipTest extends StreamTestBase {
     }
 
     @Test
-    void health_shows_the_consumer() {
+    void healthShowsTheConsumer() {
         String body = restTemplate.getForObject("/actuator/health", String.class);
         assertThat(body).contains("\"streamConsumer\":{\"status\":\"UP\"");
     }

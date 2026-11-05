@@ -16,7 +16,7 @@ class ClosedByDefaultTest {
     private final ApiAccessProperties defaults = new ApiAccessProperties(false, false);
 
     @Test
-    void web_ignores_the_player_header_by_default() {
+    void webIgnoresThePlayerHeaderByDefault() {
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.addHeader(HeaderOwnerIdResolver.HEADER, "1-1717");
         assertThatThrownBy(() -> new HeaderOwnerIdResolver(defaults).ownerId(request))
@@ -24,7 +24,7 @@ class ClosedByDefaultTest {
     }
 
     @Test
-    void cc_is_denied_by_default() {
+    void ccIsDeniedByDefault() {
         CcProjectionController controller = new CcProjectionController(null, defaults);
         assertThatThrownBy(() -> controller.projection("1717",
                 new ProjectionParameters(null, null, null, null, null, null, null, null)))

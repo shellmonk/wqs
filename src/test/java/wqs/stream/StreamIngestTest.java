@@ -24,7 +24,7 @@ class StreamIngestTest extends StreamTestBase {
     @Autowired MeterRegistry meterRegistry;
 
     @Test
-    void the_captured_messages_are_stored() throws Exception {
+    void theCapturedMessagesAreStored() throws Exception {
         String id1 = nextId(), id2 = nextId();
         publish(message("transfer-out.json", id1, "1-" + id1, "2026-10-29T11:22:04.465648Z"));
         publish(message("instants-prize.json", id2, "1-" + id2, "2026-10-26T11:36:23.049062Z"));
@@ -57,7 +57,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void a_redelivered_message_is_stored_once() throws Exception {
+    void aRedeliveredMessageIsStoredOnce() throws Exception {
         String id = nextId();
         byte[] body = message("transfer-out.json", id, "1-" + id, "2026-09-01T00:00:00Z");
         publish(body);
@@ -73,7 +73,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void the_same_number_under_two_owner_types_is_two_owners() throws Exception {
+    void theSameNumberUnderTwoOwnerTypesIsTwoOwners() throws Exception {
         String player = nextId(), retailer = nextId();
         publish(message("transfer-out.json", player, "1-777", "2026-09-02T00:00:00Z"));
         publish(message("transfer-out.json", retailer, "2-777", "2026-09-02T00:00:00Z"));
@@ -85,7 +85,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void an_unreadable_message_is_dead_lettered_by_hash_and_the_stream_moves_on() throws Exception {
+    void anUnreadableMessageIsDeadLetteredByHashAndTheStreamMovesOn() throws Exception {
         byte[] poison = ("{\"id\": \"" + nextId() + "\", \"toDescription\": \"WITHDRAWAL*5208\"").getBytes(StandardCharsets.UTF_8);
         String sha = Hashes.sha256(poison);
         publish(poison);
@@ -102,7 +102,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void a_nul_character_cannot_stall_the_stream() throws Exception {
+    void aNulCharacterCannotStallTheStream() throws Exception {
         String id = nextId();
         ObjectNode node = (ObjectNode) objectMapper.readTree(message("transfer-out.json", id, "1-" + id, "2026-09-06T00:00:00Z"));
         node.put("description", "A\u0000B");
@@ -117,7 +117,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void a_garbage_timestamp_is_dead_lettered_and_creates_no_partition() throws Exception {
+    void aGarbageTimestampIsDeadLetteredAndCreatesNoPartition() throws Exception {
         String id = nextId();
         publish(message("transfer-out.json", id, "1-" + id, "2199-01-01T00:00:00Z"));
         String after = nextId();
@@ -133,7 +133,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void a_rejected_row_is_dead_lettered_with_its_reason_and_the_stream_moves_on() throws Exception {
+    void aRejectedRowIsDeadLetteredWithItsReasonAndTheStreamMovesOn() throws Exception {
         String first = nextId(), usd = nextId(), after = nextId();
         publish(message("instants-prize.json", first, "1-" + first, "2026-09-07T00:00:00Z", "PRIZE", 5, "EUR"));
         publish(message("instants-prize.json", usd, "1-" + first, "2026-09-07T00:00:01Z", "PRIZE", 5, "USD"));
@@ -148,7 +148,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void messages_published_together_are_committed_in_batches() throws Exception {
+    void messagesPublishedTogetherAreCommittedInBatches() throws Exception {
         long batchesBefore = batches();
         List<String> ids = new java.util.ArrayList<>();
         for (int i = 0; i < 200; i++) {
@@ -164,7 +164,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void a_rejected_message_inside_a_batch_is_dead_lettered_once_and_the_rest_stored_once() throws Exception {
+    void aRejectedMessageInsideABatchIsDeadLetteredOnceAndTheRestStoredOnce() throws Exception {
         String owner = nextId();
         send(message("instants-prize.json", nextId(), "1-" + owner, "2026-09-09T00:00:00Z", "PRIZE", 5, "EUR"));
         List<String> ids = new java.util.ArrayList<>();
@@ -189,7 +189,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void a_batch_spanning_months_without_partitions_is_stored_and_reads_keep_working() throws Exception {
+    void aBatchSpanningMonthsWithoutPartitionsIsStoredAndReadsKeepWorking() throws Exception {
         // 2023 has no partitions yet: one batch reaching a new month must not wait for its own lock.
         List<String> ids = new java.util.ArrayList<>();
         for (int i = 0; i < 30; i++) {
@@ -205,7 +205,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void each_month_gets_its_own_partition() throws Exception {
+    void eachMonthGetsItsOwnPartition() throws Exception {
         String id = nextId();
         publish(message("transfer-out.json", id, "1-" + id, "2025-03-31T23:59:59.999999Z"));
 
@@ -217,7 +217,7 @@ class StreamIngestTest extends StreamTestBase {
     }
 
     @Test
-    void after_a_restart_consumption_resumes_after_the_stored_offset() throws Exception {
+    void afterARestartConsumptionResumesAfterTheStoredOffset() throws Exception {
         byte[] poison = ("not json " + nextId()).getBytes(StandardCharsets.UTF_8);
         String sha = Hashes.sha256(poison);
         publish(poison);

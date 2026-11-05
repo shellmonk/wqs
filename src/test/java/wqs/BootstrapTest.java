@@ -33,41 +33,41 @@ class BootstrapTest extends IntegrationTest {
     @Autowired Environment streamEnvironment;
 
     @Test
-    void health_is_up() {
+    void healthIsUp() {
         String body = restTemplate.getForObject("/actuator/health", String.class);
         assertThat(body).contains("\"status\":\"UP\"");
     }
 
     @Test
-    void flyway_applied_the_baseline() {
+    void flywayAppliedTheBaseline() {
         List<String> applied = jdbcClient.sql("select version from flyway_schema_history where success")
                 .query(String.class).list();
         assertThat(applied).containsExactly("1");
     }
 
     @Test
-    void quartz_runs_clustered_on_its_jdbc_store() throws Exception {
+    void quartzRunsClusteredOnItsJdbcStore() throws Exception {
         assertThat(scheduler.isStarted()).isTrue();
         assertThat(scheduler.getMetaData().isJobStoreClustered()).isTrue();
         assertThat(scheduler.getMetaData().isJobStoreSupportsPersistence()).isTrue();
     }
 
     @Test
-    void writer_pool_can_write() {
+    void writerPoolCanWrite() {
         jdbcClient.sql("create table if not exists \"bootstrapProbe\" (\"id\" int)").update();
         jdbcClient.sql("insert into \"bootstrapProbe\" values (:id)").param("id", 1).update();
         jdbcClient.sql("drop table \"bootstrapProbe\"").update();
     }
 
     @Test
-    void a_read_write_transaction_runs_on_the_writer_pool() {
+    void aReadWriteTransactionRunsOnTheWriterPool() {
         TransactionTemplate tx = new TransactionTemplate(transactionManager);
         String name = tx.execute(status -> applicationName());
         assertThat(name).isEqualTo("wqs-writer");
     }
 
     @Test
-    void a_read_only_transaction_runs_on_the_reader_pool_in_repeatable_read() {
+    void aReadOnlyTransactionRunsOnTheReaderPoolInRepeatableRead() {
         TransactionTemplate tx = readOnlyRepeatableRead();
         List<String> settings = tx.execute(status -> List.of(
                 applicationName(),
@@ -77,7 +77,7 @@ class BootstrapTest extends IntegrationTest {
     }
 
     @Test
-    void the_reader_pool_refuses_writes() {
+    void theReaderPoolRefusesWrites() {
         TransactionTemplate tx = readOnlyRepeatableRead();
         assertThatThrownBy(() -> tx.executeWithoutResult(status ->
                 jdbcClient.sql("create table \"readerProbe\" (\"id\" int)").update()))
@@ -97,7 +97,7 @@ class BootstrapTest extends IntegrationTest {
     }
 
     @Test
-    void a_published_stream_message_reaches_a_consumer() throws InterruptedException {
+    void aPublishedStreamMessageReachesAConsumer() throws InterruptedException {
         String stream = "bootstrap-probe";
         streamEnvironment.streamCreator().stream(stream).create();
         // send() is asynchronous: wait for the broker's confirm before closing the producer.

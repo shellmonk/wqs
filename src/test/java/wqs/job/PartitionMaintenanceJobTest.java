@@ -19,7 +19,7 @@ class PartitionMaintenanceJobTest extends IntegrationTest {
     @Autowired JdbcClient jdbcClient;
 
     @Test
-    void the_current_and_next_three_months_are_created_ahead() throws Exception {
+    void theCurrentAndNextThreeMonthsAreCreatedAhead() throws Exception {
         scheduler.triggerJob(JobKey.jobKey("partitionMaintenance"));
         YearMonth now = YearMonth.now(ZoneOffset.UTC);
         await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
@@ -30,7 +30,7 @@ class PartitionMaintenanceJobTest extends IntegrationTest {
     }
 
     @Test
-    void the_job_is_scheduled_hourly_and_survives_in_the_clustered_store() throws Exception {
+    void theJobIsScheduledHourlyAndSurvivesInTheClusteredStore() throws Exception {
         assertThat(scheduler.checkExists(JobKey.jobKey("partitionMaintenance"))).isTrue();
         assertThat(jdbcClient.sql("select count(*) from quartz.qrtz_triggers where trigger_name = 'partitionMaintenance'")
                 .query(Long.class).single()).isEqualTo(1);
