@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.enums.ParameterIn;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springdoc.core.annotations.ParameterObject;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -34,7 +35,9 @@ public class WebProjectionController {
     @Parameter(name = "X-Owner-Id", in = ParameterIn.HEADER, description = "PLACEHOLDER until token auth: the owner's id, \"{type}-{id}\".",
             example = "1-1717")
     @GetMapping
-    public ProjectionResponse<?> projection(HttpServletRequest request, @ParameterObject ProjectionParameters parameters) {
-        return projectionService.page(ReadPolicy.WEB, ownerIdResolver.ownerId(request), parameters.toRequest());
+    public ResponseEntity<ProjectionResponse<?>> projection(HttpServletRequest request,
+                                                            @ParameterObject ProjectionParameters parameters) {
+        return ResponseEntity.ok(
+                projectionService.page(ReadPolicy.WEB, ownerIdResolver.ownerId(request), parameters.toRequest()));
     }
 }

@@ -4,6 +4,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springdoc.core.annotations.ParameterObject;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -36,7 +37,7 @@ public class CcProjectionController {
     @Operation(summary = "An owner's projection, every source",
             description = "Transactions, claimable prizes, payments, manual adjustments and limits. 403 while wqs.api.cc-enabled is off.")
     @GetMapping("/{ownerId}")
-    public ProjectionResponse<?> projection(
+    public ResponseEntity<ProjectionResponse<?>> projection(
             @Parameter(description = "The owner's id, \"{type}-{id}\".", example = "1-1717") @PathVariable String ownerId,
             @ParameterObject ProjectionParameters parameters) {
         if (!apiAccessProperties.ccEnabled()) {
@@ -44,6 +45,6 @@ public class CcProjectionController {
         }
         String owner = OwnerIds.canonical(ownerId)
                 .orElseThrow(() -> new InvalidParameterException("ownerId", "must be \"{type}-{id}\""));
-        return projectionService.page(ReadPolicy.CC, owner, parameters.toRequest());
+        return ResponseEntity.ok(projectionService.page(ReadPolicy.CC, owner, parameters.toRequest()));
     }
 }
